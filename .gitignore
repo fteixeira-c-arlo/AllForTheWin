@@ -1,0 +1,25 @@
+# Bootstrap / launcher artifacts
+.python/
+.venv/
+get-pip.py
+python-embed.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Logs and local data
+arlo_logs/
+*.log
+.arlo_camera_config.json
+
+# Local FW server (user content)
+local_fw_server/

@@ -1,0 +1,32 @@
+{
+  "source": "Arlo Confluence: Arlo E3 Wired Useful Commands (refresh via arlochat MCP confluence_search). Many CLI commands are now run via arlocmd.",
+  "url": "https://arlo.atlassian.net/wiki/spaces/AFS (search: E3 Wired Useful Commands)",
+  "models": ["VMC2070", "VMC3070", "VMC2083", "VMC3083"],
+  "commands": [
+    {"name": "build_info", "description": "Get build info of device (AGW version, serial, HW, etc.)", "syntax": "build_info", "category": "mfg", "shell": "cli mfg build_info"},
+    {"name": "device_info", "description": "Get device information (arlocmd)", "syntax": "device_info", "category": "arlocmd", "shell": "arlocmd device_info"},
+    {"name": "bs_info", "description": "Show basestation information", "syntax": "bs_info", "category": "arlocmd", "shell": "arlocmd bs_info"},
+    {"name": "log", "description": "Set arlod log level (trace|debug|info|notice|warn|error|crit|alert|emerg)", "syntax": "log <level>", "category": "arlocmd", "shell": "arlocmd log"},
+    {"name": "factory_reset", "description": "Factory reset device", "syntax": "factory_reset", "category": "arlocmd", "shell": "arlocmd factory_reset"},
+    {"name": "migrate", "description": "Migrate to stage (dev|qa|prod|ftrial)", "syntax": "migrate <stage>", "category": "arlocmd", "shell": "arlocmd migrate"},
+    {"name": "update_url", "description": "Get or set update URL for FOTA (no args = show current; with URL = set)", "syntax": "update_url [url]", "category": "arlocmd", "shell": "arlocmd update_url"},
+    {"name": "fw_setup", "description": "Automated FW setup: Artifactory download, local server, set camera update URL", "syntax": "fw_setup", "category": "firmware", "shell": ""},
+    {"name": "update_refresh", "description": "Refresh UpdateRule (force=0)", "syntax": "update_refresh", "category": "arlocmd", "shell": "arlocmd update_refresh"},
+    {"name": "update_refresh_force", "description": "Refresh UpdateRule (force=1)", "syntax": "update_refresh_force", "category": "arlocmd", "shell": "arlocmd update_refresh 1"},
+    {"name": "manual_upgrade", "description": "Start manual firmware upgrade", "syntax": "manual_upgrade <version> [progress]", "category": "arlocmd", "shell": "arlocmd manual_upgrade"},
+    {"name": "dump_threads", "description": "Show arlod active threads", "syntax": "dump_threads", "category": "arlocmd", "shell": "arlocmd dump_threads"},
+    {"name": "reboot", "description": "Reboot the device", "syntax": "reboot", "category": "arlocmd", "shell": "arlocmd reboot"},
+    {"name": "caliget", "description": "Get MFG field (sn|mac|wifi_country_code|model_num|hw_rev|dsc4_cert_chksum|partner_id)", "syntax": "caliget <field>", "category": "cali", "shell": "cli caliget"},
+    {"name": "caliset", "description": "Set MFG field (sn|mac|wifi_country_code|model_num|hw_rev|dsc4|partner_id)", "syntax": "caliset <field> [value]", "category": "cali", "shell": "cli caliset"},
+    {"name": "log_level", "description": "Set or get arlod log level (fatel|error|warn|info|debug|trace)", "syntax": "log_level set|get [level]", "category": "log", "shell": "cli arlod log"},
+    {"name": "oos", "description": "OOS simulation: status | set high | set low", "syntax": "oos <status|set high|set low>", "category": "arlod", "shell": "cli arlod oos"},
+    {"name": "battery", "description": "Get battery/charger status and values", "syntax": "battery get <percent|tech|charging state|temperature|...>", "category": "arlod", "shell": "cli arlod battery"},
+    {"name": "general", "description": "General APIs: claimed status, devif version, reboot, debug mode, etc.", "syntax": "general <subcommand> [args]", "category": "arlod", "shell": "cli arlod general"},
+    {"name": "camera", "description": "Camera settings: motion zones, resolution, SEI, privacy zones, bitrate, etc.", "syntax": "camera set|get <option> [args]", "category": "arlod", "shell": "cli arlod camera"},
+    {"name": "ota", "description": "OTA test: erase|read|bootstrap|http|stop|aging start|stop", "syntax": "ota <subcommand> [args]", "category": "ota", "shell": "cli ota"},
+    {"name": "ptz", "description": "PTZ control (PTZ models only): open|close|move|stop|status|track", "syntax": "ptz <subcommand> [args]", "category": "ptz", "shell": "cli ptz"},
+    {"name": "sv_save_frame", "description": "Save Smart Vision frame (enable/disable)", "syntax": "sv_save_frame [enable|disable]", "category": "sv", "shell": "cli sv save frame"},
+    {"name": "tar_logs", "description": "Create log archive on camera at /tmp/allsystem.logs.tar (BusyBox tar, no gzip)", "syntax": "tar_logs", "category": "logs", "shell": "tar -cvf /tmp/allsystem.logs.tar /userdata/logs /tmp/logs/system-log_V1_0"},
+    {"name": "pull_logs", "description": "Download log archive from camera to PC (run tar_logs first)", "syntax": "pull_logs [local_path]", "category": "logs", "shell": ""}
+  ]
+}
