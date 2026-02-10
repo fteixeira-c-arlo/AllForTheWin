@@ -45,6 +45,7 @@ ASCII_HUMMINGBIRD = """
 _SYSTEM_CMD_NAMES = frozenset({
     "help", "status", "stop_server", "server_status", "update_url", "use_local_fw",
     "config_show", "config_update", "config_delete", "tail_logs", "tail_logs_stop",
+    "parse_logs", "parse_logs_stop",
     "disconnect", "exit", "back",
 })
 

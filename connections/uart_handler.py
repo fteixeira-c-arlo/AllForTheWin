@@ -3,7 +3,7 @@ import re
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 from utils.logger import get_logger
 
@@ -287,13 +287,16 @@ class UARTHandler:
             return None
         return f"{self._port}@{self._baud}"
 
-    def start_tail_logs_to_file(self, log_path: str) -> tuple[bool, str]:
-        """Start streaming tail -f over UART to a file. Returns (success, error_message). Use stop_tail_logs() to stop and save."""
+    def start_tail_logs_to_file(
+        self, log_path: str, line_callback: Callable[[str], None] | None = None
+    ) -> tuple[bool, str]:
+        """Start streaming tail -f over UART to a file. Optional line_callback(line) for each line. Use stop_tail_logs() to stop."""
         if not _SERIAL_AVAILABLE or not self._connected or not self._serial:
             return False, "Not connected."
         try:
             stop_event = threading.Event()
             log_file = open(log_path, "ab")
+            line_buf = bytearray()
 
             def reader() -> None:
                 try:
@@ -305,6 +308,24 @@ class UARTHandler:
                             if data:
                                 log_file.write(data)
                                 log_file.flush()
+                                if line_callback is not None:
+                                    line_buf.extend(data)
+                                    while b"\n" in line_buf or b"\r" in line_buf:
+                                        idx = line_buf.find(b"\n")
+                                        if idx < 0:
+                                            idx = line_buf.find(b"\r")
+                                        if idx < 0:
+                                            break
+                                        line_bytes = bytes(line_buf[: idx + 1])
+                                        line_buf[:] = line_buf[idx + 1 :]
+                                        try:
+                                            text = line_bytes.decode(
+                                                "utf-8", errors="replace"
+                                            ).rstrip("\r\n")
+                                            if text:
+                                                line_callback(text)
+                                        except Exception:
+                                            pass
                         else:
                             time.sleep(0.05)
                 except Exception:

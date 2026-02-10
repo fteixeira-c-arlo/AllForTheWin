@@ -1,6 +1,7 @@
 """SSH connection handler using paramiko."""
 import subprocess
-from typing import Any
+import threading
+from typing import Any, Callable
 
 import paramiko
 from paramiko import SSHException
@@ -133,16 +134,51 @@ class SSHHandler:
             f"{self._username}@{self._host} \"sh -c 'tail -f /tmp/logs/system-log_V1_0'\""
         )
 
-    def start_tail_logs_to_file(self, log_path: str) -> tuple[bool, str]:
-        """Start streaming tail -f to a file. Returns (success, error_message). Use stop_tail_logs() to stop and save."""
+    def start_tail_logs_to_file(
+        self, log_path: str, line_callback: Callable[[str], None] | None = None
+    ) -> tuple[bool, str]:
+        """Start streaming tail -f to a file. Optional line_callback(line) for each line. Use stop_tail_logs() to stop."""
         cmd = self.get_tail_logs_command()
         if not cmd:
             return False, "Not connected."
         try:
             f = open(log_path, "ab")
-            proc = subprocess.Popen(cmd, shell=True, stdout=f, stderr=subprocess.DEVNULL)
+            if line_callback is None:
+                proc = subprocess.Popen(cmd, shell=True, stdout=f, stderr=subprocess.DEVNULL)
+                setattr(self, "_tail_process", proc)
+                setattr(self, "_tail_file", f)
+                setattr(self, "_tail_reader_thread", None)
+                return True, ""
+
+            proc = subprocess.Popen(
+                cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            )
+
+            def reader() -> None:
+                try:
+                    assert proc.stdout is not None
+                    for line_bytes in iter(proc.stdout.readline, b""):
+                        if not line_bytes:
+                            break
+                        f.write(line_bytes)
+                        f.flush()
+                        try:
+                            text = line_bytes.decode("utf-8", errors="replace").rstrip("\r\n")
+                            if text:
+                                line_callback(text)
+                        except Exception:
+                            pass
+                finally:
+                    try:
+                        f.close()
+                    except Exception:
+                        pass
+
+            thread = threading.Thread(target=reader, daemon=True)
+            thread.start()
             setattr(self, "_tail_process", proc)
-            setattr(self, "_tail_file", f)
+            setattr(self, "_tail_file", None)
+            setattr(self, "_tail_reader_thread", thread)
             return True, ""
         except Exception as e:
             return False, str(e)
@@ -151,6 +187,7 @@ class SSHHandler:
         """Stop tail stream and close the log file (logs are saved to the file)."""
         proc = getattr(self, "_tail_process", None)
         f = getattr(self, "_tail_file", None)
+        thread = getattr(self, "_tail_reader_thread", None)
         if proc is not None:
             try:
                 proc.terminate()
@@ -160,6 +197,9 @@ class SSHHandler:
             except Exception:
                 pass
             setattr(self, "_tail_process", None)
+        if thread is not None:
+            thread.join(timeout=3.0)
+            setattr(self, "_tail_reader_thread", None)
         if f is not None:
             try:
                 f.close()

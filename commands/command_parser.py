@@ -3,10 +3,12 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from typing import Any, Callable
 
 from commands.command_definitions import load_commands_from_confluence
+from commands.log_parser import parse_line, write_html
 from ui.menus import show_commands_table, show_connection_status, show_error
 
 # Default remote path for log archive on camera (BusyBox tar creates uncompressed .tar)
@@ -25,14 +27,21 @@ SYSTEM_COMMANDS = [
     {"name": "config_delete", "description": "Delete saved Artifactory credentials"},
     {"name": "tail_logs", "description": "Stream system log to a file and open in editor (tail_logs_stop to stop and save)"},
     {"name": "tail_logs_stop", "description": "Stop log streaming; logs are saved to the file"},
+    {"name": "parse_logs", "description": "Stream and parse logs; use parse_logs_stop to stop and generate HTML report"},
+    {"name": "parse_logs_stop", "description": "Stop log parsing and save HTML report"},
     {"name": "disconnect", "description": "Close connection and exit"},
     {"name": "exit", "description": "Close connection and exit"},
     {"name": "back", "description": "Return to model selection"},
 ]
 
 
-# Path of the log file when tail_logs is running (so we can say "saved to ..." on stop)
+# Path of the log file when tail_logs or parse_logs is running
 _tail_log_path: str | None = None
+# True when current tail session is parse_logs (so stop generates HTML)
+_parse_logs_mode: bool = False
+# Accumulated parsed entries for parse_logs_stop (append from reader thread)
+_parsed_entries: list[dict] = []
+_parsed_entries_lock: threading.Lock = threading.Lock()
 
 
 def _spawn_tail_viewer_terminal(log_path: str) -> None:
@@ -99,7 +108,7 @@ def parse_and_execute(
     message: optional output to show (e.g. success text or error).
     "disconnected" means the camera was disconnected from the PC; caller should return to device list.
     """
-    global _tail_log_path
+    global _tail_log_path, _parse_logs_mode, _parsed_entries
     line = line.strip()
     if not line:
         return "continue", None
@@ -182,7 +191,9 @@ def parse_and_execute(
             show_error("Connect to the camera first (ADB, SSH, or UART) to use tail_logs.")
             return "continue", None
         if _tail_log_path:
-            show_error("A tail_logs session is already running. Use tail_logs_stop first.")
+            show_error(
+                "A tail or parse_logs session is already running. Use tail_logs_stop or parse_logs_stop first."
+            )
             return "continue", None
         try:
             log_dir = os.path.join(os.getcwd(), "arlo_logs")
@@ -198,6 +209,7 @@ def parse_and_execute(
                 show_error(err or "Failed to start tail_logs.")
                 return "continue", None
             _tail_log_path = log_path
+            _parse_logs_mode = False
             _spawn_tail_viewer_terminal(log_path)
             return "continue", (
                 f"Log is being written to [bold]{log_path}[/]. "
@@ -216,9 +228,77 @@ def parse_and_execute(
             stop_tail()
         path = _tail_log_path
         _tail_log_path = None
+        _parse_logs_mode = False
         if path:
             return "continue", f"Stopped. Logs saved to [bold]{path}[/]"
         return "continue", "No tail_logs session was running."
+
+    if cmd == "parse_logs":
+        start_tail = getattr(connection_handle, "start_tail_logs_to_file", None) if connection_handle else None
+        if not start_tail or not callable(start_tail):
+            show_error("Connect to the camera first (ADB, SSH, or UART) to use parse_logs.")
+            return "continue", None
+        if _tail_log_path:
+            show_error(
+                "A tail or parse_logs session is already running. Use tail_logs_stop or parse_logs_stop first."
+            )
+            return "continue", None
+        try:
+            log_dir = os.path.join(os.getcwd(), "arlo_logs")
+            os.makedirs(log_dir, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_path = os.path.join(log_dir, f"system_log_parse_{stamp}.log")
+            _parsed_entries = []
+
+            def on_line(line: str) -> None:
+                with _parsed_entries_lock:
+                    _parsed_entries.append(parse_line(line))
+
+            result = start_tail(log_path, line_callback=on_line)
+            if not isinstance(result, (tuple, list)) or len(result) != 2:
+                show_error("Failed to start parse_logs (unexpected response).")
+                return "continue", None
+            ok, err = result[0], result[1]
+            if not ok:
+                show_error(err or "Failed to start parse_logs.")
+                return "continue", None
+            _tail_log_path = log_path
+            _parse_logs_mode = True
+            return "continue", (
+                "Parsing logs. Use [bold]parse_logs_stop[/] to stop and generate HTML report."
+            )
+        except OSError as e:
+            show_error(str(e))
+            return "continue", None
+        except Exception as e:
+            show_error(f"parse_logs failed: {e}")
+            return "continue", None
+
+    if cmd == "parse_logs_stop":
+        if not _tail_log_path or not _parse_logs_mode:
+            return "continue", "No parse_logs session was running."
+        stop_tail = getattr(connection_handle, "stop_tail_logs", None) if connection_handle else None
+        if stop_tail and callable(stop_tail):
+            stop_tail()
+        report_path = ""
+        try:
+            log_dir = os.path.join(os.getcwd(), "arlo_logs")
+            os.makedirs(log_dir, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            report_path = os.path.join(log_dir, f"parsed_{stamp}.html")
+            with _parsed_entries_lock:
+                entries_snapshot = list(_parsed_entries)
+            write_html(entries_snapshot, report_path, title="Log parse report")
+        except Exception as e:
+            show_error(f"Failed to write HTML report: {e}")
+        finally:
+            _tail_log_path = None
+            _parse_logs_mode = False
+            with _parsed_entries_lock:
+                _parsed_entries.clear()
+        if report_path:
+            return "continue", f"Stopped. Report saved to [bold]{report_path}[/]"
+        return "continue", "Stopped. (Report could not be saved.)"
 
     # update_url [url]: set or show camera FOTA update URL (arlocmd update_url)
     if cmd == "update_url":
