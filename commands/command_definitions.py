@@ -1,13 +1,15 @@
 """
 Command definitions for camera control.
 
-E3 Wired commands are loaded from e3_wired_commands.json, populated from
-Arlo Confluence via arlochat MCP (confluence_search). Source page:
-"Arlo E3 Wired - How to use CLI on Console" (AFS space).
+E3 Wired commands (including kvcmd) are loaded from e3_wired_commands.json,
+populated from Arlo Confluence via arlochat MCP (confluence_search). Source:
+"Arlo E3 Wired - How to use CLI on Console" and kvcmd docs (AFS space).
 
-To refresh E3 commands from Confluence: use arlochat MCP in Cursor with
+To refresh E3 commands (including kvcmd) from Confluence: use arlochat MCP
+in Cursor with:
   confluence_search(cql='title ~ "E3 Wired" AND title ~ "CLI"')
-then update e3_wired_commands.json with any new commands.
+  confluence_search(cql='text ~ "kvcmd"')
+then update e3_wired_commands.json with any new or changed commands.
 """
 
 import json

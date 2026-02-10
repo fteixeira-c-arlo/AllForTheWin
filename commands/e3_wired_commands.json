@@ -1,7 +1,7 @@
 {
-  "source": "Arlo Confluence: Arlo E3 Wired Useful Commands (refresh via arlochat MCP confluence_search). Many CLI commands are now run via arlocmd.",
-  "url": "https://arlo.atlassian.net/wiki/spaces/AFS (search: E3 Wired Useful Commands)",
-  "models": ["VMC2070", "VMC3070", "VMC2083", "VMC3083"],
+  "source": "Arlo Confluence: Arlo E3 Wired Useful Commands + kvcmd (refresh via arlochat MCP confluence_search). Many CLI commands run via arlocmd; kvcmd for key-value config.",
+  "url": "https://arlo.atlassian.net/wiki/spaces/AFS (search: E3 Wired Useful Commands, kvcmd)",
+  "models": ["VMC2070", "VMC3070", "VMC2083", "VMC3083", "VMC2081", "VMC3081", "VMC2073", "VMC3073"],
   "commands": [
     {"name": "build_info", "description": "Get build info of device (AGW version, serial, HW, etc.)", "syntax": "build_info", "category": "mfg", "shell": "cli mfg build_info"},
     {"name": "device_info", "description": "Get device information (arlocmd)", "syntax": "device_info", "category": "arlocmd", "shell": "arlocmd device_info"},
@@ -18,6 +18,11 @@
     {"name": "reboot", "description": "Reboot the device", "syntax": "reboot", "category": "arlocmd", "shell": "arlocmd reboot"},
     {"name": "caliget", "description": "Get MFG field (sn|mac|wifi_country_code|model_num|hw_rev|dsc4_cert_chksum|partner_id)", "syntax": "caliget <field>", "category": "cali", "shell": "cli caliget"},
     {"name": "caliset", "description": "Set MFG field (sn|mac|wifi_country_code|model_num|hw_rev|dsc4|partner_id)", "syntax": "caliset <field> [value]", "category": "cali", "shell": "cli caliset"},
+    {"name": "kvcmd", "description": "Key-value config (get|set|list|delete). See Arlo Confluence E3 Wired for full kvcmd subcommands (refresh via arlochat).", "syntax": "kvcmd <get|set|list|delete> [key] [value]", "category": "kvcmd", "shell": "kvcmd"},
+    {"name": "kvcmd_get", "description": "Get value for key (kvcmd get <key>)", "syntax": "kvcmd_get <key>", "category": "kvcmd", "shell": "kvcmd get"},
+    {"name": "kvcmd_set", "description": "Set key to value (kvcmd set <key> <value>)", "syntax": "kvcmd_set <key> <value>", "category": "kvcmd", "shell": "kvcmd set"},
+    {"name": "kvcmd_list", "description": "List keys or dump key-value store (kvcmd list [prefix])", "syntax": "kvcmd_list [prefix]", "category": "kvcmd", "shell": "kvcmd list"},
+    {"name": "kvcmd_delete", "description": "Delete key (kvcmd delete <key>)", "syntax": "kvcmd_delete <key>", "category": "kvcmd", "shell": "kvcmd delete"},
     {"name": "log_level", "description": "Set or get arlod log level (fatel|error|warn|info|debug|trace)", "syntax": "log_level set|get [level]", "category": "log", "shell": "cli arlod log"},
     {"name": "oos", "description": "OOS simulation: status | set high | set low", "syntax": "oos <status|set high|set low>", "category": "arlod", "shell": "cli arlod oos"},
     {"name": "battery", "description": "Get battery/charger status and values", "syntax": "battery get <percent|tech|charging state|temperature|...>", "category": "arlod", "shell": "cli arlod battery"},

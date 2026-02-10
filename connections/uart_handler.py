@@ -67,11 +67,28 @@ def list_uart_ports() -> list[tuple[str, str]]:
         return []
 
 
-# Camera console password when UART prompts for it (e.g. before running some commands)
+# Camera console credentials when UART prompts (login root, password arlo)
+UART_CONSOLE_LOGIN = "root"
 UART_CONSOLE_PASSWORD = "arlo"
 
-# Prompt patterns that indicate the device is asking for the password
-_UART_PASSWORD_PROMPT = re.compile(r"password\s*:?\s*$", re.IGNORECASE | re.MULTILINE)
+# Prompt patterns: device asks for password (e.g. "Password:" or "Password: " at end of buffer)
+_UART_PASSWORD_PROMPT = re.compile(r"password\s*:?\s*(\r?\n)?\s*$", re.IGNORECASE | re.DOTALL)
+# Incomplete prompt (device might still be sending "Password:")
+_UART_PASSWORD_PREFIX = re.compile(r"pass\s*$", re.IGNORECASE)
+
+
+def _strip_password_prompt_from_output(text: str) -> str:
+    """Remove 'Password:' and 'login:' prompt lines from output so they are not shown to the user."""
+    lines = text.splitlines()
+    out = []
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^password\s*:?\s*$", stripped, re.IGNORECASE):
+            continue
+        if re.match(r"^login\s*:?\s*$", stripped, re.IGNORECASE):
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
 
 
 class UARTHandler:
@@ -103,6 +120,8 @@ class UARTHandler:
             self._port = port
             self._baud = baud_rate
             self._connected = True
+            # Perform login (root / arlo) so the session is authenticated
+            self._uart_do_login()
             return True, f"Connected to {port} at {baud_rate} baud", {
                 "port": port,
                 "baud_rate": baud_rate,
@@ -133,6 +152,48 @@ class UARTHandler:
             logger.exception("UART connect")
             return False, str(e), None
 
+    def _uart_do_login(self) -> None:
+        """Send login (root) and password (arlo) when the device prompts. Does not fail if no prompt."""
+        if not self._serial:
+            return
+        try:
+            self._serial.reset_input_buffer()
+            # Wait for optional "login:" prompt and send username
+            login_chunks = []
+            deadline = time.monotonic() + 2.5
+            while time.monotonic() < deadline:
+                if self._serial.in_waiting:
+                    data = self._serial.read(self._serial.in_waiting)
+                    if data:
+                        login_chunks.append(data)
+                        text = b"".join(login_chunks).decode(errors="replace")
+                        if re.search(r"login\s*:?\s*", text, re.IGNORECASE):
+                            self._serial.write((UART_CONSOLE_LOGIN + "\r\n").encode())
+                            self._serial.flush()
+                            break
+                time.sleep(0.05)
+            # Wait for "Password:" and send password
+            chunks = list(login_chunks)
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                if self._serial.in_waiting:
+                    data = self._serial.read(self._serial.in_waiting)
+                    if data:
+                        chunks.append(data)
+                        text = b"".join(chunks).decode(errors="replace")
+                        if _UART_PASSWORD_PROMPT.search(text) or re.search(r"password\s*:\s*", text, re.IGNORECASE):
+                            self._serial.write((UART_CONSOLE_PASSWORD + "\r\n").encode())
+                            self._serial.flush()
+                            break
+                time.sleep(0.05)
+            # Drain remainder so next command sees a clean state
+            time.sleep(0.3)
+            while self._serial.in_waiting:
+                self._serial.read(self._serial.in_waiting)
+                time.sleep(0.05)
+        except Exception:
+            pass
+
     def disconnect(self) -> None:
         """Close serial connection."""
         if self._serial:
@@ -160,9 +221,13 @@ class UARTHandler:
             self._serial.write((full_cmd + "\r\n").encode())
             self._serial.flush()
             chunks = []
+            login_sent = False
             password_sent = False
             total_timeout = 30.0
-            idle_timeout = 1.5
+            # Use longer idle timeout so device has time to run command and send output (e.g. caliget model_num)
+            idle_timeout = 4.0
+            # After sending password, wait longer for the actual command response
+            idle_after_password = 6.0
             deadline = time.monotonic() + total_timeout
             last_data = time.monotonic()
             while time.monotonic() < deadline:
@@ -171,18 +236,39 @@ class UARTHandler:
                     if data:
                         chunks.append(data)
                         last_data = time.monotonic()
-                        if not password_sent:
+                        if not login_sent or not password_sent:
                             text = b"".join(chunks).decode(errors="replace")
-                            if _UART_PASSWORD_PROMPT.search(text):
+                            # Device may show "login:" then "Password:"; send username first, then password
+                            if not login_sent and re.search(r"login\s*:?\s*", text, re.IGNORECASE):
+                                self._serial.write((UART_CONSOLE_LOGIN + "\r\n").encode())
+                                self._serial.flush()
+                                login_sent = True
+                                last_data = time.monotonic()
+                            elif _UART_PASSWORD_PROMPT.search(text):
+                                if not login_sent:
+                                    # No login prompt seen; send username then password so device gets both
+                                    self._serial.write((UART_CONSOLE_LOGIN + "\r\n").encode())
+                                    self._serial.flush()
+                                    time.sleep(0.15)
+                                    login_sent = True
                                 self._serial.write((UART_CONSOLE_PASSWORD + "\r\n").encode())
                                 self._serial.flush()
                                 password_sent = True
                                 last_data = time.monotonic()
                 else:
-                    if time.monotonic() - last_data >= idle_timeout and chunks:
-                        break
+                    current_idle = idle_after_password if password_sent else idle_timeout
+                    idle = time.monotonic() - last_data
+                    if idle >= current_idle and chunks:
+                        text = b"".join(chunks).decode(errors="replace")
+                        if not password_sent and _UART_PASSWORD_PREFIX.search(text):
+                            last_data = time.monotonic()
+                        elif not login_sent and re.search(r"login\s*$", text, re.IGNORECASE):
+                            last_data = time.monotonic()
+                        else:
+                            break
                     time.sleep(0.05)
-            out = b"".join(chunks).decode(errors="replace").strip()
+            raw = b"".join(chunks).decode(errors="replace").strip()
+            out = _strip_password_prompt_from_output(raw)
             return True, out or "OK"
         except Exception as e:
             err = str(e).lower()
