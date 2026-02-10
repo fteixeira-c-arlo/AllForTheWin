@@ -1,36 +1,28 @@
-"""
-Arlo Camera Control Terminal - Entry point.
-"""
+"""Arlo Camera Control Terminal - Entry point."""
 import os
 import subprocess
 import sys
 from datetime import datetime, timezone
+from typing import Any
 
-# Bootstrap: if dependencies are missing, install and re-run (once)
+# Bootstrap: install deps on first run if needed
 if os.environ.get("ARLO_SKIP_BOOTSTRAP") != "1":
     try:
         import rich  # noqa: F401
     except ImportError:
-        _script_dir = os.path.dirname(os.path.abspath(__file__))
-        _req = os.path.join(_script_dir, "requirements.txt")
-        if os.path.isfile(_req):
-            print("Installing dependencies (first run)...")
-            r = subprocess.call([sys.executable, "-m", "pip", "install", "-r", _req], cwd=_script_dir)
-            if r != 0:
-                print("Failed to install dependencies. Run: pip install -r requirements.txt")
-                sys.exit(1)
+        req = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements.txt")
+        if os.path.isfile(req):
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", req])
             os.environ["ARLO_SKIP_BOOTSTRAP"] = "1"
             os.execv(sys.executable, [sys.executable, __file__] + sys.argv[1:])
         raise
 
-# Use UTF-8 for console output on Windows so Rich can render check/cross symbols
 if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
         pass
-from typing import Any
 
 from rich.console import Console
 
@@ -39,29 +31,40 @@ from commands.command_parser import parse_and_execute, get_system_commands
 from connections.adb_handler import ADBHandler
 from connections.ssh_handler import SSHHandler
 from connections.uart_handler import UARTHandler, list_uart_ports
-from models.camera_models import get_models, get_model_by_name
+from models.camera_models import get_models
 from models.connection_config import ConnectionConfig
 from ui.menus import (
     show_welcome,
     show_models_table,
     show_models_section,
     show_disconnected_help,
-    show_connection_methods,
     show_commands_table,
     show_success,
     show_error,
 )
-from ui.prompts import prompt_connection_method, prompt_adb_params, prompt_ssh_params, prompt_uart_params, prompt_select_model
+from ui.prompts import (
+    prompt_connection_method,
+    prompt_adb_params,
+    prompt_ssh_params,
+    prompt_uart_params,
+    prompt_select_model,
+)
 
 console = Console()
 
 
+def _make_config(conn_type: str, settings: dict, device_id: str) -> ConnectionConfig:
+    return ConnectionConfig(
+        type=conn_type,
+        settings=settings,
+        status="connected",
+        connected_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        device_identifier=device_id,
+    )
+
+
 def run_connection_flow(current_model: dict[str, Any]) -> tuple[ConnectionConfig | None, Any, str]:
-    """
-    Prompt for connection method and params, then connect.
-    Returns (ConnectionConfig, connection_handle, reason).
-    reason: "ok" on success, "back" if user chose back, "failed" on connection failure.
-    """
+    """Prompt for connection method/params and connect. Returns (config, handle, reason): "ok"|"back"|"failed"."""
     method = prompt_connection_method()
     if method is None:
         return None, None, "back"
@@ -89,13 +92,7 @@ def run_connection_flow(current_model: dict[str, Any]) -> tuple[ConnectionConfig
             handler = UARTHandler()
             ok, msg, settings = handler.connect(port=params["port"], baud_rate=params["baud_rate"])
         if ok and settings:
-            cfg = ConnectionConfig(
-                type="UART",
-                settings=settings,
-                status="connected",
-                connected_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                device_identifier=handler.device_identifier() or f"{params['port']}@{params['baud_rate']}",
-            )
+            cfg = _make_config("UART", settings, handler.device_identifier() or f"{params['port']}@{params['baud_rate']}")
             show_success(f"Successfully connected to {current_model['name']} via UART ({cfg.device_identifier})")
             console.print(f"[dim]Connection established at {cfg.connected_at}[/]")
             return cfg, handler, "ok"
@@ -114,13 +111,7 @@ def run_connection_flow(current_model: dict[str, Any]) -> tuple[ConnectionConfig
             ok, msg, settings = handler.connect(password=params["password"])
         if ok and settings:
             device_id = settings.get("device_serial") or "USB"
-            cfg = ConnectionConfig(
-                type="ADB",
-                settings=settings,
-                status="connected",
-                connected_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                device_identifier=device_id,
-            )
+            cfg = _make_config("ADB", settings, device_id)
             show_success(f"Successfully connected to {current_model['name']} via USB ({device_id})")
             console.print(f"[dim]Connection established at {cfg.connected_at}[/]")
             return cfg, handler, "ok"
@@ -141,14 +132,9 @@ def run_connection_flow(current_model: dict[str, Any]) -> tuple[ConnectionConfig
                 password=params.get("password", ""),
             )
         if ok and settings:
-            cfg = ConnectionConfig(
-                type="SSH",
-                settings=settings,
-                status="connected",
-                connected_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                device_identifier=f"{settings['ip_address']}:{settings['port']}",
-            )
-            show_success(f"Successfully connected to {current_model['name']} at {cfg.device_identifier}")
+            device_id = f"{settings['ip_address']}:{settings['port']}"
+            cfg = _make_config("SSH", settings, device_id)
+            show_success(f"Successfully connected to {current_model['name']} at {device_id}")
             console.print(f"[dim]Connection established at {cfg.connected_at}[/]")
             return cfg, handler, "ok"
         show_error(msg, "Check credentials and network, or try 'back' to choose another method.")
@@ -222,7 +208,6 @@ def main() -> None:
                 continue
             continue
 
-        # Not connected: command prompt (models | exit)
         show_disconnected_help()
         try:
             line = input("> ").strip().lower()
@@ -244,7 +229,6 @@ def main() -> None:
                 continue
 
             show_success(f"Selected: {current_model['name']} ({current_model['display_name']})")
-            # Run connection flow (with retry loop on failure only)
             while True:
                 cfg, handle, reason = run_connection_flow(current_model)
                 if reason == "back":
@@ -260,7 +244,6 @@ def main() -> None:
                     ]
                     show_commands_table(full, include_system=True)
                     break
-                # Connection failed - offer retry
                 retry = input("Retry connection? [y/N]: ").strip().lower()
                 if retry not in ("y", "yes"):
                     current_model = None
@@ -269,7 +252,6 @@ def main() -> None:
 
         if line:
             show_error("Unknown command.", "Type 's' to start device selection, 'x' to close.")
-        continue
 
 
 if __name__ == "__main__":

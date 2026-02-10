@@ -14,8 +14,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-# E3 Wired model codes that use the Confluence-sourced command list
-E3_WIRED_MODELS = {"VMC2070", "VMC3070", "VMC2083", "VMC3083"}
+# E3 Wired model codes that use the Confluence-sourced command list (must match camera_models CAMERA_MODEL_GROUPS)
+E3_WIRED_MODELS = {"VMC2070", "VMC3070", "VMC2083", "VMC3083", "VMC2081", "VMC3081", "VMC2073", "VMC3073"}
 
 # Path to the E3 Wired command list (sourced from Confluence)
 _THIS_DIR = Path(__file__).resolve().parent
@@ -49,7 +49,7 @@ def load_commands_from_confluence(model_name: str) -> list[dict[str, Any]]:
     """
     Return available commands for the specified camera model.
 
-    For E3 Wired models (VMC2070, VMC3070, VMC2083, VMC3083), returns the
+    For E3 Wired models (VMC2070/3070, VMC2083/3083, VMC2081/3081, VMC2073/3073), returns the
     command list loaded from e3_wired_commands.json (sourced from Arlo
     Confluence via arlochat MCP). For other models, returns placeholder
     commands.

@@ -1,4 +1,5 @@
 """UART/serial connection handler for camera console. Lists ports, connects at selected baud rate, runs commands."""
+import re
 import sys
 import threading
 import time
@@ -64,6 +65,13 @@ def list_uart_ports() -> list[tuple[str, str]]:
         if sys.platform == "win32":
             return _probe_windows_com_ports()
         return []
+
+
+# Camera console password when UART prompts for it (e.g. before running some commands)
+UART_CONSOLE_PASSWORD = "arlo"
+
+# Prompt patterns that indicate the device is asking for the password
+_UART_PASSWORD_PROMPT = re.compile(r"password\s*:?\s*$", re.IGNORECASE | re.MULTILINE)
 
 
 class UARTHandler:
@@ -140,6 +148,7 @@ class UARTHandler:
         """
         Send command (and args) over UART, read response. Returns (success, output_or_error).
         Sends command + \\r\\n, then reads until idle (no data for ~1.5s) or max 30s.
+        If the camera prompts for a password, sends the console password (arlo) automatically.
         """
         if not self._connected or not self._serial:
             return False, "Not connected."
@@ -151,6 +160,7 @@ class UARTHandler:
             self._serial.write((full_cmd + "\r\n").encode())
             self._serial.flush()
             chunks = []
+            password_sent = False
             total_timeout = 30.0
             idle_timeout = 1.5
             deadline = time.monotonic() + total_timeout
@@ -161,6 +171,13 @@ class UARTHandler:
                     if data:
                         chunks.append(data)
                         last_data = time.monotonic()
+                        if not password_sent:
+                            text = b"".join(chunks).decode(errors="replace")
+                            if _UART_PASSWORD_PROMPT.search(text):
+                                self._serial.write((UART_CONSOLE_PASSWORD + "\r\n").encode())
+                                self._serial.flush()
+                                password_sent = True
+                                last_data = time.monotonic()
                 else:
                     if time.monotonic() - last_data >= idle_timeout and chunks:
                         break

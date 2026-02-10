@@ -145,8 +145,14 @@ def parse_and_execute(
         if not connection_execute:
             show_error("Connect to the camera first to use use_local_fw.")
             return "continue", None
-        from commands.update_url_flow import run_use_local_fw_server
-        err = run_use_local_fw_server(connection_execute)
+        try:
+            from commands.update_url_flow import run_use_local_fw_server
+            err = run_use_local_fw_server(connection_execute)
+        except (KeyboardInterrupt, EOFError):
+            return "continue", None
+        except Exception as e:
+            show_error("use_local_fw failed.", str(e))
+            return "continue", None
         if err is None:
             return "continue", None
         if err == "disconnected":

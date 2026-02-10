@@ -15,6 +15,7 @@ from commands.local_server import (
     check_server_status,
     extract_firmware_tar_gz,
     extract_firmware_zip,
+    get_running_server_url,
     setup_directory_structure,
     start_http_server,
 )
