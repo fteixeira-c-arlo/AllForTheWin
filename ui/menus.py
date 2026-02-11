@@ -11,7 +11,7 @@ console = Console()
 # ASCII borders for panels and tables
 ASCII_BOX = box.ASCII
 
-# Teal color for ASCII art
+# Teal color for ASCII art (welcome page)
 ASCII_ART_COLOR = "#26D0CE"
 
 # User-provided ASCII art for welcome page
@@ -45,24 +45,29 @@ ASCII_HUMMINGBIRD = """
 _SYSTEM_CMD_NAMES = frozenset({
     "help", "status", "stop_server", "server_status", "update_url", "use_local_fw",
     "config_show", "config_update", "config_delete", "tail_logs", "tail_logs_stop",
-    "parse_logs", "parse_logs_stop",
+    "parse_logs", "parse_logs_stop", "parse_log_file", "export_logs_tftp",
     "disconnect", "exit", "back",
 })
 
 
-# Introduction: what this script can do (single space after bullets for even alignment)
-WELCOME_INTRO = """[bold]What this terminal does:[/]
-[cyan]\u2022[/] Connect to [bold]Arlo E3 Wired[/] cameras via [bold]ADB[/] (USB) or [bold]SSH[/]
-[cyan]\u2022[/] Run device commands (capture, record, logs) and [bold]fw_setup[/] for firmware updates
-[cyan]\u2022[/] [bold]fw_setup[/]: download FW from Artifactory, run a local server, and point the camera at it
-[cyan]\u2022[/] [bold]use_local_fw[/]: use an existing FW server folder — start server and set camera update_url
-[cyan]\u2022[/] Save Artifactory credentials ([bold]config_show[/] / [bold]config_update[/]) and pull logs from the camera
+# Introduction: what this terminal does (single space after bullets for even alignment)
+WELCOME_INTRO = """[bold]Arlo Camera Control Terminal[/]
 
-[bold white]Type [bold cyan]s[/] to start device selection and connection. Type [bold cyan]x[/] to close.[/]"""
+[bold]Connect[/] — Choose [bold]UART[/], [bold]ADB[/] (USB), or [bold]SSH[/]. Device model, FW, and env are auto-detected from [bold]build_info[/] and [bold]kvcmd[/].
+
+[bold]Device commands[/] — Loaded from Confluence (E3 Wired). Run [bold]help[/] when connected to see the full list (e.g. [bold]reboot[/], [bold]kvcmd[/], [bold]migrate[/], [bold]ptz[/]).
+
+[bold]Firmware[/] — [bold]fw_setup[/] downloads from Artifactory, runs a local server, and sets the camera [bold]update_url[/]. [bold]use_local_fw[/] uses an existing FW server folder.
+
+[bold]Logs[/] — [bold]tail_logs[/] / [bold]parse_logs[/] stream and parse live. [bold]parse_log_file[/] parses a log file from the [bold]arlo_logs[/bold] folder. [bold]export_logs_tftp[/] (UART) uploads logs via TFTP.
+
+[bold]Config[/] — [bold]config_show[/] / [bold]config_update[/] for Artifactory credentials.
+
+[bold white]Type [bold cyan]s[/] to connect. Type [bold cyan]x[/] to close.[/]"""
 
 
 def show_welcome() -> None:
-    """Display welcome banner with intro to the right of ASCII art. Device selection is triggered by 's' (or 'models')."""
+    """Display welcome banner with intro to the right of ASCII art. Connection is triggered by 's' (or 'connect')."""
     title = Text.from_markup("[bold cyan]Arlo Camera Control Terminal[/] [dim]v1.0[/]")
     subtitle = Text.from_markup("[dim]Hackathon Demo - Phase 1[/]")
     intro = Text.from_markup(WELCOME_INTRO.strip())
@@ -86,7 +91,7 @@ def show_welcome() -> None:
 
 def show_disconnected_help() -> None:
     """Show available commands when not connected."""
-    console.print("[bold white]Type [bold cyan]s[/] to start device selection and connection. Type [bold cyan]x[/] to close.[/]")
+    console.print("[bold white]Type [bold cyan]s[/] to connect (UART, ADB, or SSH). Type [bold cyan]x[/] to close.[/]")
 
 
 def show_models_section(models: list[dict]) -> None:
@@ -163,13 +168,14 @@ def show_connection_methods() -> None:
     console.print()
 
 
-def show_commands_table(commands: list[dict], include_system: bool = True) -> None:
-    """Display available commands grouped by category: compact, easy to scan."""
+def _build_commands_tables_renderable(
+    commands: list[dict], include_system: bool = True, box_style: str | None = "ascii"
+) -> Group:
+    """Build commands grouped by category as a single renderable (Group of tables).
+    box_style: 'ascii' for bordered tables, None for no borders (cleaner, more visible).
+    """
     device_cmds = [c for c in commands if c["name"] not in _SYSTEM_CMD_NAMES]
     system_cmds = [c for c in commands if c["name"] in _SYSTEM_CMD_NAMES]
-
-    subtitle = " (from Confluence)" if include_system and device_cmds else ""
-    console.print(Text.from_markup(f"[bold cyan]Available Commands[/][dim]{subtitle}:[/]"))
 
     categories_order: list[str] = []
     by_category: dict[str, list[dict]] = {}
@@ -180,37 +186,46 @@ def show_commands_table(commands: list[dict], include_system: bool = True) -> No
             categories_order.append(cat)
         by_category[cat].append(c)
 
-    # Compact table: minimal padding, no row lines
+    table_box = ASCII_BOX if box_style else None
+    parts: list = []
     for cat in categories_order:
-        console.print(Text.from_markup(f"[bold yellow]{cat}[/]"))
+        parts.append(Text.from_markup(f"[bold yellow]{cat}[/]"))
         tbl = Table(
             show_header=True,
             header_style="bold cyan",
-            box=ASCII_BOX,
+            box=table_box,
             padding=(0, 1, 0, 1),
             show_lines=False,
         )
-        tbl.add_column("Command", style="cyan", width=14)
-        tbl.add_column("Description", style="dim", width=52)
+        tbl.add_column("Command", style="cyan", width=18)
+        tbl.add_column("Description", style="dim", width=60)
         for c in by_category[cat]:
             tbl.add_row(c["name"], c.get("description", ""))
-        console.print(tbl)
+        parts.append(tbl)
 
     if system_cmds:
-        console.print(Text.from_markup("[bold yellow]System[/]"))
+        parts.append(Text.from_markup("[bold yellow]System[/]"))
         tbl = Table(
             show_header=True,
             header_style="bold cyan",
-            box=ASCII_BOX,
+            box=table_box,
             padding=(0, 1, 0, 1),
             show_lines=False,
         )
-        tbl.add_column("Command", style="cyan", width=14)
-        tbl.add_column("Description", style="dim", width=52)
+        tbl.add_column("Command", style="cyan", width=18)
+        tbl.add_column("Description", style="dim", width=60)
         for c in system_cmds:
             tbl.add_row(c["name"], c.get("description", ""))
-        console.print(tbl)
+        parts.append(tbl)
 
+    return Group(*parts)
+
+
+def show_commands_table(commands: list[dict], include_system: bool = True) -> None:
+    """Display available commands grouped by category: compact, easy to scan."""
+    subtitle = " (from Confluence)" if include_system and any(c["name"] not in _SYSTEM_CMD_NAMES for c in commands) else ""
+    console.print(Text.from_markup(f"[bold cyan]Available Commands[/][dim]{subtitle}:[/]"))
+    console.print(_build_commands_tables_renderable(commands, include_system))
     console.print(Text.from_markup("[dim]Type [bold]help[/] to see this again.[/]\n"))
 
 
@@ -232,6 +247,62 @@ def show_connection_status(
     console.print(table)
 
 
+def show_connected_device_banner(
+    model: str | None,
+    fw_version: str | None,
+    env: str | None = None,
+    connection_type: str = "",
+    device_identifier: str = "",
+    commands: list[dict] | None = None,
+    include_system_commands: bool = True,
+) -> None:
+    """
+    Display connected device info (model, FW, env) and optionally all commands
+    inside a single "Connected camera" panel.
+    """
+    model_display = model or "—"
+    fw_display = fw_version or "—"
+    env_display = (env or "—").upper() if env else "—"
+    info_lines = [
+        f"[bold]Model[/]  [cyan]{model_display}[/]",
+        f"[bold]FW[/]     [cyan]{fw_display}[/]",
+        f"[bold]Env[/]    [cyan]{env_display}[/]",
+    ]
+    if connection_type:
+        info_lines.append(f"[bold]Connection[/] [dim]{connection_type}[/] [dim]{device_identifier or ''}[/]")
+    info_text = Text.from_markup("\n".join(info_lines))
+    info_panel = Panel(
+        info_text,
+        title="[bold cyan]Device (build_info + kvcmd)[/]",
+        border_style="cyan",
+        box=ASCII_BOX,
+        padding=(0, 1, 0, 1),
+    )
+
+    inner_parts: list = [
+        Text.from_markup("[bold cyan]Connected camera[/]"),
+        Text(),
+        info_panel,
+    ]
+    if commands:
+        inner_parts.append(Text())
+        inner_parts.append(Text.from_markup("[bold cyan]Available Commands[/] [dim](from Confluence)[/]"))
+        inner_parts.append(Text())
+        inner_parts.append(_build_commands_tables_renderable(commands, include_system_commands, box_style=None))
+        inner_parts.append(Text())
+        inner_parts.append(Text.from_markup("[dim]Type [bold]help[/] to see this again.[/]"))
+
+    banner = Panel(
+        Group(*inner_parts),
+        border_style="cyan",
+        box=ASCII_BOX,
+        padding=(0, 1, 1, 1),
+    )
+    console.print(banner)
+    if not commands:
+        console.print(Text.from_markup("[dim]Commands from Confluence (E3 Wired / arlochat). Type [bold]help[/] to see again.[/]\n"))
+
+
 def show_success(message: str) -> None:
     """Print a success message with green checkmark."""
     console.print(f"[bold green]\u2713[/] [green]{message}[/]")
@@ -242,3 +313,8 @@ def show_error(message: str, suggestion: str | None = None) -> None:
     console.print(f"[bold red]\u2717[/] [red]{message}[/]")
     if suggestion:
         console.print(f"[yellow]{suggestion}[/]")
+
+
+def show_info(message: str) -> None:
+    """Print an informational message (dim)."""
+    console.print(f"[dim]{message}[/]")

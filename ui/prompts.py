@@ -1,4 +1,5 @@
 """User input prompts."""
+import os
 from typing import Any
 
 import questionary
@@ -33,6 +34,24 @@ def prompt_line(prompt_text: str, default: str = "") -> str:
     return questionary.text(prompt_text, default=default, style=custom_style).ask() or ""
 
 
+def prompt_select_log_file(log_dir: str) -> str | None:
+    """List log files in log_dir (e.g. arlo_logs), let user pick one. Returns full path or None to cancel."""
+    if not os.path.isdir(log_dir):
+        return None
+    files = [
+        f for f in os.listdir(log_dir)
+        if os.path.isfile(os.path.join(log_dir, f)) and not f.startswith(".")
+    ]
+    if not files:
+        return None
+    # Sort by modification time, newest first
+    paths = [os.path.join(log_dir, f) for f in files]
+    paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    choices = [Choice(title=os.path.basename(p), value=p) for p in paths]
+    choices.append(Choice(title="Cancel", value=None))
+    return questionary.select("Select log file to parse:", choices=choices, style=custom_style).ask()
+
+
 def prompt_connection_method() -> str | None:
     """Prompt for connection method: UART, ADB, or SSH. Returns 'UART', 'ADB', 'SSH' or None to cancel."""
     choice = questionary.select(
@@ -41,7 +60,7 @@ def prompt_connection_method() -> str | None:
             questionary.Choice("UART (serial)", value="UART"),
             questionary.Choice("ADB (USB)", value="ADB"),
             questionary.Choice("SSH", value="SSH"),
-            questionary.Choice("Back to model selection", value="back"),
+            questionary.Choice("Back", value="back"),
         ],
         style=custom_style,
     ).ask()

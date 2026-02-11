@@ -82,6 +82,35 @@ EVENT_PATTERNS: list[tuple[str, str]] = [
     ("connection established", "connected"),
     ("wifi connected", "connected"),
     ("ethernet link", "connected"),
+    # Onboard / registration
+    ("onboarded successfully", "onboard_success"),
+    ("onboard success", "onboard_success"),
+    ("claim success", "onboard_success"),
+    ("claimed successfully", "onboard_success"),
+    ("registration success", "onboard_success"),
+    ("bs_claimed", "onboard_success"),
+    ("device claimed", "onboard_success"),
+    ("onboarded", "onboard_success"),
+    # PoE (Power over Ethernet)
+    ("power over ethernet", "poe"),
+    ("poe detected", "poe"),
+    ("poe power", "poe"),
+    ("ethernet power", "poe"),
+    ("poe", "poe"),
+    # Wi‑Fi (association, setup, WLAN)
+    ("wifi association", "wifi"),
+    ("wifi connect", "wifi"),
+    ("wlan", "wifi"),
+    ("wireless connect", "wifi"),
+    ("wifi setup", "wifi"),
+    ("wifi configured", "wifi"),
+    ("joining wifi", "wifi"),
+    ("wifi", "wifi"),
+    # Ethernet (link up, wired)
+    ("ethernet link up", "ethernet"),
+    ("ethernet connected", "ethernet"),
+    ("wired connection", "ethernet"),
+    ("ethernet", "ethernet"),
     # Boot / init
     ("boot", "boot"),
     ("startup", "boot"),
@@ -184,6 +213,10 @@ EVENT_LABELS: dict[str, str] = {
     "recording_stopped": "Recording stopped",
     "connected": "Connected",
     "disconnected": "Disconnected",
+    "onboard_success": "Onboard / claim success",
+    "poe": "PoE (Power over Ethernet)",
+    "wifi": "Wi‑Fi",
+    "ethernet": "Ethernet / wired",
     "boot": "Boot / startup",
     "reboot": "Reboot",
     "other": "Other",
@@ -203,7 +236,8 @@ def build_html(entries: list[dict[str, Any]], title: str = "Log parse report") -
     level_order = ("error", "fatal", "warn", "info", "debug", "trace", "other")
     event_order = (
         "motion_detected", "audio_detected", "streaming", "stream_failed", "stream_stopped",
-        "idle", "recording", "recording_stopped", "connected", "disconnected", "boot", "reboot", "other",
+        "idle", "recording", "recording_stopped", "connected", "disconnected",
+        "onboard_success", "poe", "wifi", "ethernet", "boot", "reboot", "other",
     )
     seen_lev = set()
     summary_rows = []
@@ -299,6 +333,10 @@ def build_html(entries: list[dict[str, Any]], title: str = "Log parse report") -
     .event-recording_stopped { border-left: 3px solid #696; }
     .event-connected { border-left: 3px solid #6c6; }
     .event-disconnected { border-left: 3px solid #c66; }
+    .event-onboard_success { border-left: 3px solid #6c9; }
+    .event-poe { border-left: 3px solid #96c; }
+    .event-wifi { border-left: 3px solid #c96; }
+    .event-ethernet { border-left: 3px solid #69c; }
     .event-boot, .event-reboot { border-left: 3px solid #aa8; }
     """
 

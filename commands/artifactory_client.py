@@ -41,6 +41,21 @@ def _parse_json_response(r) -> tuple[bool, dict | None, str]:
 # Repo for camera firmware (Artifactory)
 ARTIFACTORY_REPO = "camera-fw-generic-release-local"
 
+# Artifactory folder names are 2K only (VMC3xxx). FHD models (VMC2xxx) share the same product folder.
+# Map FHD model name -> 2K folder name for folder lookup.
+FHD_TO_2K_ARTIFACTORY_FOLDER: dict[str, str] = {
+    "VMC2070": "VMC3070",
+    "VMC2083": "VMC3083",
+    "VMC2081": "VMC3081",
+    "VMC2073": "VMC3073",
+}
+
+
+def _artifactory_folder_for_model(model_name: str) -> str:
+    """Return the Artifactory folder name for this model. FHD (2xxx) maps to 2K (3xxx) folder."""
+    key = (model_name or "").strip().upper()
+    return FHD_TO_2K_ARTIFACTORY_FOLDER.get(key, key)
+
 # Fallback file names when Artifactory folder listing is unavailable or empty.
 DEFAULT_BINARY_FILES = ["firmware.bin", "manifest.json", "checksum.txt"]
 DEFAULT_UPDATERULE_FILES = ["updateRules.json"]
@@ -102,11 +117,13 @@ def _error_message_for_status(r) -> str:
 
 
 def _artifact_path_for_version(model_name: str, version: str) -> str:
-    """Build repo path segment: model/version or ENV/model/version when version is 'ENV/subfolder'."""
+    """Build repo path segment: model/version or ENV/model/version when version is 'ENV/subfolder'.
+    Uses 2K folder name for Artifactory (FHD models map to 2K folder)."""
+    folder = _artifactory_folder_for_model(model_name)
     if "/" in version:
         env, version_part = version.split("/", 1)
-        return f"{ARTIFACTORY_REPO}/{env}/{model_name}/{version_part}"
-    return f"{ARTIFACTORY_REPO}/{model_name}/{version}"
+        return f"{ARTIFACTORY_REPO}/{env}/{folder}/{version_part}"
+    return f"{ARTIFACTORY_REPO}/{folder}/{version}"
 
 
 def list_version_files(
@@ -255,6 +272,8 @@ def find_model_folder(
     headers = _auth_headers(access_token, username)
     repo_path = ARTIFACTORY_REPO
     model_upper = (model_name or "").strip().upper()
+    # Artifactory folders are 2K only; FHD (2070/2083/2081/2073) -> use 2K folder (3070/3083/3081/3073)
+    folder_to_find = _artifactory_folder_for_model(model_upper)
     spinner_idx = [0]  # use list so inner fn can mutate
 
     def write_progress(msg: str) -> None:
@@ -274,7 +293,7 @@ def find_model_folder(
             spinner_idx[0] += 1
             write_progress(f"Searching for {model_name} folder...  {sp} ({folders_checked} folders checked)")
             folders_checked += 1
-            if model_upper in folder.upper():
+            if folder_to_find in folder.upper():
                 full = f"{repo_path}/{folder}"
                 sys.stdout.write(f"\r✓ Found: {full}/\n")
                 sys.stdout.flush()
@@ -388,6 +407,7 @@ def list_available_firmware(
         return False, [], "No model(s) provided for search."
     all_results: list[tuple[str, list[str]]] = []
     last_err = ""
+    seen_folders: set[str] = set()  # Artifactory has one folder per 2K; FHD maps to same folder, skip duplicate search
     for m in models_to_search:
         mn = (m or "").strip()
         if not mn:
@@ -396,6 +416,9 @@ def list_available_firmware(
         if not model_folder:
             last_err = err or f"Model folder not found for {mn}."
             continue
+        if model_folder in seen_folders:
+            continue
+        seen_folders.add(model_folder)
         results, err2 = find_firmware_version_in_model(
             base_url, access_token, model_folder, version_filter, username
         )

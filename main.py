@@ -26,19 +26,19 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
 
 from rich.console import Console
 
+from commands.build_info import detect_device
 from commands.command_definitions import load_commands_from_confluence
 from commands.command_parser import parse_and_execute, get_system_commands
 from connections.adb_handler import ADBHandler
 from connections.ssh_handler import SSHHandler
 from connections.uart_handler import UARTHandler, list_uart_ports
-from models.camera_models import get_models
 from models.connection_config import ConnectionConfig
 from ui.menus import (
     show_welcome,
-    show_models_table,
-    show_models_section,
     show_disconnected_help,
     show_commands_table,
+    show_connected_device_banner,
+    show_connection_methods,
     show_success,
     show_error,
 )
@@ -47,8 +47,11 @@ from ui.prompts import (
     prompt_adb_params,
     prompt_ssh_params,
     prompt_uart_params,
-    prompt_select_model,
 )
+
+# Default connection settings when no model is selected (UART baud, SSH port, etc.)
+DEFAULT_UART_BAUD = 115200
+DEFAULT_SSH_PORT = 22
 
 console = Console()
 
@@ -63,7 +66,7 @@ def _make_config(conn_type: str, settings: dict, device_id: str) -> ConnectionCo
     )
 
 
-def run_connection_flow(current_model: dict[str, Any]) -> tuple[ConnectionConfig | None, Any, str]:
+def run_connection_flow() -> tuple[ConnectionConfig | None, Any, str]:
     """Prompt for connection method/params and connect. Returns (config, handle, reason): "ok"|"back"|"failed"."""
     method = prompt_connection_method()
     if method is None:
@@ -84,8 +87,7 @@ def run_connection_flow(current_model: dict[str, Any]) -> tuple[ConnectionConfig
                     "Install with: pip install pyserial",
                 )
             return None, None, "failed"
-        defaults = current_model.get("default_settings", {}).get("uart", {})
-        params = prompt_uart_params(default_baud=defaults.get("baud_rate", 115200))
+        params = prompt_uart_params(default_baud=DEFAULT_UART_BAUD)
         if params is None:
             return None, None, "back"
         with console.status("[bold cyan]Connecting via UART...", spinner="dots"):
@@ -93,7 +95,7 @@ def run_connection_flow(current_model: dict[str, Any]) -> tuple[ConnectionConfig
             ok, msg, settings = handler.connect(port=params["port"], baud_rate=params["baud_rate"])
         if ok and settings:
             cfg = _make_config("UART", settings, handler.device_identifier() or f"{params['port']}@{params['baud_rate']}")
-            show_success(f"Successfully connected to {current_model['name']} via UART ({cfg.device_identifier})")
+            show_success(f"Connected via UART ({cfg.device_identifier})")
             console.print(f"[dim]Connection established at {cfg.connected_at}[/]")
             return cfg, handler, "ok"
         if "access denied" in (msg or "").lower() or "permission" in (msg or "").lower():
@@ -112,15 +114,14 @@ def run_connection_flow(current_model: dict[str, Any]) -> tuple[ConnectionConfig
         if ok and settings:
             device_id = settings.get("device_serial") or "USB"
             cfg = _make_config("ADB", settings, device_id)
-            show_success(f"Successfully connected to {current_model['name']} via USB ({device_id})")
+            show_success(f"Connected via USB ({device_id})")
             console.print(f"[dim]Connection established at {cfg.connected_at}[/]")
             return cfg, handler, "ok"
         show_error(msg, "Connect camera via USB, ensure ADB is enabled, or try 'back' to choose another method.")
         return None, None, "failed"
 
     if method == "SSH":
-        defaults = current_model.get("default_settings", {}).get("ssh", {})
-        params = prompt_ssh_params(default_port=defaults.get("port", 22))
+        params = prompt_ssh_params(default_port=DEFAULT_SSH_PORT)
         if params is None:
             return None, None, "back"
         with console.status("[bold cyan]Connecting via SSH...", spinner="dots"):
@@ -134,7 +135,7 @@ def run_connection_flow(current_model: dict[str, Any]) -> tuple[ConnectionConfig
         if ok and settings:
             device_id = f"{settings['ip_address']}:{settings['port']}"
             cfg = _make_config("SSH", settings, device_id)
-            show_success(f"Successfully connected to {current_model['name']} at {device_id}")
+            show_success(f"Connected at {device_id}")
             console.print(f"[dim]Connection established at {cfg.connected_at}[/]")
             return cfg, handler, "ok"
         show_error(msg, "Check credentials and network, or try 'back' to choose another method.")
@@ -144,18 +145,24 @@ def run_connection_flow(current_model: dict[str, Any]) -> tuple[ConnectionConfig
 
 
 def main() -> None:
-    models = get_models()
     show_welcome()
 
-    current_model: dict[str, Any] | None = None
     connection_config: ConnectionConfig | None = None
-    connection_handle: Any = None  # ADBHandler or SSHHandler
+    connection_handle: Any = None
     device_commands: list[dict] = []
+    # Detected from build_info + kvcmd/update_url after connect (model, fw_version, env)
+    detected_device: dict[str, Any] = {}
 
     while True:
         if connection_config and connection_handle:
-            # Connected: command loop
-            prompt = f"{current_model['name']}> "
+            # Connected: command loop; prompt uses detected model or "Device"
+            prompt_name = (detected_device.get("model") or "Device").strip() or "Device"
+            prompt = f"{prompt_name}> "
+            # Minimal model dict for parse_and_execute (status, fw_setup, etc.)
+            current_model_dict = {
+                "name": prompt_name,
+                "fw_search_models": [prompt_name] if detected_device.get("model") else [],
+            }
             try:
                 line = input(prompt)
             except (EOFError, KeyboardInterrupt):
@@ -165,7 +172,7 @@ def main() -> None:
                 continue
             action, message = parse_and_execute(
                 line,
-                current_model,
+                current_model_dict,
                 connection_config.type,
                 connection_config.device_identifier or "",
                 connection_config.connected_at,
@@ -190,7 +197,7 @@ def main() -> None:
                     connection_handle.disconnect()
                 connection_config = None
                 connection_handle = None
-                current_model = None
+                detected_device = {}
                 device_commands = []
                 console.print("[dim]Disconnected. Returned to main menu.[/]\n")
                 continue
@@ -199,12 +206,41 @@ def main() -> None:
                     connection_handle.disconnect()
                 connection_config = None
                 connection_handle = None
-                model_name = (current_model or {}).get("name", "Camera")
-                current_model = None
+                model_name = detected_device.get("model") or "Camera"
+                detected_device = {}
                 device_commands = []
-                show_error(f"{model_name} disconnected from the PC.", "Returned to device list.")
+                show_error(f"{model_name} disconnected from the PC.", "Returning to connection page.")
                 console.print()
-                show_models_table(models)
+                # Send user back to connection page (connection method selection)
+                show_connection_methods()
+                while True:
+                    cfg, handle, reason = run_connection_flow()
+                    if reason == "back":
+                        break
+                    if cfg is not None and handle is not None:
+                        connection_config = cfg
+                        connection_handle = handle
+                        with console.status("[bold cyan]Detecting device (build_info + kvcmd)...", spinner="dots"):
+                            detected_device = detect_device(handle.execute)
+                        model_for_commands = detected_device.get("model") or "Device"
+                        device_commands = load_commands_from_confluence(model_for_commands)
+                        full = device_commands + [
+                            {"name": c["name"], "description": c["description"]}
+                            for c in get_system_commands()
+                        ]
+                        show_connected_device_banner(
+                            detected_device.get("model"),
+                            detected_device.get("fw_version"),
+                            detected_device.get("env"),
+                            cfg.type,
+                            cfg.device_identifier or "",
+                            commands=full,
+                            include_system_commands=True,
+                        )
+                        break
+                    retry = input("Retry connection? [y/N]: ").strip().lower()
+                    if retry not in ("y", "yes"):
+                        break
                 continue
             continue
 
@@ -219,39 +255,41 @@ def main() -> None:
             console.print("[dim]Goodbye![/]")
             break
 
-        if line in ("models", "m", "select", "s"):
-            show_models_section(models)
-            try:
-                current_model = prompt_select_model(models)
-            except (EOFError, KeyboardInterrupt):
-                continue
-            if not current_model or not isinstance(current_model, dict) or "name" not in current_model:
-                continue
-
-            show_success(f"Selected: {current_model['name']} ({current_model['display_name']})")
+        if line in ("connect", "c", "select", "s"):
             while True:
-                cfg, handle, reason = run_connection_flow(current_model)
+                cfg, handle, reason = run_connection_flow()
                 if reason == "back":
-                    current_model = None
                     break
                 if cfg is not None and handle is not None:
                     connection_config = cfg
                     connection_handle = handle
-                    device_commands = load_commands_from_confluence(current_model["name"])
+                    # Auto-detect model, FW, env from build_info + kvcmd/update_url
+                    with console.status("[bold cyan]Detecting device (build_info + kvcmd)...", spinner="dots"):
+                        detected_device = detect_device(handle.execute)
+                    # Load commands by detected model (E3 Wired list if model known, else placeholder)
+                    model_for_commands = detected_device.get("model") or "Device"
+                    device_commands = load_commands_from_confluence(model_for_commands)
                     full = device_commands + [
                         {"name": c["name"], "description": c["description"]}
                         for c in get_system_commands()
                     ]
-                    show_commands_table(full, include_system=True)
+                    show_connected_device_banner(
+                        detected_device.get("model"),
+                        detected_device.get("fw_version"),
+                        detected_device.get("env"),
+                        cfg.type,
+                        cfg.device_identifier or "",
+                        commands=full,
+                        include_system_commands=True,
+                    )
                     break
                 retry = input("Retry connection? [y/N]: ").strip().lower()
                 if retry not in ("y", "yes"):
-                    current_model = None
                     break
             continue
 
         if line:
-            show_error("Unknown command.", "Type 's' to start device selection, 'x' to close.")
+            show_error("Unknown command.", "Type 's' to connect, 'x' to close.")
 
 
 if __name__ == "__main__":

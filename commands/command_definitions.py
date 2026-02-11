@@ -17,7 +17,8 @@ from pathlib import Path
 from typing import Any
 
 # E3 Wired model codes that use the Confluence-sourced command list (must match camera_models CAMERA_MODEL_GROUPS)
-E3_WIRED_MODELS = {"VMC2070", "VMC3070", "VMC2083", "VMC3083", "VMC2081", "VMC3081", "VMC2073", "VMC3073"}
+# Octopus: test device for post-connect build_info + ASCII art flow (same CLI as E3 Wired)
+E3_WIRED_MODELS = {"VMC2070", "VMC3070", "VMC2083", "VMC3083", "VMC2081", "VMC3081", "VMC2073", "VMC3073", "OCTOPUS"}
 
 # Path to the E3 Wired command list (sourced from Confluence)
 _THIS_DIR = Path(__file__).resolve().parent

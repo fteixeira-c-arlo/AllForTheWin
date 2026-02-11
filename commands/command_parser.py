@@ -9,7 +9,9 @@ from typing import Any, Callable
 
 from commands.command_definitions import load_commands_from_confluence
 from commands.log_parser import parse_line, write_html
-from ui.menus import show_commands_table, show_connection_status, show_error
+from ui.menus import show_commands_table, show_connection_status, show_error, show_info
+from ui.prompts import prompt_confirm_proceed, prompt_line, prompt_select_log_file
+from utils.validators import validate_ipv4
 
 # Default remote path for log archive on camera (BusyBox tar creates uncompressed .tar)
 PULL_LOGS_REMOTE_PATH = "/tmp/allsystem.logs.tar"
@@ -29,9 +31,11 @@ SYSTEM_COMMANDS = [
     {"name": "tail_logs_stop", "description": "Stop log streaming; logs are saved to the file"},
     {"name": "parse_logs", "description": "Stream and parse logs; use parse_logs_stop to stop and generate HTML report"},
     {"name": "parse_logs_stop", "description": "Stop log parsing and save HTML report"},
+    {"name": "parse_log_file", "description": "Select a log file from arlo_logs folder and generate HTML parse report"},
+    {"name": "export_logs_tftp", "description": "(UART only) Tar logs, then upload via TFTP; requires onboarded camera and TFTP server on same network"},
     {"name": "disconnect", "description": "Close connection and exit"},
     {"name": "exit", "description": "Close connection and exit"},
-    {"name": "back", "description": "Return to model selection"},
+    {"name": "back", "description": "Disconnect and return to main menu"},
 ]
 
 
@@ -44,9 +48,10 @@ _parsed_entries: list[dict] = []
 _parsed_entries_lock: threading.Lock = threading.Lock()
 
 
-def _spawn_tail_viewer_terminal(log_path: str) -> None:
-    """Open a new terminal window that follows the log file (tail -f style). Log is still saved to file when tail_logs_stop is used."""
-    title = "Tail logs - system-log_V1_0"
+def _spawn_tail_viewer_terminal(log_path: str, title: str | None = None) -> None:
+    """Open a new terminal window that follows the log file (tail -f style). Log is still saved to file when tail_logs_stop/parse_logs_stop is used."""
+    if title is None:
+        title = "Tail logs - system-log_V1_0"
     try:
         if sys.platform == "win32":
             # Use a temp PowerShell script to avoid quoting issues; -Wait keeps window open and streams new lines
@@ -76,6 +81,28 @@ def _spawn_tail_viewer_terminal(log_path: str) -> None:
 def get_system_commands() -> list[dict]:
     """Return list of system command definitions for display."""
     return SYSTEM_COMMANDS.copy()
+
+
+def _is_kv_bs_claimed_one(raw_output: str) -> bool:
+    """Return True if kvcmd get KV_BS_CLAIMED output indicates value 1 (onboarded)."""
+    if not raw_output:
+        return False
+    text = raw_output.strip()
+    # Whole output is just "1"
+    if text == "1":
+        return True
+    # Key=value or "Key: value" style
+    if "KV_BS_CLAIMED" in raw_output and ("=1" in raw_output or ": 1" in raw_output or ":1" in raw_output):
+        return True
+    # Any line is exactly "1" (handles raw UART buffer with echo + value + prompt)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for line in lines:
+        if line == "1":
+            return True
+    # Last non-empty line is "1" (common for CLI that prints only the value)
+    if lines and lines[-1] == "1":
+        return True
+    return False
 
 
 def _similar_commands(name: str, commands: list[dict]) -> list[str]:
@@ -264,8 +291,9 @@ def parse_and_execute(
                 return "continue", None
             _tail_log_path = log_path
             _parse_logs_mode = True
+            _spawn_tail_viewer_terminal(log_path, title="Parse logs - live view")
             return "continue", (
-                "Parsing logs. Use [bold]parse_logs_stop[/] to stop and generate HTML report."
+                "Parsing logs. Live view opened in another terminal. Use [bold]parse_logs_stop[/] to stop and generate HTML report."
             )
         except OSError as e:
             show_error(str(e))
@@ -299,6 +327,97 @@ def parse_and_execute(
         if report_path:
             return "continue", f"Stopped. Report saved to [bold]{report_path}[/]"
         return "continue", "Stopped. (Report could not be saved.)"
+
+    if cmd == "parse_log_file":
+        log_dir = os.path.join(os.getcwd(), "arlo_logs")
+        if not os.path.isdir(log_dir):
+            show_error("arlo_logs folder not found.", "Run tail_logs or parse_logs first to create log files, or create arlo_logs manually.")
+            return "continue", None
+        files_in_dir = [f for f in os.listdir(log_dir) if os.path.isfile(os.path.join(log_dir, f)) and not f.startswith(".")]
+        if not files_in_dir:
+            show_error("No log files in arlo_logs.", "Run tail_logs or parse_logs to capture logs first.")
+            return "continue", None
+        selected = prompt_select_log_file(log_dir)
+        if selected is None:
+            return "continue", None
+        try:
+            with open(selected, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+        except OSError as e:
+            show_error(f"Cannot read file: {e}")
+            return "continue", None
+        entries = [parse_line(ln) for ln in lines]
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = os.path.splitext(os.path.basename(selected))[0]
+        report_path = os.path.join(log_dir, f"parsed_{stamp}_{base}.html")
+        try:
+            write_html(entries, report_path, title=f"Log parse: {os.path.basename(selected)}")
+        except OSError as e:
+            show_error(f"Cannot write report: {e}")
+            return "continue", None
+        return "continue", f"Report saved to [bold]{report_path}[/] ([dim]{len(entries)} lines[/])"
+
+    # export_logs_tftp: UART only — check onboarded + online, tar logs, then tftp upload
+    if cmd == "export_logs_tftp":
+        if connection_type.upper() != "UART":
+            show_error("export_logs_tftp is only available over UART.", "Connect via UART and try again.")
+            return "continue", None
+        if not connection_execute:
+            show_error("Not connected. Connect via UART first.")
+            return "continue", None
+        # 1) Check KV_BS_CLAIMED == 1 (onboarded) — run kvcmd and show what was read
+        ok, out = connection_execute("kvcmd get KV_BS_CLAIMED", [])
+        raw = (out or "").strip()
+        show_info(f"kvcmd get KV_BS_CLAIMED → {repr(raw) if raw else '(empty)'}")
+        if not ok:
+            if out and "Device disconnected" in (out or ""):
+                return "disconnected", None
+            show_error("Could not read KV_BS_CLAIMED.", out or "Command failed.")
+            return "continue", None
+        if not _is_kv_bs_claimed_one(out or ""):
+            show_error(
+                "Camera is not onboarded.",
+                f"KV_BS_CLAIMED must be 1. kvcmd returned: {repr(raw)}. Onboard the camera first, then run export_logs_tftp again.",
+            )
+            return "continue", None
+        # 2) Check camera is online and running (quick command)
+        ok, out = connection_execute("arlocmd device_info", [])
+        if not ok:
+            if out and "Device disconnected" in (out or ""):
+                return "disconnected", None
+            show_error("Camera did not respond (device_info). Ensure the device is online and running.", out or "")
+            return "continue", None
+        # 3) Tar logs (creates .tar.gz); execute() waits for shell prompt
+        tar_cmd = "tar -czvf /tmp/allsystem.logs.tar.gz /userdata/logs /tmp/logs/system-log_V1_0"
+        ok, out = connection_execute(tar_cmd, [])
+        if not ok:
+            if out and "Device disconnected" in (out or ""):
+                return "disconnected", None
+            show_error("Tar failed.", out or "Check that paths exist on device.")
+            return "continue", None
+        # 4) Prompt user: TFTP server running and camera on same network?
+        ip = prompt_line(
+            "Is the TFTP server running? Is the camera connected to the same network as the TFTP server? "
+            "Enter the TFTP server's local IPv4 (e.g. 192.168.1.100), or leave empty to cancel:",
+            default="",
+        ).strip()
+        if not ip:
+            return "continue", "Export cancelled (no TFTP address)."
+        valid, err = validate_ipv4(ip)
+        if not valid:
+            show_error(err)
+            return "continue", None
+        if not prompt_confirm_proceed(f"Upload /tmp/allsystem.logs.tar.gz to {ip} via TFTP? (y/n):"):
+            return "continue", "Upload cancelled."
+        # 5) Run tftp -p -l allsystem.logs.tar.gz <ip> on device (file in /tmp/)
+        tftp_cmd = f"tftp -p -l /tmp/allsystem.logs.tar.gz {ip}"
+        ok, out = connection_execute(tftp_cmd, [])
+        if not ok:
+            if out and "Device disconnected" in (out or ""):
+                return "disconnected", None
+            show_error("TFTP upload failed.", out or "Check network and TFTP server.")
+            return "continue", None
+        return "continue", f"TFTP upload completed. File sent to {ip} as allsystem.logs.tar.gz"
 
     # update_url [url]: set or show camera FOTA update URL (arlocmd update_url)
     if cmd == "update_url":
@@ -339,6 +458,9 @@ def parse_and_execute(
                 return "continue", None
             # pull_logs: download log archive from camera to PC (no shell command)
             if cmd == "pull_logs":
+                if connection_type.upper() == "UART":
+                    show_error("pull_logs is not supported over UART.", "Connect via ADB to download the log archive.")
+                    return "continue", None
                 if connection_pull_file:
                     local_dir = pull_logs_local_dir or os.getcwd()
                     local_path = os.path.join(local_dir, "allsystem.logs.tar")

@@ -43,6 +43,13 @@ CAMERA_MODEL_GROUPS = [
         "supported_connections": ["ADB", "SSH", "UART"],
         "default_settings": _DEFAULT_SETTINGS,
     },
+    {
+        "name": "Octopus",
+        "display_name": "Octopus (E3 Wired test device – build_info + ASCII banner)",
+        "fw_search_models": ["Octopus"],
+        "supported_connections": ["ADB", "SSH", "UART"],
+        "default_settings": _DEFAULT_SETTINGS,
+    },
 ]
 
 # Flat list of all model names (for get_model_by_name and any code that expects single-model list)
