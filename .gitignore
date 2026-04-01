@@ -20,6 +20,9 @@ release/
 # PyInstaller: dist/ and build/ (regenerated). Maintainer notes: docs/BUILD_AND_RELEASE.txt
 # Tester handoff: release/ArloShell-Windows/ (built Install-*.exe when present).
 
+# Editor / debug
+.cursor/debug.log
+
 # Logs and local data
 arlo_logs/
 *.log

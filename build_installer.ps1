@@ -15,7 +15,7 @@ Set-Location $Root
 Write-Host "=== ArloShell — build ===" -ForegroundColor Cyan
 
 $req = Join-Path $Root "requirements.txt"
-$spec = Join-Path $Root "arlo_camera_control_gui.spec"
+$spec = Join-Path $Root "ArloShell.spec"
 
 if (Get-Command py -ErrorAction SilentlyContinue) {
     py -3 -c "import sys" 2>$null
