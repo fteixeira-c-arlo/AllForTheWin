@@ -8,6 +8,7 @@
 #define MyAppExeName "ArloShell.exe"
 ; Relative to this .iss file (installer\)
 #define SourceDir "..\dist\ArloShell"
+#define SetupIcon "..\assets\ArloShell_icon.ico"
 
 [Setup]
 AppId={{E8B4A1C2-9F3D-4E5B-8A7C-1D2E3F4A5B6C}
@@ -18,6 +19,7 @@ DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
 OutputDir=..\release\ArloShell-Windows
 OutputBaseFilename=Install-ArloShell
+SetupIconFile={#SetupIcon}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern

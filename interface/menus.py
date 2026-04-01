@@ -32,35 +32,58 @@ def _gui_log(text: str) -> None:
 # ASCII borders for panels and tables
 ASCII_BOX = box.ASCII
 
-# Teal color for ASCII art (welcome page)
-ASCII_ART_COLOR = "#26D0CE"
+# Muted watermark color for welcome ASCII art (GUI + terminal)
+ASCII_ART_COLOR = "#2a2a2a"
 
-# User-provided ASCII art for welcome page
-ASCII_HUMMINGBIRD = """
-                                             
-                                         ==    
-                                        ===    
-                                      ====     
-                                    .====      
-                                   ====.       
-                                 -====         
-               .---             ====     ==    
-          .============       ====-    .===    
-     -========.    .====-    ====     ====     
-           ======     :    ====:    -====      
-              =====       -===     ====        
-                ====-    .===    :====         
-                  ====   ====    ===           
-                   -==== ===    -===           
-                     =======.   -===           
-                       ======    ===.          
-                        =====.    ====         
-                                   ====-       
-                                     ====      
-                                      =====    
-                                        ====.  
-                                               
-"""
+# Arlo logo ASCII (matches GUI welcome tab)
+ASCII_WELCOME_CAMERA = r"""                                                                                           +=       
+                                                                                          ===+      
+                                                                                        ======      
+                                                                                       =======      
+                                                                                     ========       
+                                                                                    =========       
+                                                                                  ==========        
+                                                                                +==========+        
+                                                                               ==========           
+                                                                             +==========            
+                                                                            ==========              
+                                                                          ===========               
+                                                                         ==========                 
+                                                                       ==========+          =       
+                                                                     +==========          +==       
+                              +=============+                       ==========           ====+      
+                         +======================+                 ==========+          =======      
+++++++++++++++++++++===============================              ==========          +=======       
+  =+=================================================          ==========+          =========       
+           ===================+           +===========        ==========          ==========        
+                  ===============            =======        ===========          =========+         
+                      ==============+          ==+         ==========          +=========           
+                          =============                   =========+         +==========            
+                            +============                =========          ==========              
+                               ===========+             =========         ===========               
+                                 +==========           +========         ==========                 
+                                   +==========         ========         ==========                  
+                                     ==========       =========        =========                    
+                                      +==========     ========         ========                     
+                                        ==========+   ========        ========                      
+                                         +==========  ========        ========                      
+                                           ==========+=======+        ========                      
+                                             =================        ========                      
+                                              +===============        ========                      
+                                                ==============         ========                     
+                                                 +=============        =========                    
+                                                   ============+        +=========                  
+                                                     ===========+        +=========                 
+                                                       +==========        +==========               
+                                                                            ==========+             
+                                                                              ==========            
+                                                                               ===========          
+                                                                                 ==========+        
+                                                                                  ===========       
+                                                                                    +=========+     
+                                                                                      ==========+   
+                                                                                        ==========  
+                                                                                          +========+"""
 
 # System command names shown in a separate section at the bottom
 _SYSTEM_CMD_NAMES = frozenset({
@@ -116,20 +139,20 @@ WELCOME_INTRO = """[bold]ArloShell Terminal[/]
 
 def show_welcome() -> None:
     """Display welcome banner with intro to the right of ASCII art. Connection is triggered by 's' (or 'connect')."""
-    title = Text.from_markup("[bold cyan]ArloShell Terminal[/] [dim]v1.0[/]")
+    title = Text.from_markup("[bold #26D0CE]ArloShell Terminal[/] [dim]v1.0.0[/]")
     subtitle = Text.from_markup("[dim]Hackathon Demo - Phase 1[/]")
     intro = Text.from_markup(WELCOME_INTRO.strip())
-    bird = Text(ASCII_HUMMINGBIRD, style=ASCII_ART_COLOR)
+    camera_art = Text(ASCII_WELCOME_CAMERA, style=ASCII_ART_COLOR)
     # Two-column grid: art left, gap, intro right; intro left-aligned for clean edges
-    art_width = max(len(line) for line in ASCII_HUMMINGBIRD.strip().splitlines())
+    art_width = max(len(line) for line in ASCII_WELCOME_CAMERA.strip().splitlines())
     gap = 8  # space between ASCII art and welcome text
     grid = Table.grid(expand=True)
     grid.add_column(width=art_width + gap)
     grid.add_column(ratio=1, vertical="middle", justify="left")
-    grid.add_row(bird, Align.left(intro))
+    grid.add_row(camera_art, Align.left(intro))
     banner = Panel(
         Group(title, subtitle, Text(), grid),
-        border_style="cyan",
+        border_style="#26D0CE",
         box=ASCII_BOX,
         padding=(0, 1),
     )

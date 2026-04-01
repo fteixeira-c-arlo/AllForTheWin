@@ -1,5 +1,5 @@
 # Builds the Windows GUI app with PyInstaller, then compiles a single-file installer with Inno Setup 6.
-# Writes release\ArloShell-Windows\Install-ArloShell.exe — zip that folder for testers.
+# Writes release\ArloShell-Windows\Install-ArloShell.exe - zip that folder for testers.
 #
 # Prerequisites (machine that BUILDS the installer):
 #   - Python 3.10+ on PATH
@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
 Set-Location $Root
 
-Write-Host "=== ArloShell — build ===" -ForegroundColor Cyan
+Write-Host "=== ArloShell - build ===" -ForegroundColor Cyan
 
 $req = Join-Path $Root "requirements.txt"
 $spec = Join-Path $Root "ArloShell.spec"
@@ -81,8 +81,8 @@ if (Test-Path $setup) {
     Write-Host ""
     Write-Host "=== Done ===" -ForegroundColor Green
     Write-Host "Tester package folder: $releaseDir" -ForegroundColor Green
-    Write-Host "  • Zip this folder and send it — they only run Install-ArloShell.exe" -ForegroundColor Green
-    Write-Host "  • Commit release\ArloShell-Windows (Install-*.exe) if you use git for handoff" -ForegroundColor Green
+    Write-Host "  * Zip this folder and send it - they only run Install-ArloShell.exe" -ForegroundColor Green
+    Write-Host "  * Commit release\ArloShell-Windows (Install-*.exe) if you use git for handoff" -ForegroundColor Green
 } else {
     Write-Host "Installer not found at expected path: $setup" -ForegroundColor Yellow
 }

@@ -14,6 +14,8 @@ from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import (
     QAction,
     QFont,
+    QFontMetrics,
+    QIcon,
     QKeySequence,
     QPalette,
     QTextCursor,
@@ -69,20 +71,57 @@ from transports.ssh_handler import SSHHandler
 from transports.uart_handler import UARTHandler, list_uart_ports
 from transports.connection_config import ConnectionConfig
 from interface.gui_bridge import GuiBridge, _SELECT_CANCELLED
+from interface.menus import ASCII_WELCOME_CAMERA
 
 
 DEFAULT_UART_BAUD = 115200
 DEFAULT_SSH_PORT = 22
 
-_WELCOME_TAB_TEXT = (
-    "Welcome — click Connect to pick a device (each row shows supported connections: UART, ADB, SSH), "
-    "then choose how to connect.\n\n"
-    "When you connect, a new tab opens with the live session log (connection, detection, and command output). "
-    "Use the Welcome tab anytime for this overview.\n\n"
-    "Use Help → E3 Wired CLI reference when you want the full E3 Wired CLI guide (tips, arlocmd, Tonly groups, NIM) with Confluence links. "
-    "E3 Wired cameras load the full CLI command list; other models show only shared tools until a catalog is added. "
-    "Use Help → Command reference or type help for the in-app command list.\n"
-)
+# App version (title bar, welcome). Bump when releasing.
+ARLO_SHELL_VERSION = "1.0.0"
+# Command input bottom border and shared UI accents (refined teal for dark UI).
+ARLO_ACCENT_COLOR = "#00897B"
+_STATUS_DOT_DISCONNECTED = "#e05555"
+_STATUS_DOT_CONNECTING = "#e0a535"
+_STATUS_DOT_CONNECTED = "#4caf7d"
+
+
+def _main_window_icon_path() -> str | None:
+    """Resolve app icon: PyInstaller bundle, repo assets (ArloShell_icon.png/.ico), then fallbacks."""
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False):
+        base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+        candidates.extend(
+            [
+                base / "assets" / "ArloShell_icon.png",
+                base / "assets" / "ArloShell_icon.ico",
+            ]
+        )
+    root = Path(__file__).resolve().parent.parent
+    candidates.extend(
+        [
+            root / "assets" / "ArloShell_icon.png",
+            root / "assets" / "ArloShell_icon.ico",
+            root / "installer" / "arlo_icon.png",
+            root / "installer" / "ArloShell_icon.png",
+            root / "installer" / "ArloShell_icon.ico",
+        ]
+    )
+    for rel in (
+        "assets/ArloShell_icon.png",
+        "assets/ArloShell_icon.ico",
+        "installer/arlo_icon.png",
+        "arlo_icon.png",
+        "assets/icon.png",
+    ):
+        candidates.append(Path(rel))
+    for p in candidates:
+        try:
+            if p.is_file():
+                return str(p.resolve())
+        except OSError:
+            continue
+    return None
 
 
 def _e3_cli_reference_path() -> Path:
@@ -546,7 +585,9 @@ class SessionWorker(QObject):
             return
         self._cfg = None
         self._handle = None
-        self.connect_failed.emit(msg or "UART connection failed.")
+        err = (msg or "UART connection failed.").strip()
+        self.append_log.emit(f"\nConnection failed: {err}\n\n")
+        self.connect_failed.emit(err)
 
     @Slot(str)
     def _on_connect_adb(self, password: str) -> None:
@@ -563,7 +604,9 @@ class SessionWorker(QObject):
             return
         self._cfg = None
         self._handle = None
-        self.connect_failed.emit(msg or "ADB connection failed.")
+        err = (msg or "ADB connection failed.").strip()
+        self.append_log.emit(f"\nConnection failed: {err}\n\n")
+        self.connect_failed.emit(err)
 
     @Slot(str, int, str, str)
     def _on_connect_ssh(self, ip: str, port: int, username: str, password: str) -> None:
@@ -585,7 +628,9 @@ class SessionWorker(QObject):
             return
         self._cfg = None
         self._handle = None
-        self.connect_failed.emit(msg or "SSH connection failed.")
+        err = (msg or "SSH connection failed.").strip()
+        self.append_log.emit(f"\nConnection failed: {err}\n\n")
+        self.connect_failed.emit(err)
 
     def _run_detect_and_load(self) -> None:
         if not self._handle:
@@ -670,9 +715,17 @@ class SessionWorker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("ArloShell")
+        self.setWindowTitle(f"ArloShell  v{ARLO_SHELL_VERSION}")
+        _icon_path = _main_window_icon_path()
+        if _icon_path:
+            self.setWindowIcon(QIcon(_icon_path))
         self.resize(1100, 720)
         self._device_connected = False
+        self._status_phase: str = "disconnected"
+        self._status_detail_model: str = "—"
+        self._status_detail_fw: str = "—"
+        self._status_detail_transport: str = "—"
+        self._status_detail_env: str = "—"
 
         self._bridge = GuiBridge()
         self._bridge.set_main_window(self)
@@ -713,20 +766,61 @@ class MainWindow(QMainWindow):
         title_font.setPointSize(14)
         title_font.setBold(True)
         title.setFont(title_font)
+        title.setStyleSheet(f"color: {ARLO_ACCENT_COLOR};")
 
         intro = QLabel(
-            "Connect over UART, ADB (USB), or SSH. Device model and firmware are auto-detected. "
-            "Use fw_setup / use_local_fw for firmware URLs; help for the full command list."
+            "Type help for the full command list. Connect over UART, ADB, or SSH — "
+            "device model and firmware are auto-detected."
         )
         intro.setWordWrap(True)
 
-        self._status = QLabel("Not connected.")
-        self._status.setWordWrap(True)
-        self._status.setMinimumHeight(24)
-        self._apply_status_appearance(connected=False)
+        self._status_strip = QWidget()
+        status_lay = QHBoxLayout(self._status_strip)
+        status_lay.setContentsMargins(0, 0, 0, 0)
+        status_lay.setSpacing(6)
+
+        self._status_text = QLabel("Not connected")
+        self._status_text.setWordWrap(True)
+        self._status_text.setMinimumHeight(22)
+        self._status_text.setAlignment(
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+        )
+
+        dot_container = QWidget(self._status_strip)
+        dot_container.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        dot_lay = QVBoxLayout(dot_container)
+        dot_lay.setContentsMargins(0, 0, 0, 0)
+        dot_lay.setSpacing(0)
+
+        self._status_dot = QWidget(dot_container)
+        self._status_dot.setObjectName("statusDot")
+        self._status_dot.setFixedSize(10, 10)
+        self._status_dot.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._status_dot.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._set_status_dot_color(_STATUS_DOT_DISCONNECTED)
+        dot_lay.addStretch(1)
+        dot_lay.addWidget(self._status_dot, 0, Qt.AlignmentFlag.AlignHCenter)
+        dot_lay.addStretch(1)
+
+        _text_h = max(22, self._status_text.sizeHint().height())
+        dot_container.setFixedHeight(_text_h)
+
+        status_lay.addWidget(dot_container, 0, Qt.AlignmentFlag.AlignVCenter)
+        status_lay.addWidget(self._status_text, 1, Qt.AlignmentFlag.AlignVCenter)
+        self._sync_status_strip()
 
         btn_row = QHBoxLayout()
         self._btn_connect = QPushButton("Connect…")
+        self._btn_connect.setStyleSheet(
+            f"""
+            QPushButton {{
+                border: 1px solid #3d4654;
+                border-left: 3px solid {ARLO_ACCENT_COLOR};
+                border-radius: 4px;
+                padding: 5px 12px;
+            }}
+            """
+        )
         self._btn_connect.clicked.connect(self._open_connect_dialog)
         self._btn_disconnect = QPushButton("Disconnect")
         self._btn_disconnect.clicked.connect(self._disconnect)
@@ -742,7 +836,8 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self._btn_clear)
 
         self._cmd_sidebar = QWidget()
-        self._cmd_sidebar.setMaximumWidth(220)
+        self._cmd_sidebar.setMinimumWidth(180)
+        self._cmd_sidebar.setMaximumWidth(280)
         side_outer = QVBoxLayout(self._cmd_sidebar)
         side_outer.setContentsMargins(2, 0, 4, 0)
         side_outer.setSpacing(6)
@@ -777,7 +872,10 @@ class MainWindow(QMainWindow):
         title_cmd_font.setBold(True)
         title_cmd_font.setPointSize(11)
         self._cmd_panel_title.setFont(title_cmd_font)
-        self._cmd_panel_title.setStyleSheet("color: #aeb8c4; padding: 2px 4px 0 4px;")
+        self._cmd_panel_title.setStyleSheet(
+            f"color: {ARLO_ACCENT_COLOR}; border-left: 3px solid {ARLO_ACCENT_COLOR}; "
+            "padding: 4px 4px 0 8px; background: transparent;"
+        )
 
         self._cmd_scroll = QScrollArea()
         self._cmd_scroll.setWidgetResizable(True)
@@ -799,9 +897,44 @@ class MainWindow(QMainWindow):
         self._tab_logs.setTabsClosable(True)
         self._tab_logs.tabCloseRequested.connect(self._on_tab_close_requested)
         self._tab_logs.tabBar().tabMoved.connect(self._update_tab_close_buttons)
-        self._welcome_log = self._new_log_editor()
-        self._welcome_log.setPlainText(_WELCOME_TAB_TEXT)
-        self._tab_logs.addTab(self._welcome_log, "Welcome")
+        self._tab_logs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._tab_logs.setStyleSheet(
+            f"""
+            QTabWidget::pane {{
+                border: 1px solid #3d4654;
+                top: -1px;
+            }}
+            QTabBar::tab {{
+                color: #8b95a5;
+                background: transparent;
+                padding: 8px 14px;
+                margin-right: 2px;
+                border: none;
+                border-bottom: 2px solid transparent;
+            }}
+            QTabBar::tab:selected {{
+                color: #ffffff;
+                background: transparent;
+                border-bottom: 2px solid {ARLO_ACCENT_COLOR};
+            }}
+            QTabBar::tab:hover:!selected {{
+                color: #aeb8c4;
+            }}
+            QTabBar::close-button {{
+                width: 14px;
+                height: 14px;
+                margin: 2px 4px;
+                padding: 0px;
+                subcontrol-position: right;
+            }}
+            QTabBar::close-button:hover {{
+                background-color: #5a6270;
+                border-radius: 7px;
+            }}
+            """
+        )
+        self._welcome_tab_root, self._welcome_log = self._build_welcome_tab_widget()
+        self._tab_logs.addTab(self._welcome_tab_root, "Welcome")
         self._e3_reference_widget: QWidget | None = None
         self._active_session_log: QTextEdit | None = None
         self._update_tab_close_buttons()
@@ -809,12 +942,35 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._cmd_sidebar)
         splitter.addWidget(self._tab_logs)
+        splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
 
         cmd_row = QHBoxLayout()
         self._cmd_input = QLineEdit()
         self._cmd_input.setEnabled(False)
         self._cmd_input.setPlaceholderText("Enter command (e.g. help, status, reboot)…")
+        self._cmd_input.setStyleSheet(
+            f"""
+            QLineEdit {{
+                background-color: #2a313a;
+                border: 1px solid #3d4654;
+                border-bottom: 2px solid {ARLO_ACCENT_COLOR};
+                border-radius: 4px;
+                padding: 5px 8px;
+                color: #c5ced9;
+                font-size: 12px;
+            }}
+            QLineEdit:focus {{
+                border: 1px solid #4a6fa5;
+                border-bottom: 2px solid {ARLO_ACCENT_COLOR};
+            }}
+            QLineEdit:disabled {{
+                border: 1px solid #3d4654;
+                border-bottom: 2px solid #4a5563;
+                color: #7a8494;
+            }}
+            """
+        )
         self._cmd_input.returnPressed.connect(self._send_command)
         send_btn = QPushButton("Send")
         send_btn.clicked.connect(self._send_command)
@@ -825,7 +981,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.addWidget(title)
         layout.addWidget(intro)
-        layout.addWidget(self._status)
+        layout.addWidget(self._status_strip)
         layout.addLayout(btn_row)
         layout.addWidget(splitter, stretch=1)
         layout.addLayout(cmd_row)
@@ -838,6 +994,13 @@ class MainWindow(QMainWindow):
 
     def _setup_menu_bar(self) -> None:
         menubar = self.menuBar()
+        menu_view = menubar.addMenu("&View")
+        act_session_log = QAction("&Session log", self)
+        act_session_log.setShortcut(QKeySequence("Ctrl+Shift+L"))
+        act_session_log.setStatusTip("Show the live connection and command output tab")
+        act_session_log.triggered.connect(self._focus_session_log_tab)
+        menu_view.addAction(act_session_log)
+
         menu_tools = menubar.addMenu("&Tools")
         self._action_fw_setup = QAction("FW &Setup…", self)
         self._action_fw_setup.setStatusTip(
@@ -933,12 +1096,147 @@ class MainWindow(QMainWindow):
         log.setFont(f)
         return log
 
+    def _build_welcome_tab_widget(self) -> tuple[QWidget, QTextEdit]:
+        """Centered branding above a log QTextEdit (log target when no session tab)."""
+        root = QWidget()
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        ascii_lbl = QLabel(ASCII_WELCOME_CAMERA)
+        ascii_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        ascii_lbl.setWordWrap(False)
+        ascii_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        af = QFont("Courier New")
+        af.setStyleHint(QFont.StyleHint.Monospace)
+        af.setPixelSize(6)
+        af.setFixedPitch(True)
+        ascii_lbl.setFont(af)
+        fm = QFontMetrics(af)
+        ascii_lbl.setStyleSheet(
+            "color: #252525; border: none; background: transparent; "
+            "line-height: 6px; padding: 0; margin: 0;"
+        )
+        _line_count = ASCII_WELCOME_CAMERA.count("\n") + 1
+        _ascii_h = fm.lineSpacing() * _line_count
+        ascii_lbl.setFixedHeight(_ascii_h)
+        ascii_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        outer.addWidget(ascii_lbl, 0)
+
+        content_area = QWidget()
+        content_outer = QVBoxLayout(content_area)
+        content_outer.setContentsMargins(0, 0, 0, 0)
+        content_outer.setSpacing(0)
+        content_outer.addStretch(1)
+
+        centered_block = QWidget()
+        block_lay = QVBoxLayout(centered_block)
+        block_lay.setContentsMargins(0, 0, 0, 0)
+        block_lay.setSpacing(8)
+        block_lay.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        title_w = QLabel("ArloShell")
+        title_w.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tf = QFont()
+        tf.setPointSize(22)
+        tf.setBold(True)
+        title_w.setFont(tf)
+        title_w.setStyleSheet(f"color: {ARLO_ACCENT_COLOR}; border: none; background: transparent;")
+        block_lay.addWidget(title_w, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        adb_l = QLabel("ADB · SSH · UART")
+        adb_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        adbf = QFont()
+        adbf.setPointSize(9)
+        adb_l.setFont(adbf)
+        adb_l.setStyleSheet("color: #666666; border: none; background: transparent;")
+        block_lay.addWidget(adb_l, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        sep_row = QHBoxLayout()
+        sep_row.setContentsMargins(0, 0, 0, 0)
+        sep_row.setSpacing(0)
+        sep_row.addStretch(1)
+        sep_fr = QFrame()
+        sep_fr.setFrameShape(QFrame.Shape.HLine)
+        sep_fr.setMaximumWidth(300)
+        sep_fr.setFixedHeight(1)
+        sep_fr.setStyleSheet("background-color: #3d4654; border: none; max-height: 1px;")
+        sep_row.addWidget(sep_fr, 0, Qt.AlignmentFlag.AlignCenter)
+        sep_row.addStretch(1)
+        block_lay.addLayout(sep_row)
+
+        ver_l = QLabel(f"Version {ARLO_SHELL_VERSION}")
+        ver_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        vf = QFont()
+        vf.setPointSize(9)
+        ver_l.setFont(vf)
+        ver_l.setStyleSheet("color: #aeb8c4; border: none; background: transparent;")
+        block_lay.addWidget(ver_l, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        connect_l = QLabel("Click Connect to get started")
+        connect_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cf = QFont()
+        cf.setPointSize(10)
+        connect_l.setFont(cf)
+        connect_l.setStyleSheet("color: #aeb8c4; border: none; background: transparent;")
+        block_lay.addWidget(connect_l, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        content_outer.addWidget(centered_block, 0, Qt.AlignmentFlag.AlignHCenter)
+        content_outer.addStretch(1)
+        outer.addWidget(content_area, stretch=1)
+
+        welcome_log = self._new_log_editor()
+        welcome_log.setMinimumHeight(0)
+        welcome_log.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        welcome_log.hide()
+        outer.addWidget(welcome_log, stretch=0)
+
+        return root, welcome_log
+
+    def _set_status_dot_color(self, color: str) -> None:
+        # QWidget + WA_StyledBackground: QFrame default frame style breaks stylesheet parse/fill.
+        self._status_dot.setStyleSheet(
+            f"#statusDot {{ background-color: {color}; border-radius: 5px; border: none; }}"
+        )
+
+    def _sync_status_strip(self) -> None:
+        pal = self.palette()
+        dark_ui = pal.color(QPalette.ColorRole.Window).lightness() < 128
+        muted = "#c5ced9" if dark_ui else "#3d4f5f"
+        bright = "#e8eef4" if dark_ui else "#0f1419"
+
+        if self._status_phase == "connecting":
+            self._set_status_dot_color(_STATUS_DOT_CONNECTING)
+            self._status_text.setText("Connecting...")
+            self._status_text.setStyleSheet(
+                f"color: {muted}; font-size: 12px; padding: 2px 0; border: none; background: transparent;"
+            )
+        elif self._device_connected:
+            self._set_status_dot_color(_STATUS_DOT_CONNECTED)
+            m = self._status_detail_model or "—"
+            fw = self._status_detail_fw or "—"
+            t = self._status_detail_transport or "—"
+            e = self._status_detail_env or "—"
+            self._status_text.setText(f"Connected · {m} · FW: {fw} · {t} · {e}")
+            self._status_text.setStyleSheet(
+                f"color: {bright}; font-size: 13px; font-weight: 500; padding: 4px 0; "
+                "border: none; background: transparent;"
+            )
+        else:
+            self._set_status_dot_color(_STATUS_DOT_DISCONNECTED)
+            self._status_text.setText("Not connected")
+            self._status_text.setStyleSheet(
+                f"color: {muted}; font-size: 12px; padding: 2px 0; border: none; background: transparent;"
+            )
+
     def _begin_connection_log_tab(self) -> None:
         """Open a new tab for this connection attempt; worker log lines go here until disconnect or failure."""
         log = self._new_log_editor()
         idx = self._tab_logs.addTab(log, "Connecting…")
         self._tab_logs.setCurrentIndex(idx)
         self._active_session_log = log
+        self._status_phase = "connecting"
+        self._sync_status_strip()
         self._update_tab_close_buttons()
 
     def _set_active_session_tab_title(self, title: str) -> None:
@@ -956,9 +1254,11 @@ class MainWindow(QMainWindow):
         if self._active_session_log is None:
             return
         i = self._tab_logs.indexOf(self._active_session_log)
+        self._active_session_log = None
+        # Set tab title after refresh: toggling tabsClosable can reset labels if done earlier.
+        self._update_tab_close_buttons()
         if i >= 0:
             self._tab_logs.setTabText(i, "Connection failed")
-        self._active_session_log = None
 
     def _log_target(self) -> QTextEdit:
         """Live output: session tab while connecting/connected, otherwise Welcome."""
@@ -1035,22 +1335,55 @@ class MainWindow(QMainWindow):
         self._update_tab_close_buttons()
 
     def _update_tab_close_buttons(self) -> None:
-        """Hide close (×) only on Welcome; other tabs (E3 reference, session, tail) stay closable."""
+        """Hide close (×) on Welcome and on the active session log tab; restore defaults for other tabs."""
         if not self._tab_logs.tabsClosable():
             return
         bar = self._tab_logs.tabBar()
-        welcome = getattr(self, "_welcome_log", None)
+        welcome = getattr(self, "_welcome_tab_root", None)
+        # Recreate default close buttons (clears stale setTabButton(None) after session ref is cleared).
+        self._tab_logs.setTabsClosable(False)
+        self._tab_logs.setTabsClosable(True)
         for i in range(self._tab_logs.count()):
             w = self._tab_logs.widget(i)
             if w is welcome:
                 bar.setTabButton(i, QTabBar.ButtonPosition.RightSide, None)
+            elif self._active_session_log is not None and w is self._active_session_log:
+                bar.setTabButton(i, QTabBar.ButtonPosition.RightSide, None)
+
+    def _focus_session_log_tab(self) -> None:
+        """Bring the device session log to the front, or open a new one if connected but the tab was removed."""
+        if self._active_session_log is not None:
+            i = self._tab_logs.indexOf(self._active_session_log)
+            if i >= 0:
+                self._tab_logs.setCurrentIndex(i)
+                return
+        if self._device_connected:
+            log = self._new_log_editor()
+            title = (self._prompt_model_name or "Device").strip() or "Device"
+            if len(title) > 36:
+                title = title[:33] + "…"
+            idx = self._tab_logs.addTab(log, title.replace("&", "&&"))
+            self._tab_logs.setCurrentIndex(idx)
+            self._active_session_log = log
+            log.setPlainText(
+                "[Session log reopened. Output that appeared while this tab was closed may be above on the Welcome tab.]\n\n"
+            )
+            self._update_tab_close_buttons()
+            return
+        QMessageBox.information(
+            self,
+            "Session log",
+            "Connect to a device first. The session log tab opens when you start connecting.",
+        )
 
     @Slot(int)
     def _on_tab_close_requested(self, index: int) -> None:
         w = self._tab_logs.widget(index)
         if w is None:
             return
-        if w is self._welcome_log:
+        if self._active_session_log is not None and w is self._active_session_log:
+            return
+        if w is self._welcome_tab_root:
             return
         if self._e3_reference_widget is not None and w is self._e3_reference_widget:
             self._e3_reference_widget = None
@@ -1070,8 +1403,6 @@ class MainWindow(QMainWindow):
                 timer.stop()
                 timer.deleteLater()
             self._tail_read_chunk(state, final=True)
-        elif w is self._active_session_log:
-            self._active_session_log = None
         self._tab_logs.removeTab(index)
         w.deleteLater()
         self._update_tab_close_buttons()
@@ -1088,71 +1419,6 @@ class MainWindow(QMainWindow):
             state = self._live_tail_sessions.pop(key, None)
             if state is not None:
                 self._finalize_live_tail_state(state)
-
-    def _apply_status_appearance(self, *, connected: bool) -> None:
-        """High-contrast status strip; adapts to light vs dark window background."""
-        pal = self.palette()
-        win = pal.color(QPalette.ColorRole.Window)
-        dark_ui = win.lightness() < 128
-
-        if connected:
-            if dark_ui:
-                self._status.setStyleSheet(
-                    """
-                    QLabel {
-                        color: #f2f5f9;
-                        background-color: #343c48;
-                        border: 1px solid #5c6b7e;
-                        border-radius: 8px;
-                        padding: 10px 14px;
-                        font-size: 13px;
-                        line-height: 1.45;
-                    }
-                    """
-                )
-            else:
-                self._status.setStyleSheet(
-                    """
-                    QLabel {
-                        color: #0f1419;
-                        background-color: #dce6f2;
-                        border: 1px solid #7a9ab8;
-                        border-radius: 8px;
-                        padding: 10px 14px;
-                        font-size: 13px;
-                        line-height: 1.45;
-                    }
-                    """
-                )
-            f = self._status.font()
-            f.setBold(True)
-            self._status.setFont(f)
-        else:
-            f = self._status.font()
-            f.setBold(False)
-            self._status.setFont(f)
-            if dark_ui:
-                self._status.setStyleSheet(
-                    """
-                    QLabel {
-                        color: #c5ced9;
-                        background-color: transparent;
-                        padding: 6px 2px;
-                        font-size: 12px;
-                    }
-                    """
-                )
-            else:
-                self._status.setStyleSheet(
-                    """
-                    QLabel {
-                        color: #3d4f5f;
-                        background-color: transparent;
-                        padding: 6px 2px;
-                        font-size: 12px;
-                    }
-                    """
-                )
 
     def _make_cmd_panel_separator(self) -> QFrame:
         line = QFrame()
@@ -1290,10 +1556,26 @@ class MainWindow(QMainWindow):
         self._cmd_filter_edit.clear()
         self._cmd_filter_edit.blockSignals(False)
         self._cmd_filter_row.setVisible(False)
-        hint = QLabel("Connect to load device commands")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #7a8494; padding: 12px 8px;")
-        self._cmd_body_layout.addWidget(hint)
+        empty = QWidget()
+        el = QVBoxLayout(empty)
+        el.setContentsMargins(12, 20, 12, 20)
+        el.addStretch(1)
+        head_font = QFont()
+        head_font.setPointSize(12)
+        head_font.setBold(True)
+        h1 = QLabel("No device connected")
+        h1.setFont(head_font)
+        h1.setWordWrap(True)
+        h1.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignTop)
+        h1.setStyleSheet("color: #666666; border: none; background: transparent;")
+        el.addWidget(h1)
+        l2 = QLabel("Click Connect to load\ncommands for your device")
+        l2.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignTop)
+        l2.setWordWrap(True)
+        l2.setStyleSheet("color: #555555; font-size: 11px; border: none; background: transparent;")
+        el.addWidget(l2)
+        el.addStretch(2)
+        self._cmd_body_layout.addWidget(empty)
 
     @Slot(str)
     def _on_append_log(self, text: str) -> None:
@@ -1301,6 +1583,9 @@ class MainWindow(QMainWindow):
         w.moveCursor(QTextCursor.MoveOperation.End)
         w.insertPlainText(text)
         w.moveCursor(QTextCursor.MoveOperation.End)
+        if w is self._welcome_log and self._welcome_log.toPlainText():
+            self._welcome_log.setMinimumHeight(120)
+            self._welcome_log.show()
 
     @Slot(dict)
     def _on_state_changed(self, info: dict) -> None:
@@ -1314,17 +1599,17 @@ class MainWindow(QMainWindow):
             model = info.get("model") or "—"
             ct = info.get("conn_type") or "—"
             did = (info.get("device_id") or "").strip()
-            fw = info.get("fw") or "—"
             env = info.get("env") or "—"
-            conn_line = f"{ct} {did}".strip() if did else str(ct)
-            self._status.setText(
-                f"Model: {model}\n"
-                f"Connection: {conn_line}\n"
-                f"Firmware: {fw}   ·   Environment: {env}"
-            )
+            transport = f"{ct} {did}".strip() if did else str(ct)
+            self._status_detail_model = str(model)
+            self._status_detail_fw = str(info.get("fw") or "—")
+            self._status_detail_transport = transport
+            self._status_detail_env = str(env)
+            self._status_phase = "connected"
             self._prompt_model_name = str(model).strip() or "Device"
             self._set_active_session_tab_title(self._prompt_model_name)
-            self._apply_status_appearance(connected=True)
+            self._sync_status_strip()
+            self._update_tab_close_buttons()
         else:
             self._device_connected = False
             self._command_profile = "none"
@@ -1332,11 +1617,13 @@ class MainWindow(QMainWindow):
             self._action_fw_setup.setEnabled(False)
             self._btn_disconnect.setEnabled(False)
             self._cmd_input.setEnabled(False)
-            self._status.setText("Not connected.")
+            self._status_phase = "disconnected"
             self._prompt_model_name = "Device"
+            self._status_detail_fw = "—"
             self._active_session_log = None
-            self._apply_status_appearance(connected=False)
+            self._sync_status_strip()
             self._set_command_list_disconnected()
+            self._update_tab_close_buttons()
 
     @Slot(list)
     def _merge_command_list(self, device_cmds: list) -> None:
@@ -1505,6 +1792,8 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_connect_failed(self, msg: str) -> None:
         self._finalize_failed_session_tab()
+        self._status_phase = "disconnected"
+        self._sync_status_strip()
         QMessageBox.critical(self, "Connection failed", msg)
 
     def _disconnect(self) -> None:
@@ -1512,7 +1801,11 @@ class MainWindow(QMainWindow):
 
     def _clear_log(self) -> None:
         w = self._tab_logs.currentWidget()
-        if isinstance(w, QTextEdit):
+        if w is self._welcome_tab_root:
+            self._welcome_log.clear()
+            self._welcome_log.setMinimumHeight(0)
+            self._welcome_log.hide()
+        elif isinstance(w, QTextEdit):
             w.clear()
 
     def _submit_command_line(self, line: str) -> None:
