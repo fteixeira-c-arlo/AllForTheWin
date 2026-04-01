@@ -14,10 +14,11 @@ from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import (
     QAction,
     QFont,
-    QFontMetrics,
     QIcon,
+    QImage,
     QKeySequence,
     QPalette,
+    QPixmap,
     QTextCursor,
 )
 from PySide6.QtWidgets import (
@@ -71,7 +72,6 @@ from transports.ssh_handler import SSHHandler
 from transports.uart_handler import UARTHandler, list_uart_ports
 from transports.connection_config import ConnectionConfig
 from interface.gui_bridge import GuiBridge, _SELECT_CANCELLED
-from interface.menus import ASCII_WELCOME_CAMERA
 
 
 DEFAULT_UART_BAUD = 115200
@@ -87,29 +87,21 @@ _STATUS_DOT_CONNECTED = "#4caf7d"
 
 
 def _main_window_icon_path() -> str | None:
-    """Resolve app icon: PyInstaller bundle, repo assets (ArloShell_icon.png/.ico), then fallbacks."""
+    """Resolve app window icon to a PNG only (transparent alpha); .ico is not used here."""
     candidates: list[Path] = []
     if getattr(sys, "frozen", False):
         base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
-        candidates.extend(
-            [
-                base / "assets" / "ArloShell_icon.png",
-                base / "assets" / "ArloShell_icon.ico",
-            ]
-        )
+        candidates.append(base / "assets" / "ArloShell_icon.png")
     root = Path(__file__).resolve().parent.parent
     candidates.extend(
         [
             root / "assets" / "ArloShell_icon.png",
-            root / "assets" / "ArloShell_icon.ico",
             root / "installer" / "arlo_icon.png",
             root / "installer" / "ArloShell_icon.png",
-            root / "installer" / "ArloShell_icon.ico",
         ]
     )
     for rel in (
         "assets/ArloShell_icon.png",
-        "assets/ArloShell_icon.ico",
         "installer/arlo_icon.png",
         "arlo_icon.png",
         "assets/icon.png",
@@ -122,6 +114,16 @@ def _main_window_icon_path() -> str | None:
         except OSError:
             continue
     return None
+
+
+def _load_icon(path: str) -> QIcon:
+    """Load window icon preserving alpha (ARGB32). Intended for PNG assets."""
+    img = QImage(path)
+    if img.isNull():
+        return QIcon()
+    img = img.convertToFormat(QImage.Format.Format_ARGB32)
+    pixmap = QPixmap.fromImage(img)
+    return QIcon(pixmap)
 
 
 def _e3_cli_reference_path() -> Path:
@@ -234,6 +236,31 @@ def _tool_subgroup_for_system_name(name: str) -> str | None:
 
 
 _TOOL_SUBGROUP_ORDER = ("FIRMWARE", "LOGS", "CONFIG", "SESSION")
+
+def _header_bar_pushbutton_qss() -> str:
+    a = ARLO_ACCENT_COLOR
+    return f"""
+    QPushButton {{
+        background: transparent;
+        border: 1px solid #2a2a2a;
+        border-radius: 4px;
+        color: #cccccc;
+        padding: 4px 14px;
+    }}
+    QPushButton:hover {{
+        background: #1e1e1e;
+        border-color: {a};
+        color: #ffffff;
+    }}
+    QPushButton:pressed {{
+        background: {a};
+        color: #ffffff;
+    }}
+    QPushButton:disabled {{
+        color: #444444;
+        border-color: #1a1a1a;
+    }}
+    """
 
 
 class _CollapsibleCategoryBlock(QWidget):
@@ -718,7 +745,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"ArloShell  v{ARLO_SHELL_VERSION}")
         _icon_path = _main_window_icon_path()
         if _icon_path:
-            self.setWindowIcon(QIcon(_icon_path))
+            self.setWindowIcon(_load_icon(_icon_path))
         self.resize(1100, 720)
         self._device_connected = False
         self._status_phase: str = "disconnected"
@@ -768,10 +795,7 @@ class MainWindow(QMainWindow):
         title.setFont(title_font)
         title.setStyleSheet(f"color: {ARLO_ACCENT_COLOR};")
 
-        intro = QLabel(
-            "Type help for the full command list. Connect over UART, ADB, or SSH — "
-            "device model and firmware are auto-detected."
-        )
+        intro = QLabel("Camera developer tool  ·  ADB  ·  SSH  ·  UART")
         intro.setWordWrap(True)
 
         self._status_strip = QWidget()
@@ -811,23 +835,17 @@ class MainWindow(QMainWindow):
 
         btn_row = QHBoxLayout()
         self._btn_connect = QPushButton("Connect…")
-        self._btn_connect.setStyleSheet(
-            f"""
-            QPushButton {{
-                border: 1px solid #3d4654;
-                border-left: 3px solid {ARLO_ACCENT_COLOR};
-                border-radius: 4px;
-                padding: 5px 12px;
-            }}
-            """
-        )
+        self._btn_connect.setStyleSheet(_header_bar_pushbutton_qss())
         self._btn_connect.clicked.connect(self._open_connect_dialog)
         self._btn_disconnect = QPushButton("Disconnect")
+        self._btn_disconnect.setStyleSheet(_header_bar_pushbutton_qss())
         self._btn_disconnect.clicked.connect(self._disconnect)
         self._btn_disconnect.setEnabled(False)
         self._btn_help = QPushButton("Help")
+        self._btn_help.setStyleSheet(_header_bar_pushbutton_qss())
         self._btn_help.clicked.connect(self._run_help)
         self._btn_clear = QPushButton("Clear log")
+        self._btn_clear.setStyleSheet(_header_bar_pushbutton_qss())
         self._btn_clear.clicked.connect(self._clear_log)
         btn_row.addWidget(self._btn_connect)
         btn_row.addWidget(self._btn_disconnect)
@@ -836,6 +854,10 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self._btn_clear)
 
         self._cmd_sidebar = QWidget()
+        self._cmd_sidebar.setObjectName("cmdSidebar")
+        self._cmd_sidebar.setStyleSheet(
+            "#cmdSidebar { border-right: 1px solid #1e1e1e; background-color: #0d0d0d; }"
+        )
         self._cmd_sidebar.setMinimumWidth(180)
         self._cmd_sidebar.setMaximumWidth(280)
         side_outer = QVBoxLayout(self._cmd_sidebar)
@@ -892,6 +914,7 @@ class MainWindow(QMainWindow):
         side_outer.addWidget(self._cmd_scroll, stretch=1)
 
         self._tab_logs = QTabWidget()
+        self._tab_logs.setObjectName("contentTabs")
         self._tab_logs.setDocumentMode(True)
         self._tab_logs.setMovable(True)
         self._tab_logs.setTabsClosable(True)
@@ -900,9 +923,13 @@ class MainWindow(QMainWindow):
         self._tab_logs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._tab_logs.setStyleSheet(
             f"""
-            QTabWidget::pane {{
+            QTabWidget#contentTabs::pane {{
                 border: 1px solid #3d4654;
                 top: -1px;
+                background-color: #111111;
+            }}
+            QTabBar {{
+                border-bottom: 1px solid #1e1e1e;
             }}
             QTabBar::tab {{
                 color: #8b95a5;
@@ -945,7 +972,6 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
 
-        cmd_row = QHBoxLayout()
         self._cmd_input = QLineEdit()
         self._cmd_input.setEnabled(False)
         self._cmd_input.setPlaceholderText("Enter command (e.g. help, status, reboot)…")
@@ -974,17 +1000,26 @@ class MainWindow(QMainWindow):
         self._cmd_input.returnPressed.connect(self._send_command)
         send_btn = QPushButton("Send")
         send_btn.clicked.connect(self._send_command)
+        cmd_input_area = QWidget()
+        cmd_input_area.setStyleSheet("QWidget { border-top: 1px solid #1e1e1e; }")
+        cmd_row = QHBoxLayout(cmd_input_area)
         cmd_row.addWidget(self._cmd_input)
         cmd_row.addWidget(send_btn)
 
+        header_bar = QWidget()
+        header_bar.setStyleSheet("QWidget { border-bottom: 1px solid #1e1e1e; }")
+        header_layout = QVBoxLayout(header_bar)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.addWidget(title)
+        header_layout.addWidget(intro)
+        header_layout.addWidget(self._status_strip)
+        header_layout.addLayout(btn_row)
+
         central = QWidget()
         layout = QVBoxLayout(central)
-        layout.addWidget(title)
-        layout.addWidget(intro)
-        layout.addWidget(self._status_strip)
-        layout.addLayout(btn_row)
+        layout.addWidget(header_bar)
         layout.addWidget(splitter, stretch=1)
-        layout.addLayout(cmd_row)
+        layout.addWidget(cmd_input_area)
         self.setCentralWidget(central)
 
         self._setup_menu_bar()
@@ -1099,35 +1134,13 @@ class MainWindow(QMainWindow):
     def _build_welcome_tab_widget(self) -> tuple[QWidget, QTextEdit]:
         """Centered branding above a log QTextEdit (log target when no session tab)."""
         root = QWidget()
+        root.setStyleSheet("QWidget#welcomeTabRoot { background-color: #111111; }")
+        root.setObjectName("welcomeTabRoot")
         outer = QVBoxLayout(root)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        ascii_lbl = QLabel(ASCII_WELCOME_CAMERA)
-        ascii_lbl.setTextFormat(Qt.TextFormat.PlainText)
-        ascii_lbl.setWordWrap(False)
-        ascii_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-        af = QFont("Courier New")
-        af.setStyleHint(QFont.StyleHint.Monospace)
-        af.setPixelSize(6)
-        af.setFixedPitch(True)
-        ascii_lbl.setFont(af)
-        fm = QFontMetrics(af)
-        ascii_lbl.setStyleSheet(
-            "color: #252525; border: none; background: transparent; "
-            "line-height: 6px; padding: 0; margin: 0;"
-        )
-        _line_count = ASCII_WELCOME_CAMERA.count("\n") + 1
-        _ascii_h = fm.lineSpacing() * _line_count
-        ascii_lbl.setFixedHeight(_ascii_h)
-        ascii_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        outer.addWidget(ascii_lbl, 0)
-
-        content_area = QWidget()
-        content_outer = QVBoxLayout(content_area)
-        content_outer.setContentsMargins(0, 0, 0, 0)
-        content_outer.setSpacing(0)
-        content_outer.addStretch(1)
+        outer.addStretch(2)
 
         centered_block = QWidget()
         block_lay = QVBoxLayout(centered_block)
@@ -1181,9 +1194,9 @@ class MainWindow(QMainWindow):
         connect_l.setStyleSheet("color: #aeb8c4; border: none; background: transparent;")
         block_lay.addWidget(connect_l, 0, Qt.AlignmentFlag.AlignHCenter)
 
-        content_outer.addWidget(centered_block, 0, Qt.AlignmentFlag.AlignHCenter)
-        content_outer.addStretch(1)
-        outer.addWidget(content_area, stretch=1)
+        outer.addWidget(centered_block, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        outer.addStretch(3)
 
         welcome_log = self._new_log_editor()
         welcome_log.setMinimumHeight(0)

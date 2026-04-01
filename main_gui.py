@@ -23,17 +23,16 @@ def main() -> None:
         except Exception:
             pass
 
-    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
 
-    from interface.gui_window import MainWindow
+    from interface.gui_window import MainWindow, _load_icon
 
     app = QApplication(sys.argv)
     app.setApplicationName("ArloShell")
     app.setOrganizationName("Arlo")
     icon_path = _app_icon_path()
     if icon_path is not None:
-        icon = QIcon(str(icon_path))
+        icon = _load_icon(str(icon_path))
         app.setWindowIcon(icon)
         win = MainWindow()
         win.setWindowIcon(icon)
