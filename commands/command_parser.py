@@ -5,37 +5,69 @@ import subprocess
 import sys
 import threading
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
+
+from commands.abstract_dispatcher import (
+    execute_abstract_command,
+    load_abstract_definitions,
+)
+
+# Optional (GUI): live tail view in-app instead of spawning an external terminal.
+_tail_live_view_start: Callable[[str, str], None] | None = None
+_tail_live_view_stop: Callable[[str], None] | None = None
+
+
+def set_tail_live_view_handlers(
+    start: Callable[[str, str], None] | None,
+    stop: Callable[[str], None] | None,
+) -> None:
+    """When start/stop are set (e.g. GUI), tail_logs/parse_logs use them instead of an external tail window."""
+    global _tail_live_view_start, _tail_live_view_stop
+    _tail_live_view_start = start
+    _tail_live_view_stop = stop
 
 from commands.command_definitions import load_commands_from_confluence
 from commands.log_parser import parse_line, write_html
-from ui.menus import show_commands_table, show_connection_status, show_error, show_info
+from ui.menus import (
+    show_abstract_commands_section,
+    show_commands_table,
+    show_connection_status,
+    show_error,
+    show_info,
+)
 from ui.prompts import prompt_confirm_proceed, prompt_line, prompt_select_log_file
 from utils.validators import validate_ipv4
+
+_COMMAND_PARSER_DIR = Path(__file__).resolve().parent
+ABSTRACT_DEFINITIONS: list[dict] = load_abstract_definitions(
+    str(_COMMAND_PARSER_DIR / "abstract_command_definitions.json")
+)
 
 # Default remote path for log archive on camera (BusyBox tar creates uncompressed .tar)
 PULL_LOGS_REMOTE_PATH = "/tmp/allsystem.logs.tar"
 
 # Action result: "continue" | "disconnect" | "exit" | "back"
+# command_profiles: None = show for every device profile; else list of profile ids (e.g. e3_wired).
 SYSTEM_COMMANDS = [
-    {"name": "help", "description": "Show available commands"},
-    {"name": "status", "description": "Show connection status"},
-    {"name": "stop_server", "description": "Stop the local firmware server"},
-    {"name": "server_status", "description": "Check local firmware server status"},
-    {"name": "update_url", "description": "Set or show FOTA update URL (update_url [url])"},
-    {"name": "use_local_fw", "description": "Start local FW server (if needed) and set camera update_url to it"},
-    {"name": "config_show", "description": "Show saved Artifactory credentials (no token)"},
-    {"name": "config_update", "description": "Update saved Artifactory credentials"},
-    {"name": "config_delete", "description": "Delete saved Artifactory credentials"},
-    {"name": "tail_logs", "description": "Stream system log to a file and open in editor (tail_logs_stop to stop and save)"},
-    {"name": "tail_logs_stop", "description": "Stop log streaming; logs are saved to the file"},
-    {"name": "parse_logs", "description": "Stream and parse logs; use parse_logs_stop to stop and generate HTML report"},
-    {"name": "parse_logs_stop", "description": "Stop log parsing and save HTML report"},
-    {"name": "parse_log_file", "description": "Select a log file from arlo_logs folder and generate HTML parse report"},
-    {"name": "export_logs_tftp", "description": "(UART only) Tar logs, then upload via TFTP; requires onboarded camera and TFTP server on same network"},
-    {"name": "disconnect", "description": "Close connection and exit"},
-    {"name": "exit", "description": "Close connection and exit"},
-    {"name": "back", "description": "Disconnect and return to main menu"},
+    {"name": "help", "description": "Show available commands", "command_profiles": None},
+    {"name": "status", "description": "Show connection status", "command_profiles": None},
+    {"name": "stop_server", "description": "Stop the local firmware server", "command_profiles": ["e3_wired"]},
+    {"name": "server_status", "description": "Check local firmware server status", "command_profiles": ["e3_wired"]},
+    {"name": "update_url", "description": "Set or show FOTA update URL (update_url [url])", "command_profiles": ["e3_wired"]},
+    {"name": "use_local_fw", "description": "Start local FW server (if needed) and set camera update_url to it", "command_profiles": ["e3_wired"]},
+    {"name": "config_show", "description": "Show saved Artifactory credentials (no token)", "command_profiles": None},
+    {"name": "config_update", "description": "Update saved Artifactory credentials", "command_profiles": None},
+    {"name": "config_delete", "description": "Delete saved Artifactory credentials", "command_profiles": None},
+    {"name": "tail_logs", "description": "Stream system log to a file; live view (GUI tab or terminal) — tail_logs_stop to stop and save", "command_profiles": ["e3_wired"]},
+    {"name": "tail_logs_stop", "description": "Stop log streaming; logs are saved to the file", "command_profiles": ["e3_wired"]},
+    {"name": "parse_logs", "description": "Stream and parse logs; live view (GUI tab or terminal); parse_logs_stop for HTML report", "command_profiles": ["e3_wired"]},
+    {"name": "parse_logs_stop", "description": "Stop log parsing and save HTML report", "command_profiles": ["e3_wired"]},
+    {"name": "parse_log_file", "description": "Select a log file from arlo_logs folder and generate HTML parse report", "command_profiles": None},
+    {"name": "export_logs_tftp", "description": "(UART only) Tar logs, then upload via TFTP; requires onboarded camera and TFTP server on same network", "command_profiles": ["e3_wired"]},
+    {"name": "disconnect", "description": "Close connection and exit", "command_profiles": None},
+    {"name": "exit", "description": "Close connection and exit", "command_profiles": None},
+    {"name": "back", "description": "Disconnect and return to main menu", "command_profiles": None},
 ]
 
 
@@ -78,9 +110,26 @@ def _spawn_tail_viewer_terminal(log_path: str, title: str | None = None) -> None
         pass
 
 
+def _strip_command_profile_meta(cmd: dict) -> dict:
+    return {k: v for k, v in cmd.items() if k != "command_profiles"}
+
+
 def get_system_commands() -> list[dict]:
-    """Return list of system command definitions for display."""
-    return SYSTEM_COMMANDS.copy()
+    """Return all system command definitions for display (no profile filter)."""
+    return [_strip_command_profile_meta(dict(c)) for c in SYSTEM_COMMANDS]
+
+
+def get_system_commands_for_profile(command_profile: str) -> list[dict]:
+    """System commands visible for this device command profile (e.g. e3_wired vs none)."""
+    pid = (command_profile or "none").strip() or "none"
+    out: list[dict] = []
+    for c in SYSTEM_COMMANDS:
+        prof = c.get("command_profiles")
+        if prof is None:
+            out.append(_strip_command_profile_meta(dict(c)))
+        elif isinstance(prof, (list, tuple, set)) and pid in prof:
+            out.append(_strip_command_profile_meta(dict(c)))
+    return out
 
 
 def _is_kv_bs_claimed_one(raw_output: str) -> bool:
@@ -116,6 +165,236 @@ def _similar_commands(name: str, commands: list[dict]) -> list[str]:
     return out[:5]
 
 
+def _match_abstract_prefix(parts: list[str]) -> tuple[str, list[str]] | None:
+    """
+    If the leading tokens match a known abstract command name, return (abstract_name, remaining_args).
+    Longer names win so e.g. 'update url' beats a hypothetical shorter prefix.
+    """
+    if not parts or not ABSTRACT_DEFINITIONS:
+        return None
+    defs = sorted(
+        ABSTRACT_DEFINITIONS,
+        key=lambda d: len((d.get("name") or "").strip()),
+        reverse=True,
+    )
+    for d in defs:
+        name = (d.get("name") or "").strip()
+        if not name:
+            continue
+        name_words = name.split()
+        if len(parts) < len(name_words):
+            continue
+        if [p.lower() for p in parts[: len(name_words)]] != [
+            w.lower() for w in name_words
+        ]:
+            continue
+        return name, parts[len(name_words) :]
+    return None
+
+
+def _abstract_help_arg_suffix(arg_specs: list[Any]) -> str:
+    """Format abstract `args` JSON field for help, e.g. ' <url>' or ' <ssid> <password> [<security>]'"""
+    if not arg_specs:
+        return ""
+    parts: list[str] = []
+    for spec in arg_specs:
+        s = str(spec).strip()
+        if not s:
+            continue
+        optional = s.endswith("?")
+        base = s[:-1].strip() if optional else s
+        if not base:
+            continue
+        if optional:
+            parts.append(f"[<{base}>]")
+        else:
+            parts.append(f"<{base}>")
+    return (" " + " ".join(parts)) if parts else ""
+
+
+def _abstract_help_transport_tag(restriction: Any) -> str:
+    if restriction is None or restriction == "":
+        return ""
+    r = str(restriction).strip().lower()
+    if r == "no_uart":
+        return " [no UART]"
+    if r == "adb_only":
+        return " [ADB only]"
+    return ""
+
+
+def _abstract_help_lines(definitions: list[dict]) -> list[str]:
+    """One line per abstract command: name, args, description, optional transport tag."""
+    lines: list[str] = []
+    for d in definitions:
+        if not isinstance(d, dict):
+            continue
+        name = (d.get("name") or "").strip()
+        if not name:
+            continue
+        desc = (d.get("description") or "").strip()
+        arg_specs = d.get("args") or []
+        if not isinstance(arg_specs, list):
+            arg_specs = []
+        args_suffix = _abstract_help_arg_suffix(arg_specs)
+        tag = _abstract_help_transport_tag(d.get("transport_restriction"))
+        lines.append(f"{name}{args_suffix}  —  {desc}{tag}")
+    return lines
+
+
+def _run_push_arlod(
+    connection_handle: Any,
+    connection_type: str,
+    abstract_args: list[str],
+) -> tuple[str, str | None]:
+    """
+    ADB-only flow: auth (password arlo), push binary, killall, chmod, start arlod in background.
+    """
+    if (connection_type or "").strip().upper() != "ADB":
+        show_error(
+            "push arlod requires an ADB connection.",
+            "Connect via ADB and try again.",
+        )
+        return "continue", None
+
+    if not abstract_args or not str(abstract_args[0]).strip():
+        show_error(
+            "push arlod requires a local file path.",
+            "Usage: push arlod <local_path>",
+        )
+        return "continue", None
+
+    local_path = os.path.expanduser(str(abstract_args[0]).strip())
+    if not os.path.isfile(local_path):
+        show_error(f"Local file not found: {local_path}")
+        return "continue", None
+
+    from connections.adb_handler import ADBHandler
+
+    if not isinstance(connection_handle, ADBHandler) or not connection_handle.is_connected():
+        show_error(
+            "push arlod requires an active ADB session.",
+            "Connect to the camera over ADB first.",
+        )
+        return "continue", None
+
+    serial = connection_handle.device_identifier()
+    if not serial:
+        show_error("No ADB device serial is available. Reconnect and try again.")
+        return "continue", None
+
+    adb = ADBHandler._adb_cmd()
+
+    def _disconnected(stderr: str) -> bool:
+        s = (stderr or "").strip().lower()
+        if not s:
+            return False
+        return (
+            "device offline" in s
+            or "no devices/emulators found" in s
+            or "device not found" in s
+            or ("device '" in s and "not found" in s)
+        )
+
+    # 1) adb shell auth + password arlo
+    try:
+        proc = subprocess.Popen(
+            [adb, "-s", serial, "shell", "auth"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        out, err = proc.communicate(input="arlo\n", timeout=30)
+    except FileNotFoundError:
+        show_error("adb not found.", "Install Android platform-tools and add adb to PATH.")
+        return "continue", None
+    except subprocess.TimeoutExpired:
+        show_error("push arlod failed at step 1/5 (adb shell auth).", "Authentication timed out.")
+        return "continue", None
+    except Exception as e:
+        show_error(f"push arlod failed at step 1/5 (adb shell auth): {e}")
+        return "continue", None
+
+    auth_combined = ((out or "") + (err or "")).strip()
+    if proc.returncode != 0:
+        show_error(
+            "push arlod failed at step 1/5 (adb shell auth).",
+            auth_combined or "Authentication failed.",
+        )
+        return "continue", None
+    show_info("push arlod: step 1/5 — adb shell auth succeeded.")
+
+    # 2) adb push
+    try:
+        r = subprocess.run(
+            [adb, "-s", serial, "push", local_path, "/userdata/arlod"],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except FileNotFoundError:
+        show_error("adb not found.", "Install Android platform-tools and add adb to PATH.")
+        return "continue", None
+    except subprocess.TimeoutExpired:
+        show_error(
+            "push arlod failed at step 2/5 (adb push).",
+            "Push timed out.",
+        )
+        return "continue", None
+    except Exception as e:
+        show_error(f"push arlod failed at step 2/5 (adb push): {e}")
+        return "continue", None
+
+    stderr = (r.stderr or "").strip()
+    if _disconnected(stderr):
+        return "disconnected", None
+    if r.returncode != 0:
+        show_error(
+            "push arlod failed at step 2/5 (adb push).",
+            (r.stderr or r.stdout or "adb push failed.").strip(),
+        )
+        return "continue", None
+    show_info("push arlod: step 2/5 — file pushed to /userdata/arlod.")
+
+    shell_steps: list[tuple[str, str]] = [
+        ("killall arlod", "3/5 — stopped existing arlod (killall)."),
+        ("chmod u+x /userdata/arlod", "4/5 — set execute permission on /userdata/arlod."),
+        ("/userdata/arlod &", "5/5 — started arlod in the background."),
+    ]
+    for shell_cmd, progress_msg in shell_steps:
+        try:
+            r = subprocess.run(
+                [adb, "-s", serial, "shell", shell_cmd],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            show_error(
+                f"push arlod failed at step {shell_cmd!r}.",
+                "Command timed out.",
+            )
+            return "continue", None
+        except Exception as e:
+            show_error(f"push arlod failed running adb shell {shell_cmd!r}: {e}")
+            return "continue", None
+
+        err_low = (r.stderr or "").strip().lower()
+        if _disconnected(r.stderr or ""):
+            return "disconnected", None
+        if r.returncode != 0:
+            detail = (r.stderr or r.stdout or "Command failed.").strip()
+            show_error(
+                f"push arlod failed at adb shell: {shell_cmd}",
+                detail,
+            )
+            return "continue", None
+        show_info(f"push arlod: step {progress_msg}")
+
+    return "continue", "push arlod completed successfully."
+
+
 def parse_and_execute(
     line: str,
     model: dict[str, Any],
@@ -128,6 +407,7 @@ def parse_and_execute(
     pull_logs_local_dir: str | None = None,
     connection_get_tail_logs_command: Callable[[], str | None] | None = None,
     connection_handle: Any = None,
+    command_profile: str = "none",
 ) -> tuple[str, str | None]:
     """
     Parse user input and execute. Returns (action, message).
@@ -140,21 +420,63 @@ def parse_and_execute(
     if not line:
         return "continue", None
     model_name = (model or {}).get("name") or "Camera"
+    profile = (command_profile or (model or {}).get("command_profile") or "none").strip() or "none"
     parts = line.split()
+    abstract_hit = _match_abstract_prefix(parts)
+    if abstract_hit is not None:
+        abstract_name, abstract_args = abstract_hit
+
+        def _execute_shell(shell_line: str) -> tuple[bool, str]:
+            if not connection_execute:
+                return False, "Not connected."
+            return connection_execute(shell_line, [])
+
+        try:
+            abstract_out = execute_abstract_command(
+                abstract_name,
+                abstract_args,
+                ABSTRACT_DEFINITIONS,
+                device_commands,
+                _execute_shell,
+                connection_type,
+            )
+        except ValueError as e:
+            show_error(str(e))
+            return "continue", None
+        except RuntimeError as e:
+            err_text = str(e)
+            if "Device disconnected" in err_text:
+                return "disconnected", None
+            show_error(err_text)
+            return "continue", None
+        if abstract_out is not None:
+            combined = "\n".join(s for s in abstract_out if (s or "").strip())
+            return "continue", combined or None
+
+        if abstract_name.strip().lower() == "push arlod":
+            return _run_push_arlod(connection_handle, connection_type, abstract_args)
+
     cmd = (parts[0] or "").lower()
     args = parts[1:] if len(parts) > 1 else []
     # Aliases for fw_setup (automated flow)
     if cmd in ("upd_url", "fw_url"):
         cmd = "fw_setup"
 
-    all_cmds = device_commands + SYSTEM_COMMANDS
+    system_cmds = get_system_commands_for_profile(profile)
+    all_cmds = device_commands + system_cmds
     cmd_names = [c["name"].lower() for c in all_cmds]
 
-    if cmd in ("help", "?"):
+    if cmd in ("help", "?", "--help"):
+        show_abstract_commands_section(_abstract_help_lines(ABSTRACT_DEFINITIONS))
         full = list(device_commands) + [
-            {"name": c["name"], "description": c["description"]} for c in SYSTEM_COMMANDS
+            {"name": c["name"], "description": c["description"]} for c in system_cmds
         ]
-        show_commands_table(full, include_system=True)
+        show_commands_table(
+            full,
+            include_system=True,
+            device_profile=profile,
+            section_heading="Raw / Advanced Commands",
+        )
         return "continue", None
 
     if cmd == "status":
@@ -237,9 +559,17 @@ def parse_and_execute(
                 return "continue", None
             _tail_log_path = log_path
             _parse_logs_mode = False
-            _spawn_tail_viewer_terminal(log_path)
+            if _tail_live_view_start:
+                _tail_live_view_start(log_path, "Tail logs")
+            else:
+                _spawn_tail_viewer_terminal(log_path)
+            hint = (
+                "Live view: in-app tab."
+                if _tail_live_view_start
+                else "Live view: external terminal."
+            )
             return "continue", (
-                f"Log is being written to [bold]{log_path}[/]. "
+                f"Log is being written to [bold]{log_path}[/]. {hint} "
                 "Use [bold]tail_logs_stop[/] to stop and save."
             )
         except OSError as e:
@@ -256,6 +586,8 @@ def parse_and_execute(
         path = _tail_log_path
         _tail_log_path = None
         _parse_logs_mode = False
+        if path and _tail_live_view_stop:
+            _tail_live_view_stop(path)
         if path:
             return "continue", f"Stopped. Logs saved to [bold]{path}[/]"
         return "continue", "No tail_logs session was running."
@@ -291,9 +623,17 @@ def parse_and_execute(
                 return "continue", None
             _tail_log_path = log_path
             _parse_logs_mode = True
-            _spawn_tail_viewer_terminal(log_path, title="Parse logs - live view")
+            if _tail_live_view_start:
+                _tail_live_view_start(log_path, "Parse logs (live)")
+            else:
+                _spawn_tail_viewer_terminal(log_path, title="Parse logs - live view")
+            hint = (
+                "Live view: in-app tab."
+                if _tail_live_view_start
+                else "Live view: external terminal."
+            )
             return "continue", (
-                "Parsing logs. Live view opened in another terminal. Use [bold]parse_logs_stop[/] to stop and generate HTML report."
+                f"Parsing logs. {hint} Use [bold]parse_logs_stop[/] to stop and generate HTML report."
             )
         except OSError as e:
             show_error(str(e))
@@ -305,6 +645,7 @@ def parse_and_execute(
     if cmd == "parse_logs_stop":
         if not _tail_log_path or not _parse_logs_mode:
             return "continue", "No parse_logs session was running."
+        path_for_ui = _tail_log_path
         stop_tail = getattr(connection_handle, "stop_tail_logs", None) if connection_handle else None
         if stop_tail and callable(stop_tail):
             stop_tail()
@@ -324,6 +665,8 @@ def parse_and_execute(
             _parse_logs_mode = False
             with _parsed_entries_lock:
                 _parsed_entries.clear()
+            if path_for_ui and _tail_live_view_stop:
+                _tail_live_view_stop(path_for_ui)
         if report_path:
             return "continue", f"Stopped. Report saved to [bold]{report_path}[/]"
         return "continue", "Stopped. (Report could not be saved.)"
@@ -420,6 +763,8 @@ def parse_and_execute(
         return "continue", f"TFTP upload completed. File sent to {ip} as allsystem.logs.tar.gz"
 
     # update_url [url]: set or show camera FOTA update URL (arlocmd update_url)
+    # Unreachable for E3 Wired when the user types the abstract phrase "update url …":
+    # abstract_command_definitions.json maps that to arlocmd via abstract_dispatcher first.
     if cmd == "update_url":
         if connection_execute:
             success, output = connection_execute("arlocmd update_url", args)

@@ -1,4 +1,8 @@
 """Menu and status displays using rich."""
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
 from rich.align import Align
 from rich.console import Console, Group
 from rich.panel import Panel
@@ -7,6 +11,23 @@ from rich.text import Text
 from rich import box
 
 console = Console()
+
+if TYPE_CHECKING:
+    from ui.gui_bridge import GuiBridge
+
+_gui_menu_bridge: Any = None
+
+
+def set_gui_menu_bridge(bridge: GuiBridge | None) -> None:
+    """When set, status/error output goes to the GUI log instead of the terminal."""
+    global _gui_menu_bridge
+    _gui_menu_bridge = bridge
+
+
+def _gui_log(text: str) -> None:
+    if _gui_menu_bridge is not None:
+        _gui_menu_bridge.log_plain(text if text.endswith("\n") else text + "\n")
+
 
 # ASCII borders for panels and tables
 ASCII_BOX = box.ASCII
@@ -50,12 +71,39 @@ _SYSTEM_CMD_NAMES = frozenset({
 })
 
 
+def _commands_to_plain_text(commands: list[dict], include_system: bool = True) -> str:
+    device_cmds = [c for c in commands if c["name"] not in _SYSTEM_CMD_NAMES]
+    system_cmds = [c for c in commands if c["name"] in _SYSTEM_CMD_NAMES]
+    lines: list[str] = []
+    categories_order: list[str] = []
+    by_category: dict[str, list[dict]] = {}
+    for c in device_cmds:
+        cat = c.get("category") or "Other"
+        if cat not in by_category:
+            by_category[cat] = []
+            categories_order.append(cat)
+        by_category[cat].append(c)
+    for cat in categories_order:
+        lines.append(f"{cat}")
+        lines.append("-" * min(60, len(cat) + 5))
+        for cmd in by_category[cat]:
+            lines.append(f"  {cmd['name']:<22} {cmd.get('description', '')}")
+        lines.append("")
+    if include_system and system_cmds:
+        lines.append("System")
+        lines.append("------")
+        for cmd in system_cmds:
+            lines.append(f"  {cmd['name']:<22} {cmd.get('description', '')}")
+        lines.append("")
+    return "\n".join(lines)
+
+
 # Introduction: what this terminal does (single space after bullets for even alignment)
 WELCOME_INTRO = """[bold]Arlo Camera Control Terminal[/]
 
-[bold]Connect[/] — Choose [bold]UART[/], [bold]ADB[/] (USB), or [bold]SSH[/]. Device model, FW, and env are auto-detected from [bold]build_info[/] and [bold]kvcmd[/].
+[bold]Connect[/] — Pick a [bold]device[/] (see supported connections), then [bold]UART[/], [bold]ADB[/] (USB), or [bold]SSH[/]. Model, FW, and env are auto-detected from [bold]build_info[/] and [bold]kvcmd[/].
 
-[bold]Device commands[/] — Loaded from Confluence (E3 Wired). Run [bold]help[/] when connected to see the full list (e.g. [bold]reboot[/], [bold]kvcmd[/], [bold]migrate[/], [bold]ptz[/]).
+[bold]Device commands[/] — [bold]E3 Wired[/] cameras load the Confluence CLI catalog; other models only show shared tools until you add a catalog. Run [bold]help[/] when connected.
 
 [bold]Firmware[/] — [bold]fw_setup[/] downloads from Artifactory, runs a local server, and sets the camera [bold]update_url[/]. [bold]use_local_fw[/] uses an existing FW server folder.
 
@@ -96,6 +144,8 @@ def show_disconnected_help() -> None:
 
 def show_models_section(models: list[dict]) -> None:
     """Show the model list section (table + hint). Call this when user runs the 'models' command."""
+    from models.camera_models import format_supported_connections
+
     table = Table(
         show_header=True,
         header_style="bold cyan",
@@ -104,10 +154,12 @@ def show_models_section(models: list[dict]) -> None:
         show_lines=False,
     )
     table.add_column("[bold]#[/]", style="dim", width=2)
-    table.add_column("[bold]Model[/]", style="cyan", width=14)
-    table.add_column("[bold]Description[/]", width=52)
+    table.add_column("[bold]Model[/]", style="cyan", width=12)
+    table.add_column("[bold]Connections[/]", width=18)
+    table.add_column("[bold]Description[/]", width=36)
     for i, m in enumerate(models, 1):
-        table.add_row(str(i), m["name"], m.get("display_name", "\u2014"))
+        conns = format_supported_connections(m.get("supported_connections"))
+        table.add_row(str(i), m["name"], conns, m.get("display_name", "\u2014"))
     hint = Text.from_markup("[dim]Use arrows to move, type to search. Choose [bold]Exit[/] to cancel.[/]")
     content = Group(table, Text(), hint)
     panel = Panel(
@@ -123,6 +175,8 @@ def show_models_section(models: list[dict]) -> None:
 
 def show_models_table(models: list[dict]) -> None:
     """Display available camera models in a table (used elsewhere if needed without panel)."""
+    from models.camera_models import format_supported_connections
+
     table = Table(
         show_header=True,
         header_style="bold cyan",
@@ -131,10 +185,12 @@ def show_models_table(models: list[dict]) -> None:
         show_lines=False,
     )
     table.add_column("[bold]#[/]", style="dim", width=2)
-    table.add_column("[bold]Model[/]", style="cyan", width=14)
-    table.add_column("[bold]Description[/]", width=52)
+    table.add_column("[bold]Model[/]", style="cyan", width=12)
+    table.add_column("[bold]Connections[/]", width=18)
+    table.add_column("[bold]Description[/]", width=36)
     for i, m in enumerate(models, 1):
-        table.add_row(str(i), m["name"], m.get("display_name", "\u2014"))
+        conns = format_supported_connections(m.get("supported_connections"))
+        table.add_row(str(i), m["name"], conns, m.get("display_name", "\u2014"))
     console.print("[bold]Camera models[/]")
     console.print(table)
     console.print()
@@ -221,10 +277,43 @@ def _build_commands_tables_renderable(
     return Group(*parts)
 
 
-def show_commands_table(commands: list[dict], include_system: bool = True) -> None:
+def show_abstract_commands_section(lines: list[str]) -> None:
+    """Print primary (abstract) command list before raw/device catalog in help."""
+    if not lines:
+        return
+    if _gui_menu_bridge is not None:
+        _gui_log("Commands\n")
+        for ln in lines:
+            _gui_log(f"  {ln}\n")
+        _gui_log("\n")
+        return
+    console.print(Text.from_markup("[bold cyan]Commands[/]"))
+    for ln in lines:
+        console.print(f"  {ln}")
+    console.print()
+
+
+def show_commands_table(
+    commands: list[dict],
+    include_system: bool = True,
+    device_profile: str | None = None,
+    section_heading: str | None = None,
+) -> None:
     """Display available commands grouped by category: compact, easy to scan."""
-    subtitle = " (from Confluence)" if include_system and any(c["name"] not in _SYSTEM_CMD_NAMES for c in commands) else ""
-    console.print(Text.from_markup(f"[bold cyan]Available Commands[/][dim]{subtitle}:[/]"))
+    heading = section_heading if section_heading is not None else "Available Commands"
+    has_device_cmds = include_system and any(c["name"] not in _SYSTEM_CMD_NAMES for c in commands)
+    if has_device_cmds:
+        subtitle = " (E3 Wired CLI catalog)" if (device_profile or "") == "e3_wired" else " (device-specific)"
+    else:
+        subtitle = ""
+    if has_device_cmds and device_profile == "none":
+        subtitle = " (no catalog for this model — system commands only)"
+    if _gui_menu_bridge is not None:
+        _gui_log(f"{heading}{subtitle}:\n")
+        _gui_log(_commands_to_plain_text(commands, include_system))
+        _gui_log("Type help to see this again.\n")
+        return
+    console.print(Text.from_markup(f"[bold cyan]{heading}[/][dim]{subtitle}:[/]"))
     console.print(_build_commands_tables_renderable(commands, include_system))
     console.print(Text.from_markup("[dim]Type [bold]help[/] to see this again.[/]\n"))
 
@@ -236,6 +325,17 @@ def show_connection_status(
     connected_at: str | None = None,
 ) -> None:
     """Show current connection status."""
+    if _gui_menu_bridge is not None:
+        lines = [
+            "Connection status",
+            f"  Connection:    {connection_type}",
+            f"  Device:        {device_identifier}",
+            f"  Model:         {model_name}",
+        ]
+        if connected_at:
+            lines.append(f"  Connected at:  {connected_at}")
+        _gui_log("\n".join(lines) + "\n\n")
+        return
     table = Table(show_header=False, box=None)
     table.add_column("Key", style="bold")
     table.add_column("Value")
@@ -255,6 +355,7 @@ def show_connected_device_banner(
     device_identifier: str = "",
     commands: list[dict] | None = None,
     include_system_commands: bool = True,
+    device_profile: str | None = None,
 ) -> None:
     """
     Display connected device info (model, FW, env) and optionally all commands
@@ -286,7 +387,13 @@ def show_connected_device_banner(
     ]
     if commands:
         inner_parts.append(Text())
-        inner_parts.append(Text.from_markup("[bold cyan]Available Commands[/] [dim](from Confluence)[/]"))
+        if device_profile == "none":
+            cmd_hdr = "[bold cyan]Available Commands[/] [dim](no device CLI catalog — shared tools only)[/]"
+        elif device_profile == "e3_wired":
+            cmd_hdr = "[bold cyan]Available Commands[/] [dim](E3 Wired CLI catalog)[/]"
+        else:
+            cmd_hdr = "[bold cyan]Available Commands[/]"
+        inner_parts.append(Text.from_markup(cmd_hdr))
         inner_parts.append(Text())
         inner_parts.append(_build_commands_tables_renderable(commands, include_system_commands, box_style=None))
         inner_parts.append(Text())
@@ -300,16 +407,24 @@ def show_connected_device_banner(
     )
     console.print(banner)
     if not commands:
-        console.print(Text.from_markup("[dim]Commands from Confluence (E3 Wired / arlochat). Type [bold]help[/] to see again.[/]\n"))
+        console.print(Text.from_markup("[dim]Type [bold]help[/] after connecting to see commands for this device.[/]\n"))
 
 
 def show_success(message: str) -> None:
     """Print a success message with green checkmark."""
+    if _gui_menu_bridge is not None:
+        _gui_log(f"\u2713 {message}\n")
+        return
     console.print(f"[bold green]\u2713[/] [green]{message}[/]")
 
 
 def show_error(message: str, suggestion: str | None = None) -> None:
     """Print an error message with red cross and optional suggestion."""
+    if _gui_menu_bridge is not None:
+        _gui_log(f"\u2717 {message}\n")
+        if suggestion:
+            _gui_log(f"{suggestion}\n")
+        return
     console.print(f"[bold red]\u2717[/] [red]{message}[/]")
     if suggestion:
         console.print(f"[yellow]{suggestion}[/]")
@@ -317,4 +432,7 @@ def show_error(message: str, suggestion: str | None = None) -> None:
 
 def show_info(message: str) -> None:
     """Print an informational message (dim)."""
+    if _gui_menu_bridge is not None:
+        _gui_log(f"{message}\n")
+        return
     console.print(f"[dim]{message}[/]")
