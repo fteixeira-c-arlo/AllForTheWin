@@ -3,24 +3,12 @@ import base64
 import json
 import os
 import sys
-import time
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from typing import Callable
 
 # Spinner for single-line search progress
 SPINNER_CHARS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-
-# #region agent log
-_DEBUG_LOG_PATH = r"c:\Users\Arlo-Account\Documents\arlo_scrpits\.cursor\debug.log"
-def _debug_log(msg: str, data: dict, hypothesis_id: str, run_id: str = "run1"):
-    try:
-        os.makedirs(os.path.dirname(_DEBUG_LOG_PATH), exist_ok=True)
-        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"timestamp": int(time.time() * 1000), "location": "artifactory_client.py:list_available_firmware", "message": msg, "data": data, "sessionId": "debug-session", "runId": run_id, "hypothesisId": hypothesis_id}) + "\n")
-    except Exception:
-        pass
-# #endregion
 
 
 def _parse_json_response(r) -> tuple[bool, dict | None, str]:
@@ -341,7 +329,7 @@ def find_firmware_version_in_model(
         sys.stdout.flush()
 
     # Fast path: single AQL request
-    aql_results, aql_err = _search_firmware_aql(api_base, model_folder, headers, version_filter)
+    aql_results, _ = _search_firmware_aql(api_base, model_folder, headers, version_filter)
     if aql_results is not None:
         if aql_results:
             sys.stdout.write(f"\r✓ Found: {len(aql_results)} folder(s) with matching firmware\n")
@@ -433,18 +421,6 @@ def list_available_firmware(
     return True, all_results, ""
 
 
-def construct_download_url(
-    base_url: str,
-    repo_path: str,
-    environment: str,
-    version: str,
-) -> str:
-    """Build Artifactory URL for environment/version. For Phase 2 real requests."""
-    base = base_url.rstrip("/")
-    repo = repo_path.strip("/")
-    return f"{base}/{repo}/{environment}/{version}/"
-
-
 def _is_archive_filename(name: str) -> bool:
     """True if filename looks like a firmware archive (.zip or .tar.gz)."""
     n = name.lower()
@@ -481,12 +457,12 @@ def download_firmware(
         os.makedirs(archive_dir, exist_ok=True)
 
     if repo_folder_path:
-        ok, file_names, list_err = list_version_files(
+        ok, file_names, _ = list_version_files(
             base_url, access_token, model_name, version, username, repo_folder_path=repo_folder_path
         )
         path_prefix = f"{ARTIFACTORY_REPO}/{repo_folder_path.strip('/')}"
     else:
-        ok, file_names, list_err = list_version_files(base_url, access_token, model_name, version, username)
+        ok, file_names, _ = list_version_files(base_url, access_token, model_name, version, username)
         path_prefix = _artifact_path_for_version(model_name, version)
     if not ok or not file_names:
         file_names = list(DEFAULT_BINARY_FILES) + list(DEFAULT_UPDATERULE_FILES)

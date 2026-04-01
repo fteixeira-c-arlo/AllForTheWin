@@ -50,19 +50,6 @@ CAMERA_MODEL_GROUPS = [
     },
 ]
 
-# Flat list of all model names (for get_model_by_name and any code that expects single-model list)
-CAMERA_MODELS = [
-    {
-        "name": m["name"],
-        "display_name": m["display_name"],
-        "supported_connections": m["supported_connections"],
-        "default_settings": m["default_settings"],
-        "fw_search_models": m["fw_search_models"],
-        "command_profile": m.get("command_profile") or "none",
-    }
-    for m in CAMERA_MODEL_GROUPS
-]
-
 
 def format_supported_connections(supported: list[str] | None) -> str:
     """Human-readable connection list, e.g. 'ADB · SSH · UART'."""

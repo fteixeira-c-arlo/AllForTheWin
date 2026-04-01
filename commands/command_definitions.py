@@ -7,14 +7,14 @@ Each profile points at a JSON file (e.g. e3_wired_commands.json from Confluence)
 To add another product line:
   1. Add commands/your_line_commands.json (same shape as e3_wired_commands.json: { "commands": [...] }).
   2. Add a profile entry in command_profiles.json with "commands_file": "your_line_commands.json".
-  3. In models/camera_models.py, set "command_profile" on the relevant CAMERA_MODEL_GROUPS entries.
+  3. In commands/camera_models.py, set "command_profile" on the relevant CAMERA_MODEL_GROUPS entries.
 """
 
 import json
 from pathlib import Path
 from typing import Any
 
-from models.camera_models import get_command_profile_for_model_name
+from commands.camera_models import get_command_profile_for_model_name
 
 _THIS_DIR = Path(__file__).resolve().parent
 _PROFILES_JSON = _THIS_DIR / "command_profiles.json"
@@ -63,7 +63,7 @@ def load_device_commands_for_model(model_name: str | None) -> list[dict[str, Any
     return load_device_commands_for_profile(profile)
 
 
-def load_commands_from_confluence(model_name: str) -> list[dict[str, Any]]:
+def load_device_commands(model_name: str) -> list[dict[str, Any]]:
     """
     Backwards-compatible name: load device commands for this model's profile.
     (E3 Wired still uses e3_wired_commands.json when profile is e3_wired.)

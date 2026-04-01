@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, Any
 import questionary
 from questionary import Choice, Style
 
-from models.camera_models import format_supported_connections
-from utils.validators import validate_firmware_version, validate_ipv4, validate_port
+from commands.camera_models import format_supported_connections
+from utils.validators import validate_ipv4, validate_port
 
 if TYPE_CHECKING:
     from ui.gui_bridge import GuiBridge
@@ -256,8 +256,6 @@ def prompt_ssh_params(default_port: int = 22) -> dict | None:
 
 # --- Firmware update_url flow ---
 
-ENVIRONMENTS = ["QA", "DEV", "PROD_SIGNED"]
-
 
 def prompt_artifactory_base_url(default: str = "") -> str | None:
     """Prompt for Artifactory base URL. Default is Arlo Artifactory. Returns URL or None to cancel."""
@@ -325,32 +323,6 @@ def prompt_artifactory_token() -> str | None:
     if not token:
         return None
     return token
-
-
-def prompt_firmware_version() -> str | None:
-    """Prompt for firmware version (X.X.XX_XXXXXXX). Returns version or None to cancel."""
-    b = _gb()
-    if b is not None:
-        from ui.menus import show_error
-
-        while True:
-            version = b.ask_text("Firmware Version:", "")
-            if version is None:
-                return None
-            v = (version or "").strip()
-            ok, err = validate_firmware_version(v)
-            if ok:
-                return v
-            show_error(err or "Invalid firmware version.")
-    version = questionary.text(
-        "Firmware Version:",
-        default="",
-        validate=lambda x: validate_firmware_version(x)[0] or validate_firmware_version(x)[1],
-        style=custom_style,
-    ).ask()
-    if version is None:
-        return None
-    return (version or "").strip() or None
 
 
 def prompt_firmware_version_filter() -> str | None:
@@ -459,30 +431,6 @@ def prompt_select_env_folder(base_path: str) -> str | None:
         choices=choices,
         style=custom_style,
     ).ask()
-
-
-def prompt_environment() -> str | None:
-    """Prompt for environment (QA / DEV / PROD_SIGNED). Returns env or None to cancel."""
-    b = _gb()
-    if b is not None:
-        return b.ask_select(
-            "Environment:",
-            [("QA", "QA"), ("DEV", "DEV"), ("PROD_SIGNED", "PROD_SIGNED")],
-        )
-    choice = questionary.select(
-        "Environment:",
-        choices=[
-            Choice("QA", value="QA"),
-            Choice("DEV", value="DEV"),
-            Choice("PROD_SIGNED", value="PROD_SIGNED"),
-        ],
-        style=custom_style,
-    ).ask()
-    if choice is None:
-        return None
-    if isinstance(choice, str):
-        return choice
-    return None
 
 
 def prompt_confirm_proceed(message: str = "Proceed? (y/n):") -> bool:

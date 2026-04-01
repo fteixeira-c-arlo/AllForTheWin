@@ -3,7 +3,7 @@
 #
 # Prerequisites (machine that BUILDS the installer):
 #   - Python 3.10+ on PATH
-#   - pip install -r requirements.txt -r requirements-build.txt
+#   - pip install -r requirements.txt
 #   - Inno Setup 6: https://jrsoftware.org/isinfo.php (optional; PyInstaller output still runs without it)
 #
 # Usage (from repo root):  powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
@@ -15,7 +15,6 @@ Set-Location $Root
 Write-Host "=== Arlo Camera Control — build ===" -ForegroundColor Cyan
 
 $req = Join-Path $Root "requirements.txt"
-$reqB = Join-Path $Root "requirements-build.txt"
 $spec = Join-Path $Root "arlo_camera_control_gui.spec"
 
 if (Get-Command py -ErrorAction SilentlyContinue) {
@@ -24,7 +23,6 @@ if (Get-Command py -ErrorAction SilentlyContinue) {
         Write-Host "Using: py -3" -ForegroundColor Gray
         Write-Host "Installing dependencies..." -ForegroundColor Cyan
         py -3 -m pip install -r $req -q
-        py -3 -m pip install -r $reqB -q
         Write-Host "Running PyInstaller (this may take several minutes)..." -ForegroundColor Cyan
         py -3 -m PyInstaller --clean --noconfirm $spec
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -38,7 +36,6 @@ if (-not (Test-Path (Join-Path $Root "dist\ArloCameraControl\ArloCameraControl.e
     Write-Host "Using: python" -ForegroundColor Gray
     Write-Host "Installing dependencies..." -ForegroundColor Cyan
     python -m pip install -r $req -q
-    python -m pip install -r $reqB -q
     Write-Host "Running PyInstaller (this may take several minutes)..." -ForegroundColor Cyan
     python -m PyInstaller --clean --noconfirm $spec
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

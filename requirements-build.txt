@@ -1,7 +1,0 @@
-# Build frozen GUI + Windows installer (maintainers only):
-#   pip install -r requirements.txt -r requirements-build.txt
-#   .\build_installer.ps1
-# Also install Inno Setup 6 (https://jrsoftware.org/isinfo.php) to produce
-#   release\ArloCameraControl-Windows\Install-ArloCameraControl.exe
-# Zip that folder for testers (see docs\BUILD_AND_RELEASE.txt).
-pyinstaller>=6.0.0

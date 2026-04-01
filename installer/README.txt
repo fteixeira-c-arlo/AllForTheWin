@@ -13,7 +13,7 @@ From the repository root (parent of this folder):
 
   powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
 
-Requires Python 3.10+, pip packages from requirements.txt + requirements-build.txt,
+Requires Python 3.10+, pip packages from requirements.txt,
 and Inno Setup 6 for the single-file Setup .exe.
 
 Full maintainer steps: ..\docs\BUILD_AND_RELEASE.txt

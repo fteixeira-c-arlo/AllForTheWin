@@ -6,6 +6,7 @@ python-embed.zip
 
 # Python
 __pycache__/
+.ruff_cache/
 *.py[cod]
 *.pyo
 *.pyd
@@ -15,14 +16,17 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+release/
 # PyInstaller: dist/ and build/ (regenerated). Maintainer notes: docs/BUILD_AND_RELEASE.txt
 # Tester handoff: release/ArloCameraControl-Windows/ (built Install-*.exe when present).
 
 # Logs and local data
 arlo_logs/
 *.log
+debug-*.log
 *.tar
 .arlo_camera_config.json
+.env
 
 # Local FW server (user content)
 local_fw_server/

@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 from rich.console import Console
 
 from commands.build_info import detect_device
-from commands.command_definitions import load_commands_from_confluence
+from commands.command_definitions import load_device_commands
 from commands.command_parser import (
     ABSTRACT_DEFINITIONS,
     get_abstract_command_help_lines,
@@ -58,7 +58,7 @@ from commands.command_parser import (
     parse_and_execute,
     set_tail_live_view_handlers,
 )
-from models.camera_models import (
+from commands.camera_models import (
     format_supported_connections,
     get_command_profile_for_model_name,
     get_model_by_name,
@@ -67,7 +67,7 @@ from models.camera_models import (
 from connections.adb_handler import ADBHandler
 from connections.ssh_handler import SSHHandler
 from connections.uart_handler import UARTHandler, list_uart_ports
-from models.connection_config import ConnectionConfig
+from connections.connection_config import ConnectionConfig
 from ui.gui_bridge import GuiBridge, _SELECT_CANCELLED
 
 
@@ -87,8 +87,8 @@ _WELCOME_TAB_TEXT = (
 
 def _e3_cli_reference_path() -> Path:
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        return Path(sys._MEIPASS) / "help" / "e3_wired_cli_reference.md"
-    return Path(__file__).resolve().parent.parent / "help" / "e3_wired_cli_reference.md"
+        return Path(sys._MEIPASS) / "docs" / "e3_wired_cli_reference.md"
+    return Path(__file__).resolve().parent.parent / "docs" / "e3_wired_cli_reference.md"
 
 
 def _strip_rich_markup(s: str) -> str:
@@ -258,9 +258,6 @@ class _CollapsibleCategoryBlock(QWidget):
 
     def body_layout(self) -> QVBoxLayout:
         return self._body_layout
-
-    def is_expanded(self) -> bool:
-        return self._expanded
 
 
 class _AdvancedTierBlock(QWidget):
@@ -597,7 +594,7 @@ class SessionWorker(QObject):
         self._detected = detect_device(self._handle.execute)
         model_for_commands = self._detected.get("model") or "Device"
         self._command_profile = get_command_profile_for_model_name(self._detected.get("model"))
-        self._device_commands = load_commands_from_confluence(model_for_commands)
+        self._device_commands = load_device_commands(model_for_commands)
         self._emit_state()
         self.commands_updated.emit(list(self._device_commands))
         self.append_log.emit(
@@ -907,7 +904,7 @@ class MainWindow(QMainWindow):
             body = (
                 "# E3 reference file not found\n\n"
                 f"Expected:\n`{path}`\n\n"
-                "From source, it lives at `help/e3_wired_cli_reference.md`. "
+                "From source, it lives at `docs/e3_wired_cli_reference.md`. "
                 "Rebuild the frozen app with the current PyInstaller spec to bundle it."
             )
         browser.setMarkdown(body)

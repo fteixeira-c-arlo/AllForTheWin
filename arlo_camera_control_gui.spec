@@ -16,7 +16,7 @@ _project_root = Path(SPEC).resolve().parent
 datas = [
     (str(_project_root / "commands" / "e3_wired_commands.json"), "commands"),
     (str(_project_root / "commands" / "command_profiles.json"), "commands"),
-    (str(_project_root / "help" / "e3_wired_cli_reference.md"), "help"),
+    (str(_project_root / "docs" / "e3_wired_cli_reference.md"), "docs"),
 ]
 binaries = []
 hiddenimports = []

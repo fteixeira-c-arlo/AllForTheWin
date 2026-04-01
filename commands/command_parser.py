@@ -27,7 +27,6 @@ def set_tail_live_view_handlers(
     _tail_live_view_start = start
     _tail_live_view_stop = stop
 
-from commands.command_definitions import load_commands_from_confluence
 from commands.log_parser import parse_line, write_html
 from ui.menus import (
     show_abstract_commands_section,
@@ -230,7 +229,7 @@ def _similar_commands(name: str, commands: list[dict]) -> list[str]:
 def _match_abstract_prefix(parts: list[str]) -> tuple[str, list[str]] | None:
     """
     If the leading tokens match a known abstract command name, return (abstract_name, remaining_args).
-    Longer names win so e.g. 'update url' beats a hypothetical shorter prefix.
+    Longer names win so e.g. 'update url get' is matched before 'update url'.
     """
     if not parts or not ABSTRACT_DEFINITIONS:
         return None
@@ -469,7 +468,6 @@ def _run_push_arlod(
             show_error(f"push arlod failed running adb shell {shell_cmd!r}: {e}")
             return "continue", None
 
-        err_low = (r.stderr or "").strip().lower()
         if _disconnected(r.stderr or ""):
             return "disconnected", None
         if r.returncode != 0:
@@ -868,7 +866,7 @@ def parse_and_execute(
     # Device command: use "shell" for E3 Wired (full cli command), else command name + args
     for c in device_commands:
         if c["name"].lower() == cmd:
-            # fw_setup: automated flow (Artifactory, local server, send update_url to camera)
+            # fw_setup: Artifactory download, local HTTP server, set camera FOTA URL
             if cmd == "fw_setup" and connection_execute:
                 from commands.update_url_flow import run_update_url_flow
                 err = run_update_url_flow(connection_execute, model)

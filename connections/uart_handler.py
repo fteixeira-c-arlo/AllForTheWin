@@ -201,7 +201,7 @@ class UARTHandler:
                     "(3) Run this terminal as Administrator."
                 ), None
             return False, str(e), None
-        except PermissionError as e:
+        except PermissionError:
             return False, (
                 f"Access denied opening {port}. "
                 "Close other programs using the port, unplug/replug the cable, or run as Administrator."

@@ -144,7 +144,7 @@ def show_disconnected_help() -> None:
 
 def show_models_section(models: list[dict]) -> None:
     """Show the model list section (table + hint). Call this when user runs the 'models' command."""
-    from models.camera_models import format_supported_connections
+    from commands.camera_models import format_supported_connections
 
     table = Table(
         show_header=True,
@@ -175,7 +175,7 @@ def show_models_section(models: list[dict]) -> None:
 
 def show_models_table(models: list[dict]) -> None:
     """Display available camera models in a table (used elsewhere if needed without panel)."""
-    from models.camera_models import format_supported_connections
+    from commands.camera_models import format_supported_connections
 
     table = Table(
         show_header=True,

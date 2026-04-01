@@ -40,11 +40,6 @@ def _find_free_port(start: int = 8000, max_tries: int = 100) -> int | None:
     return None
 
 
-def get_server_root() -> str:
-    """Return the root directory used by the local server."""
-    return _server_root
-
-
 def get_running_server_url() -> tuple[bool, str]:
     """If server is running, return (True, base_url e.g. http://localhost:8000). Else (False, message)."""
     if _server is None:

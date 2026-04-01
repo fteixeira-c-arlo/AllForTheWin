@@ -1,7 +1,6 @@
 """Logging utilities."""
 import logging
 import sys
-from pathlib import Path
 
 _logger: logging.Logger | None = None
 

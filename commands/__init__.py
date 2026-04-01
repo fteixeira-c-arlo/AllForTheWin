@@ -1,6 +1,7 @@
 """Command definitions and parser."""
+from .camera_models import get_model_by_name, get_models
 from .command_definitions import (
-    load_commands_from_confluence,
+    load_device_commands,
     load_device_commands_for_model,
     load_device_commands_for_profile,
 )
@@ -11,7 +12,9 @@ from .command_parser import (
 )
 
 __all__ = [
-    "load_commands_from_confluence",
+    "get_model_by_name",
+    "get_models",
+    "load_device_commands",
     "load_device_commands_for_model",
     "load_device_commands_for_profile",
     "parse_and_execute",
