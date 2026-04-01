@@ -1,0 +1,142 @@
+[
+  {
+    "name": "update url",
+    "description": "Set the update URL and reboot to apply",
+    "args": ["url"],
+    "sequence": ["update_url", "reboot"],
+    "transport_restriction": null
+  },
+  {
+    "name": "update check",
+    "description": "Refresh update metadata from the configured URL",
+    "args": [],
+    "sequence": ["update_refresh"],
+    "transport_restriction": null
+  },
+  {
+    "name": "update apply",
+    "description": "Force refresh and apply pending update",
+    "args": [],
+    "sequence": ["update_refresh_force"],
+    "transport_restriction": null
+  },
+  {
+    "name": "update url get",
+    "description": "Read the current update URL from the device",
+    "args": [],
+    "sequence": ["update_url"],
+    "transport_restriction": null
+  },
+  {
+    "name": "migrate",
+    "description": "Run migration for the given stage and reboot",
+    "args": ["stage"],
+    "sequence": ["migrate", "reboot"],
+    "transport_restriction": null
+  },
+  {
+    "name": "factory reset",
+    "description": "Archive logs then factory reset the device",
+    "args": [],
+    "sequence": ["tar_logs", "factory_reset"],
+    "transport_restriction": null
+  },
+  {
+    "name": "version",
+    "description": "Show firmware / build information",
+    "args": [],
+    "sequence": ["build_info"],
+    "transport_restriction": null
+  },
+  {
+    "name": "info",
+    "description": "Show device and base station information",
+    "args": [],
+    "sequence": ["device_info", "bs_info"],
+    "transport_restriction": null
+  },
+  {
+    "name": "reboot",
+    "description": "Reboot the device",
+    "args": [],
+    "sequence": ["reboot"],
+    "transport_restriction": null
+  },
+  {
+    "name": "serial",
+    "description": "Read serial number via caliget (implementation always passes sn)",
+    "args": [],
+    "sequence": ["caliget"],
+    "transport_restriction": null
+  },
+  {
+    "name": "log level",
+    "description": "Set device log level",
+    "args": ["level"],
+    "sequence": ["log_level"],
+    "transport_restriction": null
+  },
+  {
+    "name": "log tail",
+    "description": "Stream or show recent logs",
+    "args": [],
+    "sequence": ["tail_logs"],
+    "transport_restriction": "no_uart"
+  },
+  {
+    "name": "log save",
+    "description": "Archive logs on the device",
+    "args": [],
+    "sequence": ["tar_logs"],
+    "transport_restriction": null
+  },
+  {
+    "name": "log pull",
+    "description": "Archive logs then pull archive to optional local path",
+    "args": ["local_path?"],
+    "sequence": ["tar_logs", "pull_logs"],
+    "transport_restriction": "no_uart"
+  },
+  {
+    "name": "flash",
+    "description": "Flash firmware via fw_setup",
+    "args": ["ip", "file"],
+    "sequence": ["fw_setup"],
+    "transport_restriction": "no_uart"
+  },
+  {
+    "name": "wifi connect",
+    "description": "Connect to Wi‑Fi and fetch IP",
+    "args": ["ssid", "password", "security?"],
+    "sequence": ["wifi_connect", "general_get_ip"],
+    "transport_restriction": "no_uart"
+  },
+  {
+    "name": "mfg get",
+    "description": "Read manufacturing calibration field",
+    "args": ["field"],
+    "sequence": ["caliget"],
+    "transport_restriction": null
+  },
+  {
+    "name": "mfg set",
+    "description": "Write manufacturing calibration field",
+    "args": ["field", "value"],
+    "sequence": ["caliset"],
+    "transport_restriction": null
+  },
+  {
+    "name": "mfg build",
+    "description": "Show build info (manufacturing context)",
+    "args": [],
+    "sequence": ["build_info"],
+    "transport_restriction": null
+  },
+  {
+    "name": "push arlod",
+    "description": "Push arlod file via ADB (Python-implemented, no raw catalog sequence)",
+    "args": ["local_path"],
+    "sequence": [],
+    "transport_restriction": "adb_only"
+  }
+]

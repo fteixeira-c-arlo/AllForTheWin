@@ -1,46 +1,55 @@
 """
 Command definitions for camera control.
 
-E3 Wired commands (including kvcmd) are loaded from e3_wired_commands.json,
-populated from Arlo Confluence via arlochat MCP (confluence_search). Source:
-"Arlo E3 Wired - How to use CLI on Console" and kvcmd docs (AFS space).
+Device-specific commands are loaded per product line using commands/command_profiles.json.
+Each profile points at a JSON file (e.g. e3_wired_commands.json from Confluence).
 
-To refresh E3 commands (including kvcmd) from Confluence: use arlochat MCP
-in Cursor with:
-  confluence_search(cql='title ~ "E3 Wired" AND title ~ "CLI"')
-  confluence_search(cql='text ~ "kvcmd"')
-then update e3_wired_commands.json with any new or changed commands.
+To add another product line:
+  1. Add commands/your_line_commands.json (same shape as e3_wired_commands.json: { "commands": [...] }).
+  2. Add a profile entry in command_profiles.json with "commands_file": "your_line_commands.json".
+  3. In models/camera_models.py, set "command_profile" on the relevant CAMERA_MODEL_GROUPS entries.
 """
 
 import json
 from pathlib import Path
 from typing import Any
 
-# E3 Wired model codes that use the Confluence-sourced command list (must match camera_models CAMERA_MODEL_GROUPS)
-# Octopus: test device for post-connect build_info + ASCII art flow (same CLI as E3 Wired)
-E3_WIRED_MODELS = {"VMC2070", "VMC3070", "VMC2083", "VMC3083", "VMC2081", "VMC3081", "VMC2073", "VMC3073", "OCTOPUS"}
+from models.camera_models import get_command_profile_for_model_name
 
-# Path to the E3 Wired command list (sourced from Confluence)
 _THIS_DIR = Path(__file__).resolve().parent
-_E3_COMMANDS_JSON = _THIS_DIR / "e3_wired_commands.json"
-
-# Fallback placeholder commands for non-E3 or if JSON missing
-_PLACEHOLDER_COMMANDS = [
-    {"name": "capture", "description": "Take a photo with the camera", "syntax": "capture [options]", "category": "imaging"},
-    {"name": "record", "description": "Start/stop video recording", "syntax": "record [start|stop]", "category": "imaging"},
-    {"name": "status", "description": "Get device status", "syntax": "status", "category": "system"},
-    {"name": "settings", "description": "View/modify camera settings", "syntax": "settings [get|set <key> <value>]", "category": "config"},
-    {"name": "reboot", "description": "Reboot the camera", "syntax": "reboot", "category": "system"},
-    {"name": "logs", "description": "Retrieve device logs", "syntax": "logs [--lines <n>]", "category": "diagnostics"},
-]
+_PROFILES_JSON = _THIS_DIR / "command_profiles.json"
 
 
-def _load_e3_wired_commands() -> list[dict[str, Any]]:
-    """Load E3 Wired command list from JSON (from Confluence)."""
-    if not _E3_COMMANDS_JSON.exists():
+def _load_profiles_manifest() -> dict[str, Any]:
+    if not _PROFILES_JSON.exists():
+        return {}
+    try:
+        with open(_PROFILES_JSON, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def load_device_commands_for_profile(profile_id: str) -> list[dict[str, Any]]:
+    """
+    Load device (camera CLI) commands for a profile id from the manifest.
+    Profile 'none' or missing file → empty list.
+    """
+    pid = (profile_id or "none").strip() or "none"
+    if pid == "none":
+        return []
+    manifest = _load_profiles_manifest()
+    entry = manifest.get(pid)
+    if not isinstance(entry, dict):
+        return []
+    fname = entry.get("commands_file")
+    if not fname or not isinstance(fname, str):
+        return []
+    path = _THIS_DIR / fname
+    if not path.exists():
         return []
     try:
-        with open(_E3_COMMANDS_JSON, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         commands = data.get("commands") or []
         return [dict(c) for c in commands]
@@ -48,18 +57,15 @@ def _load_e3_wired_commands() -> list[dict[str, Any]]:
         return []
 
 
+def load_device_commands_for_model(model_name: str | None) -> list[dict[str, Any]]:
+    """Load device commands for a detected/selected model (via its command_profile)."""
+    profile = get_command_profile_for_model_name(model_name)
+    return load_device_commands_for_profile(profile)
+
+
 def load_commands_from_confluence(model_name: str) -> list[dict[str, Any]]:
     """
-    Return available commands for the specified camera model.
-
-    For E3 Wired models (VMC2070/3070, VMC2083/3083, VMC2081/3081, VMC2073/3073), returns the
-    command list loaded from e3_wired_commands.json (sourced from Arlo
-    Confluence via arlochat MCP). For other models, returns placeholder
-    commands.
+    Backwards-compatible name: load device commands for this model's profile.
+    (E3 Wired still uses e3_wired_commands.json when profile is e3_wired.)
     """
-    model_upper = (model_name or "").strip().upper()
-    if model_upper in E3_WIRED_MODELS:
-        commands = _load_e3_wired_commands()
-        if commands:
-            return commands
-    return _PLACEHOLDER_COMMANDS.copy()
+    return load_device_commands_for_model(model_name)

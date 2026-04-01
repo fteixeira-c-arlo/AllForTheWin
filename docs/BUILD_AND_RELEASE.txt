@@ -1,0 +1,16 @@
+For maintainers (not for end users)
+===================================
+
+1. On a Windows PC with Python 3.10+ and Inno Setup 6 installed, from the repo root:
+
+     powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
+
+2. When it finishes, the installer is written to:
+     release\ArloCameraControl-Windows\Install-ArloCameraControl.exe
+
+3. Commit that folder (the new Install-*.exe) and push, or zip only
+   "release\ArloCameraControl-Windows" and send the zip to testers.
+
+PyInstaller still uses dist\ and build\ (ignored by git). Only the
+release\ArloCameraControl-Windows folder is meant to be zipped or committed
+for distribution.

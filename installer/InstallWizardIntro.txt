@@ -1,0 +1,7 @@
+Arlo Camera Control — quick install
+
+  • Nothing else to install (no Python, no command line).
+  • Installs under your user account — administrator rights are not required.
+  • You can add a desktop shortcut on the next page if you want.
+
+Click Next to choose the folder and continue.

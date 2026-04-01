@@ -40,11 +40,11 @@ from ui.prompts import (
     prompt_artifactory_token,
     prompt_artifactory_username,
     prompt_confirm_proceed,
-    prompt_environment,
     prompt_firmware_version_filter,
     prompt_fw_server_root,
     prompt_save_credentials_to_config,
     prompt_select_binaries_folder,
+    prompt_select_env_folder,
     prompt_select_firmware_version,
 )
 
@@ -213,8 +213,20 @@ def run_update_url_flow(
     # When a file was selected, version is the repo folder path (e.g. VMC3073/release-MR5); use first segment for download/extract target
     download_model = (version.split("/")[0] if "/" in version else version) if selected_filename else model_name
 
-    # Local path uses default env (QA) for folder layout
-    env = "QA"
+    # Select folder for update URL from folders in local_server (e.g. C:\FxTest\fw_server\local_server)
+    root = _default_fw_server_root()
+    env = prompt_select_env_folder(root)
+    if not env:
+        if not os.path.isdir(root):
+            show_error(f"FW server root not found: {root}")
+        else:
+            try:
+                subdirs = [d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)) and not d.startswith(".")]
+                if not subdirs:
+                    show_error(f"No folders found in {root}. Create at least one (e.g. qa, dev, prod) and try again.")
+            except OSError:
+                pass
+        return "cancelled"
     env_lower = env.lower()
 
     # Summary
@@ -226,7 +238,6 @@ def run_update_url_flow(
     if not prompt_confirm_proceed("Proceed with firmware download and server setup? (y/n):"):
         return "cancelled"
 
-    root = _default_fw_server_root()
     ok, path_or_err, binaries_dir, updaterules_dir, archive_dir = setup_directory_structure(
         root, env, model_name, fw_search_models=fw_search_models
     )
@@ -334,6 +345,7 @@ def run_use_local_fw_server(
     running, running_msg = check_server_status()
     base_url: str
     port: str
+    root: str
 
     if running:
         ok, url = get_running_server_url()
@@ -344,6 +356,7 @@ def run_use_local_fw_server(
         host_part = base_url.replace("http://", "").replace("https://", "").strip("/")
         port = host_part.split(":")[1] if ":" in host_part else str(DEFAULT_PORT)
         console.print(f"[dim]Server already running at {base_url}[/]\n")
+        root = _default_fw_server_root()
     else:
         root = prompt_fw_server_root(_default_fw_server_root())
         if not root:
@@ -360,8 +373,17 @@ def run_use_local_fw_server(
         port = host_part.split(":")[1] if ":" in host_part else str(DEFAULT_PORT)
         show_success(f"Server started at {base_url}\n")
 
-    env = prompt_environment()
+    env = prompt_select_env_folder(root)
     if not env:
+        if not os.path.isdir(root):
+            show_error(f"FW server root not found: {root}")
+        else:
+            try:
+                subdirs = [d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)) and not d.startswith(".")]
+                if not subdirs:
+                    show_error(f"No folders found in {root}. Create at least one (e.g. qa, dev, prod) and try again.")
+            except OSError:
+                pass
         return "cancelled"
     env_lower = env.lower()
     local_ip = _get_local_ipv4()

@@ -15,10 +15,13 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+# PyInstaller: dist/ and build/ (regenerated). Maintainer notes: docs/BUILD_AND_RELEASE.txt
+# Tester handoff: release/ArloCameraControl-Windows/ (built Install-*.exe when present).
 
 # Logs and local data
 arlo_logs/
 *.log
+*.tar
 .arlo_camera_config.json
 
 # Local FW server (user content)

@@ -1,6 +1,6 @@
 # Arlo Camera Terminal - Bootstrap launcher
 # Runs the terminal, installing Python (embed) and dependencies if needed.
-# Usage: .\run.ps1   or double-click run.bat
+# Usage: .\run.ps1
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -10,7 +10,6 @@ $PY_VERSION = "3.12.10"
 $PY_EMBED_URL = "https://www.python.org/ftp/python/$PY_VERSION/python-$PY_VERSION-embed-amd64.zip"
 $PY_EMBED_DIR = Join-Path $ScriptDir ".python"
 $PY_EXE = Join-Path $PY_EMBED_DIR "python.exe"
-$VENV_DIR = Join-Path $ScriptDir ".venv"
 $GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
 $REQUIREMENTS = Join-Path $ScriptDir "requirements.txt"
 

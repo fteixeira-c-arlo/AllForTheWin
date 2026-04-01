@@ -22,7 +22,7 @@ def set_tail_live_view_handlers(
     start: Callable[[str, str], None] | None,
     stop: Callable[[str], None] | None,
 ) -> None:
-    """When start/stop are set (e.g. GUI), tail_logs/parse_logs use them instead of an external tail window."""
+    """When start/stop are set (e.g. GUI), log tail / log parse use them instead of an external tail window."""
     global _tail_live_view_start, _tail_live_view_stop
     _tail_live_view_start = start
     _tail_live_view_stop = stop
@@ -44,6 +44,26 @@ ABSTRACT_DEFINITIONS: list[dict] = load_abstract_definitions(
     str(_COMMAND_PARSER_DIR / "abstract_command_definitions.json")
 )
 
+
+def get_visible_commands(device_commands: list[dict]) -> tuple[list[dict], list[dict]]:
+    """
+    Split the device catalog for display only.
+
+    Returns (abstract_command_definitions, advanced_raw_device_commands).
+    Entries with a non-empty ``abstract`` field are implementation steps for an abstract
+    command and are omitted from the second list; they remain in the full catalog for execution.
+    """
+    advanced: list[dict] = []
+    for c in device_commands:
+        if not isinstance(c, dict):
+            continue
+        link = c.get("abstract")
+        if link is not None and str(link).strip():
+            continue
+        advanced.append(c)
+    return (list(ABSTRACT_DEFINITIONS), advanced)
+
+
 # Default remote path for log archive on camera (BusyBox tar creates uncompressed .tar)
 PULL_LOGS_REMOTE_PATH = "/tmp/allsystem.logs.tar"
 
@@ -52,36 +72,78 @@ PULL_LOGS_REMOTE_PATH = "/tmp/allsystem.logs.tar"
 SYSTEM_COMMANDS = [
     {"name": "help", "description": "Show available commands", "command_profiles": None},
     {"name": "status", "description": "Show connection status", "command_profiles": None},
-    {"name": "stop_server", "description": "Stop the local firmware server", "command_profiles": ["e3_wired"]},
-    {"name": "server_status", "description": "Check local firmware server status", "command_profiles": ["e3_wired"]},
-    {"name": "update_url", "description": "Set or show FOTA update URL (update_url [url])", "command_profiles": ["e3_wired"]},
-    {"name": "use_local_fw", "description": "Start local FW server (if needed) and set camera update_url to it", "command_profiles": ["e3_wired"]},
+    {"name": "server stop", "description": "Stop the local firmware HTTP server", "command_profiles": ["e3_wired"]},
+    {"name": "server status", "description": "Check whether the local firmware HTTP server is running", "command_profiles": ["e3_wired"]},
+    {"name": "fw local", "description": "Start local firmware server and set camera update URL to it", "command_profiles": ["e3_wired"]},
     {"name": "config_show", "description": "Show saved Artifactory credentials (no token)", "command_profiles": None},
     {"name": "config_update", "description": "Update saved Artifactory credentials", "command_profiles": None},
     {"name": "config_delete", "description": "Delete saved Artifactory credentials", "command_profiles": None},
-    {"name": "tail_logs", "description": "Stream system log to a file; live view (GUI tab or terminal) — tail_logs_stop to stop and save", "command_profiles": ["e3_wired"]},
-    {"name": "tail_logs_stop", "description": "Stop log streaming; logs are saved to the file", "command_profiles": ["e3_wired"]},
-    {"name": "parse_logs", "description": "Stream and parse logs; live view (GUI tab or terminal); parse_logs_stop for HTML report", "command_profiles": ["e3_wired"]},
-    {"name": "parse_logs_stop", "description": "Stop log parsing and save HTML report", "command_profiles": ["e3_wired"]},
+    {"name": "log tail", "description": "Stream device system log live; use log tail stop to stop", "command_profiles": ["e3_wired"]},
+    {"name": "log tail stop", "description": "Stop log streaming and save the log file", "command_profiles": ["e3_wired"]},
+    {"name": "log parse", "description": "Stream and parse logs live; use log parse stop to save HTML report", "command_profiles": ["e3_wired"]},
+    {"name": "log parse stop", "description": "Stop log parsing and save HTML report", "command_profiles": ["e3_wired"]},
     {"name": "parse_log_file", "description": "Select a log file from arlo_logs folder and generate HTML parse report", "command_profiles": None},
-    {"name": "export_logs_tftp", "description": "(UART only) Tar logs, then upload via TFTP; requires onboarded camera and TFTP server on same network", "command_profiles": ["e3_wired"]},
+    {"name": "log export", "description": "Archive logs on device and upload via TFTP (UART only)", "command_profiles": ["e3_wired"]},
     {"name": "disconnect", "description": "Close connection and exit", "command_profiles": None},
     {"name": "exit", "description": "Close connection and exit", "command_profiles": None},
     {"name": "back", "description": "Disconnect and return to main menu", "command_profiles": None},
 ]
 
 
-# Path of the log file when tail_logs or parse_logs is running
+# Underscore names remapped to canonical multi-word tool vocabulary (full line, lowercased).
+_TOOL_NAME_ALIASES: dict[str, str] = {
+    "tail_logs": "log tail",
+    "tail_logs_stop": "log tail stop",
+    "parse_logs": "log parse",
+    "parse_logs_stop": "log parse stop",
+    "export_logs_tftp": "log export",
+    "use_local_fw": "fw local",
+    "stop_server": "server stop",
+    "server_status": "server status",
+}
+
+
+_MULTIWORD_E3_TOOL_NAMES = frozenset(
+    {
+        "log tail",
+        "log tail stop",
+        "log parse",
+        "log parse stop",
+        "log export",
+        "fw local",
+        "server stop",
+        "server status",
+    }
+)
+
+
+def get_tools_for_profile(command_profile: str, connection_type: str = "") -> list[dict]:
+    """E3-wired multi-word system tools (prefix-matched like abstract commands)."""
+    pid = (command_profile or "none").strip() or "none"
+    _ = connection_type  # reserved for transport-specific tool visibility
+    out: list[dict] = []
+    for c in SYSTEM_COMMANDS:
+        name = (c.get("name") or "").strip()
+        if name not in _MULTIWORD_E3_TOOL_NAMES:
+            continue
+        prof = c.get("command_profiles")
+        if not (isinstance(prof, (list, tuple, set)) and pid in prof):
+            continue
+        out.append(c)
+    return sorted(out, key=lambda d: len((d.get("name") or "").strip()), reverse=True)
+
+
+# Path of the log file when log tail or log parse is running
 _tail_log_path: str | None = None
-# True when current tail session is parse_logs (so stop generates HTML)
+# True when current tail session is log parse (so stop generates HTML)
 _parse_logs_mode: bool = False
-# Accumulated parsed entries for parse_logs_stop (append from reader thread)
+# Accumulated parsed entries for log parse stop (append from reader thread)
 _parsed_entries: list[dict] = []
 _parsed_entries_lock: threading.Lock = threading.Lock()
 
 
 def _spawn_tail_viewer_terminal(log_path: str, title: str | None = None) -> None:
-    """Open a new terminal window that follows the log file (tail -f style). Log is still saved to file when tail_logs_stop/parse_logs_stop is used."""
+    """Open a new terminal window that follows the log file (tail -f style). Log is still saved when log tail stop / log parse stop is used."""
     if title is None:
         title = "Tail logs - system-log_V1_0"
     try:
@@ -192,6 +254,28 @@ def _match_abstract_prefix(parts: list[str]) -> tuple[str, list[str]] | None:
     return None
 
 
+def _match_tool_prefix(parts: list[str], tools: list[dict]) -> tuple[str, list[str]] | None:
+    """
+    If leading tokens match a tool entry's name, return (tool_name, remaining_args).
+    Longer names win (same rules as _match_abstract_prefix).
+    """
+    if not parts or not tools:
+        return None
+    for t in tools:
+        name = (t.get("name") or "").strip()
+        if not name:
+            continue
+        name_words = name.split()
+        if len(parts) < len(name_words):
+            continue
+        if [p.lower() for p in parts[: len(name_words)]] != [
+            w.lower() for w in name_words
+        ]:
+            continue
+        return name, parts[len(name_words) :]
+    return None
+
+
 def _abstract_help_arg_suffix(arg_specs: list[Any]) -> str:
     """Format abstract `args` JSON field for help, e.g. ' <url>' or ' <ssid> <password> [<security>]'"""
     if not arg_specs:
@@ -240,6 +324,11 @@ def _abstract_help_lines(definitions: list[dict]) -> list[str]:
         tag = _abstract_help_transport_tag(d.get("transport_restriction"))
         lines.append(f"{name}{args_suffix}  —  {desc}{tag}")
     return lines
+
+
+def get_abstract_command_help_lines() -> list[str]:
+    """Lines for the primary «Commands» section (same as help output)."""
+    return _abstract_help_lines(ABSTRACT_DEFINITIONS)
 
 
 def _run_push_arlod(
@@ -422,6 +511,241 @@ def parse_and_execute(
     model_name = (model or {}).get("name") or "Camera"
     profile = (command_profile or (model or {}).get("command_profile") or "none").strip() or "none"
     parts = line.split()
+    _raw_line = " ".join(parts).lower().strip()
+    if _raw_line in _TOOL_NAME_ALIASES:
+        parts = _TOOL_NAME_ALIASES[_raw_line].split()
+
+    _tool_hit = _match_tool_prefix(parts, get_tools_for_profile(profile, connection_type))
+    if _tool_hit is not None:
+        tool_name, _tool_args = _tool_hit
+
+        if tool_name == "server stop":
+            from commands.update_url_flow import run_stop_server
+
+            return "continue", run_stop_server()
+
+        if tool_name == "server status":
+            from commands.update_url_flow import run_server_status
+
+            return "continue", run_server_status()
+
+        if tool_name == "fw local":
+            if not connection_execute:
+                show_error("Connect to the camera first to use fw local.")
+                return "continue", None
+            try:
+                from commands.update_url_flow import run_use_local_fw_server
+
+                err = run_use_local_fw_server(connection_execute)
+            except (KeyboardInterrupt, EOFError):
+                return "continue", None
+            except Exception as e:
+                show_error("fw local failed.", str(e))
+                return "continue", None
+            if err is None:
+                return "continue", None
+            if err == "disconnected":
+                return "disconnected", None
+            if err == "cancelled":
+                return "continue", None
+            return "continue", None
+
+        if tool_name == "log tail":
+            start_tail = getattr(connection_handle, "start_tail_logs_to_file", None) if connection_handle else None
+            if not start_tail or not callable(start_tail):
+                show_error("Connect to the camera first (ADB, SSH, or UART) to use log tail.")
+                return "continue", None
+            if _tail_log_path:
+                show_error(
+                    "A log tail or log parse session is already running. Use log tail stop or log parse stop first."
+                )
+                return "continue", None
+            try:
+                log_dir = os.path.join(os.getcwd(), "arlo_logs")
+                os.makedirs(log_dir, exist_ok=True)
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                log_path = os.path.join(log_dir, f"system_log_{stamp}.log")
+                result = start_tail(log_path)
+                if not isinstance(result, (tuple, list)) or len(result) != 2:
+                    show_error("Failed to start log tail (unexpected response).")
+                    return "continue", None
+                ok, err = result[0], result[1]
+                if not ok:
+                    show_error(err or "Failed to start log tail.")
+                    return "continue", None
+                _tail_log_path = log_path
+                _parse_logs_mode = False
+                if _tail_live_view_start:
+                    _tail_live_view_start(log_path, "Tail logs")
+                else:
+                    _spawn_tail_viewer_terminal(log_path)
+                hint = (
+                    "Live view: in-app tab."
+                    if _tail_live_view_start
+                    else "Live view: external terminal."
+                )
+                return "continue", (
+                    f"Log is being written to [bold]{log_path}[/]. {hint} "
+                    "Use [bold]log tail stop[/] to stop and save."
+                )
+            except OSError as e:
+                show_error(str(e))
+                return "continue", None
+            except Exception as e:
+                show_error(f"log tail failed: {e}")
+                return "continue", None
+
+        if tool_name == "log tail stop":
+            stop_tail = getattr(connection_handle, "stop_tail_logs", None) if connection_handle else None
+            if stop_tail and callable(stop_tail):
+                stop_tail()
+            path = _tail_log_path
+            _tail_log_path = None
+            _parse_logs_mode = False
+            if path and _tail_live_view_stop:
+                _tail_live_view_stop(path)
+            if path:
+                return "continue", f"Stopped. Logs saved to [bold]{path}[/]"
+            return "continue", "No log tail session was running."
+
+        if tool_name == "log parse":
+            start_tail = getattr(connection_handle, "start_tail_logs_to_file", None) if connection_handle else None
+            if not start_tail or not callable(start_tail):
+                show_error("Connect to the camera first (ADB, SSH, or UART) to use log parse.")
+                return "continue", None
+            if _tail_log_path:
+                show_error(
+                    "A log tail or log parse session is already running. Use log tail stop or log parse stop first."
+                )
+                return "continue", None
+            try:
+                log_dir = os.path.join(os.getcwd(), "arlo_logs")
+                os.makedirs(log_dir, exist_ok=True)
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                log_path = os.path.join(log_dir, f"system_log_parse_{stamp}.log")
+                _parsed_entries = []
+
+                def on_line(line: str) -> None:
+                    with _parsed_entries_lock:
+                        _parsed_entries.append(parse_line(line))
+
+                result = start_tail(log_path, line_callback=on_line)
+                if not isinstance(result, (tuple, list)) or len(result) != 2:
+                    show_error("Failed to start log parse (unexpected response).")
+                    return "continue", None
+                ok, err = result[0], result[1]
+                if not ok:
+                    show_error(err or "Failed to start log parse.")
+                    return "continue", None
+                _tail_log_path = log_path
+                _parse_logs_mode = True
+                if _tail_live_view_start:
+                    _tail_live_view_start(log_path, "Parse logs (live)")
+                else:
+                    _spawn_tail_viewer_terminal(log_path, title="Parse logs - live view")
+                hint = (
+                    "Live view: in-app tab."
+                    if _tail_live_view_start
+                    else "Live view: external terminal."
+                )
+                return "continue", (
+                    f"Parsing logs. {hint} Use [bold]log parse stop[/] to stop and generate HTML report."
+                )
+            except OSError as e:
+                show_error(str(e))
+                return "continue", None
+            except Exception as e:
+                show_error(f"log parse failed: {e}")
+                return "continue", None
+
+        if tool_name == "log parse stop":
+            if not _tail_log_path or not _parse_logs_mode:
+                return "continue", "No log parse session was running."
+            path_for_ui = _tail_log_path
+            stop_tail = getattr(connection_handle, "stop_tail_logs", None) if connection_handle else None
+            if stop_tail and callable(stop_tail):
+                stop_tail()
+            report_path = ""
+            try:
+                log_dir = os.path.join(os.getcwd(), "arlo_logs")
+                os.makedirs(log_dir, exist_ok=True)
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                report_path = os.path.join(log_dir, f"parsed_{stamp}.html")
+                with _parsed_entries_lock:
+                    entries_snapshot = list(_parsed_entries)
+                write_html(entries_snapshot, report_path, title="Log parse report")
+            except Exception as e:
+                show_error(f"Failed to write HTML report: {e}")
+            finally:
+                _tail_log_path = None
+                _parse_logs_mode = False
+                with _parsed_entries_lock:
+                    _parsed_entries.clear()
+                if path_for_ui and _tail_live_view_stop:
+                    _tail_live_view_stop(path_for_ui)
+            if report_path:
+                return "continue", f"Stopped. Report saved to [bold]{report_path}[/]"
+            return "continue", "Stopped. (Report could not be saved.)"
+
+        if tool_name == "log export":
+            if connection_type.upper() != "UART":
+                show_error("log export is only available over UART.", "Connect via UART and try again.")
+                return "continue", None
+            if not connection_execute:
+                show_error("Not connected. Connect via UART first.")
+                return "continue", None
+            ok, out = connection_execute("kvcmd get KV_BS_CLAIMED", [])
+            raw = (out or "").strip()
+            show_info(f"kvcmd get KV_BS_CLAIMED → {repr(raw) if raw else '(empty)'}")
+            if not ok:
+                if out and "Device disconnected" in (out or ""):
+                    return "disconnected", None
+                show_error("Could not read KV_BS_CLAIMED.", out or "Command failed.")
+                return "continue", None
+            if not _is_kv_bs_claimed_one(out or ""):
+                show_error(
+                    "Camera is not onboarded.",
+                    f"KV_BS_CLAIMED must be 1. kvcmd returned: {repr(raw)}. Onboard the camera first, then run log export again.",
+                )
+                return "continue", None
+            ok, out = connection_execute("arlocmd device_info", [])
+            if not ok:
+                if out and "Device disconnected" in (out or ""):
+                    return "disconnected", None
+                show_error("Camera did not respond (device_info). Ensure the device is online and running.", out or "")
+                return "continue", None
+            tar_cmd = "tar -czvf /tmp/allsystem.logs.tar.gz /userdata/logs /tmp/logs/system-log_V1_0"
+            ok, out = connection_execute(tar_cmd, [])
+            if not ok:
+                if out and "Device disconnected" in (out or ""):
+                    return "disconnected", None
+                show_error("Tar failed.", out or "Check that paths exist on device.")
+                return "continue", None
+            ip = prompt_line(
+                "Is the TFTP server running? Is the camera connected to the same network as the TFTP server? "
+                "Enter the TFTP server's local IPv4 (e.g. 192.168.1.100), or leave empty to cancel:",
+                default="",
+            ).strip()
+            if not ip:
+                return "continue", "Export cancelled (no TFTP address)."
+            valid, err = validate_ipv4(ip)
+            if not valid:
+                show_error(err)
+                return "continue", None
+            if not prompt_confirm_proceed(f"Upload /tmp/allsystem.logs.tar.gz to {ip} via TFTP? (y/n):"):
+                return "continue", "Upload cancelled."
+            tftp_cmd = f"tftp -p -l /tmp/allsystem.logs.tar.gz {ip}"
+            ok, out = connection_execute(tftp_cmd, [])
+            if not ok:
+                if out and "Device disconnected" in (out or ""):
+                    return "disconnected", None
+                show_error("TFTP upload failed.", out or "Check network and TFTP server.")
+                return "continue", None
+            return "continue", f"TFTP upload completed. File sent to {ip} as allsystem.logs.tar.gz"
+
+        show_error(f"Unhandled tool command {tool_name!r}.")
+        return "continue", None
+
     abstract_hit = _match_abstract_prefix(parts)
     if abstract_hit is not None:
         abstract_name, abstract_args = abstract_hit
@@ -458,9 +782,6 @@ def parse_and_execute(
 
     cmd = (parts[0] or "").lower()
     args = parts[1:] if len(parts) > 1 else []
-    # Aliases for fw_setup (automated flow)
-    if cmd in ("upd_url", "fw_url"):
-        cmd = "fw_setup"
 
     system_cmds = get_system_commands_for_profile(profile)
     all_cmds = device_commands + system_cmds
@@ -468,14 +789,15 @@ def parse_and_execute(
 
     if cmd in ("help", "?", "--help"):
         show_abstract_commands_section(_abstract_help_lines(ABSTRACT_DEFINITIONS))
-        full = list(device_commands) + [
+        _, advanced_device = get_visible_commands(device_commands)
+        full = list(advanced_device) + [
             {"name": c["name"], "description": c["description"]} for c in system_cmds
         ]
         show_commands_table(
             full,
             include_system=True,
             device_profile=profile,
-            section_heading="Raw / Advanced Commands",
+            section_heading="Advanced",
         )
         return "continue", None
 
@@ -490,34 +812,6 @@ def parse_and_execute(
 
     if cmd == "back":
         return "back", None
-
-    if cmd == "stop_server":
-        from commands.update_url_flow import run_stop_server
-        return "continue", run_stop_server()
-
-    if cmd == "server_status":
-        from commands.update_url_flow import run_server_status
-        return "continue", run_server_status()
-
-    if cmd == "use_local_fw":
-        if not connection_execute:
-            show_error("Connect to the camera first to use use_local_fw.")
-            return "continue", None
-        try:
-            from commands.update_url_flow import run_use_local_fw_server
-            err = run_use_local_fw_server(connection_execute)
-        except (KeyboardInterrupt, EOFError):
-            return "continue", None
-        except Exception as e:
-            show_error("use_local_fw failed.", str(e))
-            return "continue", None
-        if err is None:
-            return "continue", None
-        if err == "disconnected":
-            return "disconnected", None
-        if err == "cancelled":
-            return "continue", None
-        return "continue", None
 
     if cmd == "config_show":
         from commands.config_commands import run_config_show
@@ -534,151 +828,14 @@ def parse_and_execute(
         run_config_delete()
         return "continue", None
 
-    if cmd == "tail_logs":
-        start_tail = getattr(connection_handle, "start_tail_logs_to_file", None) if connection_handle else None
-        if not start_tail or not callable(start_tail):
-            show_error("Connect to the camera first (ADB, SSH, or UART) to use tail_logs.")
-            return "continue", None
-        if _tail_log_path:
-            show_error(
-                "A tail or parse_logs session is already running. Use tail_logs_stop or parse_logs_stop first."
-            )
-            return "continue", None
-        try:
-            log_dir = os.path.join(os.getcwd(), "arlo_logs")
-            os.makedirs(log_dir, exist_ok=True)
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_path = os.path.join(log_dir, f"system_log_{stamp}.log")
-            result = start_tail(log_path)
-            if not isinstance(result, (tuple, list)) or len(result) != 2:
-                show_error("Failed to start tail_logs (unexpected response).")
-                return "continue", None
-            ok, err = result[0], result[1]
-            if not ok:
-                show_error(err or "Failed to start tail_logs.")
-                return "continue", None
-            _tail_log_path = log_path
-            _parse_logs_mode = False
-            if _tail_live_view_start:
-                _tail_live_view_start(log_path, "Tail logs")
-            else:
-                _spawn_tail_viewer_terminal(log_path)
-            hint = (
-                "Live view: in-app tab."
-                if _tail_live_view_start
-                else "Live view: external terminal."
-            )
-            return "continue", (
-                f"Log is being written to [bold]{log_path}[/]. {hint} "
-                "Use [bold]tail_logs_stop[/] to stop and save."
-            )
-        except OSError as e:
-            show_error(str(e))
-            return "continue", None
-        except Exception as e:
-            show_error(f"tail_logs failed: {e}")
-            return "continue", None
-
-    if cmd == "tail_logs_stop":
-        stop_tail = getattr(connection_handle, "stop_tail_logs", None) if connection_handle else None
-        if stop_tail and callable(stop_tail):
-            stop_tail()
-        path = _tail_log_path
-        _tail_log_path = None
-        _parse_logs_mode = False
-        if path and _tail_live_view_stop:
-            _tail_live_view_stop(path)
-        if path:
-            return "continue", f"Stopped. Logs saved to [bold]{path}[/]"
-        return "continue", "No tail_logs session was running."
-
-    if cmd == "parse_logs":
-        start_tail = getattr(connection_handle, "start_tail_logs_to_file", None) if connection_handle else None
-        if not start_tail or not callable(start_tail):
-            show_error("Connect to the camera first (ADB, SSH, or UART) to use parse_logs.")
-            return "continue", None
-        if _tail_log_path:
-            show_error(
-                "A tail or parse_logs session is already running. Use tail_logs_stop or parse_logs_stop first."
-            )
-            return "continue", None
-        try:
-            log_dir = os.path.join(os.getcwd(), "arlo_logs")
-            os.makedirs(log_dir, exist_ok=True)
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_path = os.path.join(log_dir, f"system_log_parse_{stamp}.log")
-            _parsed_entries = []
-
-            def on_line(line: str) -> None:
-                with _parsed_entries_lock:
-                    _parsed_entries.append(parse_line(line))
-
-            result = start_tail(log_path, line_callback=on_line)
-            if not isinstance(result, (tuple, list)) or len(result) != 2:
-                show_error("Failed to start parse_logs (unexpected response).")
-                return "continue", None
-            ok, err = result[0], result[1]
-            if not ok:
-                show_error(err or "Failed to start parse_logs.")
-                return "continue", None
-            _tail_log_path = log_path
-            _parse_logs_mode = True
-            if _tail_live_view_start:
-                _tail_live_view_start(log_path, "Parse logs (live)")
-            else:
-                _spawn_tail_viewer_terminal(log_path, title="Parse logs - live view")
-            hint = (
-                "Live view: in-app tab."
-                if _tail_live_view_start
-                else "Live view: external terminal."
-            )
-            return "continue", (
-                f"Parsing logs. {hint} Use [bold]parse_logs_stop[/] to stop and generate HTML report."
-            )
-        except OSError as e:
-            show_error(str(e))
-            return "continue", None
-        except Exception as e:
-            show_error(f"parse_logs failed: {e}")
-            return "continue", None
-
-    if cmd == "parse_logs_stop":
-        if not _tail_log_path or not _parse_logs_mode:
-            return "continue", "No parse_logs session was running."
-        path_for_ui = _tail_log_path
-        stop_tail = getattr(connection_handle, "stop_tail_logs", None) if connection_handle else None
-        if stop_tail and callable(stop_tail):
-            stop_tail()
-        report_path = ""
-        try:
-            log_dir = os.path.join(os.getcwd(), "arlo_logs")
-            os.makedirs(log_dir, exist_ok=True)
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            report_path = os.path.join(log_dir, f"parsed_{stamp}.html")
-            with _parsed_entries_lock:
-                entries_snapshot = list(_parsed_entries)
-            write_html(entries_snapshot, report_path, title="Log parse report")
-        except Exception as e:
-            show_error(f"Failed to write HTML report: {e}")
-        finally:
-            _tail_log_path = None
-            _parse_logs_mode = False
-            with _parsed_entries_lock:
-                _parsed_entries.clear()
-            if path_for_ui and _tail_live_view_stop:
-                _tail_live_view_stop(path_for_ui)
-        if report_path:
-            return "continue", f"Stopped. Report saved to [bold]{report_path}[/]"
-        return "continue", "Stopped. (Report could not be saved.)"
-
     if cmd == "parse_log_file":
         log_dir = os.path.join(os.getcwd(), "arlo_logs")
         if not os.path.isdir(log_dir):
-            show_error("arlo_logs folder not found.", "Run tail_logs or parse_logs first to create log files, or create arlo_logs manually.")
+            show_error("arlo_logs folder not found.", "Run log tail or log parse first to create log files, or create arlo_logs manually.")
             return "continue", None
         files_in_dir = [f for f in os.listdir(log_dir) if os.path.isfile(os.path.join(log_dir, f)) and not f.startswith(".")]
         if not files_in_dir:
-            show_error("No log files in arlo_logs.", "Run tail_logs or parse_logs to capture logs first.")
+            show_error("No log files in arlo_logs.", "Run log tail or log parse to capture logs first.")
             return "continue", None
         selected = prompt_select_log_file(log_dir)
         if selected is None:
@@ -699,85 +856,6 @@ def parse_and_execute(
             show_error(f"Cannot write report: {e}")
             return "continue", None
         return "continue", f"Report saved to [bold]{report_path}[/] ([dim]{len(entries)} lines[/])"
-
-    # export_logs_tftp: UART only — check onboarded + online, tar logs, then tftp upload
-    if cmd == "export_logs_tftp":
-        if connection_type.upper() != "UART":
-            show_error("export_logs_tftp is only available over UART.", "Connect via UART and try again.")
-            return "continue", None
-        if not connection_execute:
-            show_error("Not connected. Connect via UART first.")
-            return "continue", None
-        # 1) Check KV_BS_CLAIMED == 1 (onboarded) — run kvcmd and show what was read
-        ok, out = connection_execute("kvcmd get KV_BS_CLAIMED", [])
-        raw = (out or "").strip()
-        show_info(f"kvcmd get KV_BS_CLAIMED → {repr(raw) if raw else '(empty)'}")
-        if not ok:
-            if out and "Device disconnected" in (out or ""):
-                return "disconnected", None
-            show_error("Could not read KV_BS_CLAIMED.", out or "Command failed.")
-            return "continue", None
-        if not _is_kv_bs_claimed_one(out or ""):
-            show_error(
-                "Camera is not onboarded.",
-                f"KV_BS_CLAIMED must be 1. kvcmd returned: {repr(raw)}. Onboard the camera first, then run export_logs_tftp again.",
-            )
-            return "continue", None
-        # 2) Check camera is online and running (quick command)
-        ok, out = connection_execute("arlocmd device_info", [])
-        if not ok:
-            if out and "Device disconnected" in (out or ""):
-                return "disconnected", None
-            show_error("Camera did not respond (device_info). Ensure the device is online and running.", out or "")
-            return "continue", None
-        # 3) Tar logs (creates .tar.gz); execute() waits for shell prompt
-        tar_cmd = "tar -czvf /tmp/allsystem.logs.tar.gz /userdata/logs /tmp/logs/system-log_V1_0"
-        ok, out = connection_execute(tar_cmd, [])
-        if not ok:
-            if out and "Device disconnected" in (out or ""):
-                return "disconnected", None
-            show_error("Tar failed.", out or "Check that paths exist on device.")
-            return "continue", None
-        # 4) Prompt user: TFTP server running and camera on same network?
-        ip = prompt_line(
-            "Is the TFTP server running? Is the camera connected to the same network as the TFTP server? "
-            "Enter the TFTP server's local IPv4 (e.g. 192.168.1.100), or leave empty to cancel:",
-            default="",
-        ).strip()
-        if not ip:
-            return "continue", "Export cancelled (no TFTP address)."
-        valid, err = validate_ipv4(ip)
-        if not valid:
-            show_error(err)
-            return "continue", None
-        if not prompt_confirm_proceed(f"Upload /tmp/allsystem.logs.tar.gz to {ip} via TFTP? (y/n):"):
-            return "continue", "Upload cancelled."
-        # 5) Run tftp -p -l allsystem.logs.tar.gz <ip> on device (file in /tmp/)
-        tftp_cmd = f"tftp -p -l /tmp/allsystem.logs.tar.gz {ip}"
-        ok, out = connection_execute(tftp_cmd, [])
-        if not ok:
-            if out and "Device disconnected" in (out or ""):
-                return "disconnected", None
-            show_error("TFTP upload failed.", out or "Check network and TFTP server.")
-            return "continue", None
-        return "continue", f"TFTP upload completed. File sent to {ip} as allsystem.logs.tar.gz"
-
-    # update_url [url]: set or show camera FOTA update URL (arlocmd update_url)
-    # Unreachable for E3 Wired when the user types the abstract phrase "update url …":
-    # abstract_command_definitions.json maps that to arlocmd via abstract_dispatcher first.
-    if cmd == "update_url":
-        if connection_execute:
-            success, output = connection_execute("arlocmd update_url", args)
-            if success:
-                if args:
-                    return "continue", (output or f"Update URL set to {args[0]}.")
-                return "continue", output or "Current update URL shown above."
-            if output and output.strip() == "Device disconnected.":
-                return "disconnected", None
-            show_error(output or "Command failed.")
-            return "continue", None
-        show_error("Connect to the camera first to use update_url.")
-        return "continue", None
 
     if cmd not in cmd_names:
         similar = _similar_commands(cmd, all_cmds)

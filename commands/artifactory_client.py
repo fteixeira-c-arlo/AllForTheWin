@@ -48,6 +48,8 @@ FHD_TO_2K_ARTIFACTORY_FOLDER: dict[str, str] = {
     "VMC2083": "VMC3083",
     "VMC2081": "VMC3081",
     "VMC2073": "VMC3073",
+    # Same product as VMC3073 / VMC2073; build_info may report codename Octopus.
+    "OCTOPUS": "VMC3073",
 }
 
 

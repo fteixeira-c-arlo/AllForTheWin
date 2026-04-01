@@ -5,8 +5,13 @@ import sys
 from datetime import datetime, timezone
 from typing import Any
 
-# Bootstrap: install deps on first run if needed
-if os.environ.get("ARLO_SKIP_BOOTSTRAP") != "1":
+
+def _is_pyinstaller_bundle() -> bool:
+    return bool(getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", None))
+
+
+# Bootstrap: install deps on first run if needed (skipped when frozen — deps are bundled)
+if not _is_pyinstaller_bundle() and os.environ.get("ARLO_SKIP_BOOTSTRAP") != "1":
     try:
         import rich  # noqa: F401
     except ImportError:
@@ -28,10 +33,16 @@ from rich.console import Console
 
 from commands.build_info import detect_device
 from commands.command_definitions import load_commands_from_confluence
-from commands.command_parser import parse_and_execute, get_system_commands
+from commands.command_parser import (
+    get_abstract_command_help_lines,
+    get_system_commands_for_profile,
+    get_visible_commands,
+    parse_and_execute,
+)
 from connections.adb_handler import ADBHandler
 from connections.ssh_handler import SSHHandler
 from connections.uart_handler import UARTHandler, list_uart_ports
+from models.camera_models import get_command_profile_for_model_name, get_model_by_name, get_models
 from models.connection_config import ConnectionConfig
 from ui.menus import (
     show_welcome,
@@ -39,12 +50,14 @@ from ui.menus import (
     show_commands_table,
     show_connected_device_banner,
     show_connection_methods,
+    show_models_section,
     show_success,
     show_error,
 )
 from ui.prompts import (
     prompt_connection_method,
     prompt_adb_params,
+    prompt_select_model,
     prompt_ssh_params,
     prompt_uart_params,
 )
@@ -66,11 +79,19 @@ def _make_config(conn_type: str, settings: dict, device_id: str) -> ConnectionCo
     )
 
 
-def run_connection_flow() -> tuple[ConnectionConfig | None, Any, str]:
-    """Prompt for connection method/params and connect. Returns (config, handle, reason): "ok"|"back"|"failed"."""
-    method = prompt_connection_method()
+def run_connection_flow(selected_model: dict | None = None) -> tuple[ConnectionConfig | None, Any, str]:
+    """
+    Prompt for connection method/params and connect.
+    selected_model: device row from get_models() — limits connection choices and SSH defaults.
+    Returns (config, handle, reason): "ok"|"back"|"failed".
+    """
+    supported = (selected_model or {}).get("supported_connections")
+    method = prompt_connection_method(supported)
     if method is None:
         return None, None, "back"
+
+    ds = (selected_model or {}).get("default_settings") or {}
+    ssh_port = int((ds.get("ssh") or {}).get("port") or DEFAULT_SSH_PORT)
 
     if method == "UART":
         ports = list_uart_ports()
@@ -121,7 +142,7 @@ def run_connection_flow() -> tuple[ConnectionConfig | None, Any, str]:
         return None, None, "failed"
 
     if method == "SSH":
-        params = prompt_ssh_params(default_port=DEFAULT_SSH_PORT)
+        params = prompt_ssh_params(default_port=ssh_port)
         if params is None:
             return None, None, "back"
         with console.status("[bold cyan]Connecting via SSH...", spinner="dots"):
@@ -144,25 +165,48 @@ def run_connection_flow() -> tuple[ConnectionConfig | None, Any, str]:
     return None, None, "back"
 
 
+def _session_after_detect(detected_device: dict[str, Any]) -> tuple[list[dict], str, list[dict]]:
+    """Load device + system commands from detected model; returns (device_cmds, profile, display list for banner)."""
+    model_for_commands = (detected_device.get("model") or "Device").strip() or "Device"
+    profile = get_command_profile_for_model_name(detected_device.get("model"))
+    device_cmds = load_commands_from_confluence(model_for_commands)
+    system = get_system_commands_for_profile(profile)
+    _, advanced = get_visible_commands(device_cmds)
+    merged = advanced + [{"name": c["name"], "description": c["description"]} for c in system]
+    return device_cmds, profile, merged
+
+
+def _model_dict_for_parse(detected_device: dict[str, Any], command_profile: str) -> dict[str, Any]:
+    prompt_name = (detected_device.get("model") or "Device").strip() or "Device"
+    m_info = get_model_by_name(prompt_name)
+    if m_info:
+        fw_search = list(m_info.get("fw_search_models") or [m_info["name"]])
+    else:
+        fw_search = [prompt_name] if detected_device.get("model") else []
+    return {
+        "name": prompt_name,
+        "fw_search_models": fw_search,
+        "command_profile": command_profile,
+    }
+
+
 def main() -> None:
     show_welcome()
 
     connection_config: ConnectionConfig | None = None
     connection_handle: Any = None
     device_commands: list[dict] = []
+    session_command_profile: str = "none"
     # Detected from build_info + kvcmd/update_url after connect (model, fw_version, env)
     detected_device: dict[str, Any] = {}
+    session_selected_model: dict[str, Any] | None = None
 
     while True:
         if connection_config and connection_handle:
             # Connected: command loop; prompt uses detected model or "Device"
             prompt_name = (detected_device.get("model") or "Device").strip() or "Device"
             prompt = f"{prompt_name}> "
-            # Minimal model dict for parse_and_execute (status, fw_setup, etc.)
-            current_model_dict = {
-                "name": prompt_name,
-                "fw_search_models": [prompt_name] if detected_device.get("model") else [],
-            }
+            current_model_dict = _model_dict_for_parse(detected_device, session_command_profile)
             try:
                 line = input(prompt)
             except (EOFError, KeyboardInterrupt):
@@ -182,6 +226,7 @@ def main() -> None:
                 pull_logs_local_dir=os.getcwd(),
                 connection_get_tail_logs_command=getattr(connection_handle, "get_tail_logs_command", None) if connection_handle else None,
                 connection_handle=connection_handle,
+                command_profile=session_command_profile,
             )
             if message:
                 console.print(f"[green]{message}[/]")
@@ -199,6 +244,8 @@ def main() -> None:
                 connection_handle = None
                 detected_device = {}
                 device_commands = []
+                session_command_profile = "none"
+                session_selected_model = None
                 console.print("[dim]Disconnected. Returned to main menu.[/]\n")
                 continue
             if action == "disconnected":
@@ -209,12 +256,13 @@ def main() -> None:
                 model_name = detected_device.get("model") or "Camera"
                 detected_device = {}
                 device_commands = []
+                session_command_profile = "none"
                 show_error(f"{model_name} disconnected from the PC.", "Returning to connection page.")
                 console.print()
                 # Send user back to connection page (connection method selection)
                 show_connection_methods()
                 while True:
-                    cfg, handle, reason = run_connection_flow()
+                    cfg, handle, reason = run_connection_flow(session_selected_model)
                     if reason == "back":
                         break
                     if cfg is not None and handle is not None:
@@ -222,12 +270,7 @@ def main() -> None:
                         connection_handle = handle
                         with console.status("[bold cyan]Detecting device (build_info + kvcmd)...", spinner="dots"):
                             detected_device = detect_device(handle.execute)
-                        model_for_commands = detected_device.get("model") or "Device"
-                        device_commands = load_commands_from_confluence(model_for_commands)
-                        full = device_commands + [
-                            {"name": c["name"], "description": c["description"]}
-                            for c in get_system_commands()
-                        ]
+                        device_commands, session_command_profile, full = _session_after_detect(detected_device)
                         show_connected_device_banner(
                             detected_device.get("model"),
                             detected_device.get("fw_version"),
@@ -236,6 +279,12 @@ def main() -> None:
                             cfg.device_identifier or "",
                             commands=full,
                             include_system_commands=True,
+                            device_profile=session_command_profile,
+                            abstract_command_lines=(
+                                get_abstract_command_help_lines()
+                                if session_command_profile == "e3_wired"
+                                else None
+                            ),
                         )
                         break
                     retry = input("Retry connection? [y/N]: ").strip().lower()
@@ -256,23 +305,22 @@ def main() -> None:
             break
 
         if line in ("connect", "c", "select", "s"):
+            models = get_models()
+            show_models_section(models)
+            chosen = prompt_select_model(models)
+            if chosen is None:
+                continue
+            session_selected_model = chosen
             while True:
-                cfg, handle, reason = run_connection_flow()
+                cfg, handle, reason = run_connection_flow(session_selected_model)
                 if reason == "back":
                     break
                 if cfg is not None and handle is not None:
                     connection_config = cfg
                     connection_handle = handle
-                    # Auto-detect model, FW, env from build_info + kvcmd/update_url
                     with console.status("[bold cyan]Detecting device (build_info + kvcmd)...", spinner="dots"):
                         detected_device = detect_device(handle.execute)
-                    # Load commands by detected model (E3 Wired list if model known, else placeholder)
-                    model_for_commands = detected_device.get("model") or "Device"
-                    device_commands = load_commands_from_confluence(model_for_commands)
-                    full = device_commands + [
-                        {"name": c["name"], "description": c["description"]}
-                        for c in get_system_commands()
-                    ]
+                    device_commands, session_command_profile, full = _session_after_detect(detected_device)
                     show_connected_device_banner(
                         detected_device.get("model"),
                         detected_device.get("fw_version"),
@@ -281,6 +329,12 @@ def main() -> None:
                         cfg.device_identifier or "",
                         commands=full,
                         include_system_commands=True,
+                        device_profile=session_command_profile,
+                        abstract_command_lines=(
+                            get_abstract_command_help_lines()
+                            if session_command_profile == "e3_wired"
+                            else None
+                        ),
                     )
                     break
                 retry = input("Retry connection? [y/N]: ").strip().lower()

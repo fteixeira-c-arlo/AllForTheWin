@@ -1,0 +1,12 @@
+{
+  "e3_wired": {
+    "label": "E3 Wired (console CLI)",
+    "commands_file": "e3_wired_commands.json",
+    "notes": "Populated from Confluence; add sibling JSON files and entries here for other product lines."
+  },
+  "none": {
+    "label": "No device command catalog",
+    "commands_file": null,
+    "notes": "Empty device command list — only shared system commands are shown."
+  }
+}

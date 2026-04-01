@@ -356,6 +356,7 @@ def show_connected_device_banner(
     commands: list[dict] | None = None,
     include_system_commands: bool = True,
     device_profile: str | None = None,
+    abstract_command_lines: list[str] | None = None,
 ) -> None:
     """
     Display connected device info (model, FW, env) and optionally all commands
@@ -385,9 +386,22 @@ def show_connected_device_banner(
         Text(),
         info_panel,
     ]
+    ac_lines = abstract_command_lines or []
+    if ac_lines:
+        inner_parts.append(Text())
+        inner_parts.append(Text.from_markup("[bold cyan]Commands[/]"))
+        for ln in ac_lines:
+            inner_parts.append(Text(f"  {ln}", style="dim"))
     if commands:
         inner_parts.append(Text())
-        if device_profile == "none":
+        if ac_lines:
+            if device_profile == "none":
+                cmd_hdr = "[bold cyan]Advanced[/] [dim](no device CLI catalog — shared tools only)[/]"
+            elif device_profile == "e3_wired":
+                cmd_hdr = "[bold cyan]Advanced[/] [dim](E3 Wired CLI catalog)[/]"
+            else:
+                cmd_hdr = "[bold cyan]Advanced[/]"
+        elif device_profile == "none":
             cmd_hdr = "[bold cyan]Available Commands[/] [dim](no device CLI catalog — shared tools only)[/]"
         elif device_profile == "e3_wired":
             cmd_hdr = "[bold cyan]Available Commands[/] [dim](E3 Wired CLI catalog)[/]"
@@ -406,7 +420,7 @@ def show_connected_device_banner(
         padding=(0, 1, 1, 1),
     )
     console.print(banner)
-    if not commands:
+    if not commands and not ac_lines:
         console.print(Text.from_markup("[dim]Type [bold]help[/] after connecting to see commands for this device.[/]\n"))
 
 

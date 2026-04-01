@@ -1,0 +1,21 @@
+Adding commands for another Arlo product line
+==============================================
+
+1. Create a JSON file next to e3_wired_commands.json with the same shape:
+     { "commands": [ { "name", "description", "syntax", "category", "shell" (optional) }, ... ] }
+
+2. Register it in command_profiles.json:
+     "your_profile_id": {
+       "label": "Short label",
+       "commands_file": "your_commands.json"
+     }
+
+3. In models/camera_models.py, set "command_profile": "your_profile_id" on each
+   CAMERA_MODEL_GROUPS entry for that product. List supported_connections
+   (ADB, SSH, UART) for the device picker.
+
+4. (Optional) In commands/command_parser.py, extend SYSTEM_COMMANDS with
+   "command_profiles": ["your_profile_id"] for tools that only apply to that line.
+   Use "command_profiles": null for commands that apply to every device.
+
+Profile "none" means no device JSON — only shared system commands appear.
