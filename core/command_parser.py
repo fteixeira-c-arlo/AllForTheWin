@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from commands.abstract_dispatcher import (
+from core.abstract_dispatcher import (
     execute_abstract_command,
     load_abstract_definitions,
 )
@@ -27,15 +27,15 @@ def set_tail_live_view_handlers(
     _tail_live_view_start = start
     _tail_live_view_stop = stop
 
-from commands.log_parser import parse_line, write_html
-from ui.menus import (
+from core.log_parser import parse_line, write_html
+from interface.menus import (
     show_abstract_commands_section,
     show_commands_table,
     show_connection_status,
     show_error,
     show_info,
 )
-from ui.prompts import prompt_confirm_proceed, prompt_line, prompt_select_log_file
+from interface.prompts import prompt_confirm_proceed, prompt_line, prompt_select_log_file
 from utils.validators import validate_ipv4
 
 _COMMAND_PARSER_DIR = Path(__file__).resolve().parent
@@ -357,7 +357,7 @@ def _run_push_arlod(
         show_error(f"Local file not found: {local_path}")
         return "continue", None
 
-    from connections.adb_handler import ADBHandler
+    from transports.adb_handler import ADBHandler
 
     if not isinstance(connection_handle, ADBHandler) or not connection_handle.is_connected():
         show_error(
@@ -518,12 +518,12 @@ def parse_and_execute(
         tool_name, _tool_args = _tool_hit
 
         if tool_name == "server stop":
-            from commands.update_url_flow import run_stop_server
+            from core.update_url_flow import run_stop_server
 
             return "continue", run_stop_server()
 
         if tool_name == "server status":
-            from commands.update_url_flow import run_server_status
+            from core.update_url_flow import run_server_status
 
             return "continue", run_server_status()
 
@@ -532,7 +532,7 @@ def parse_and_execute(
                 show_error("Connect to the camera first to use fw local.")
                 return "continue", None
             try:
-                from commands.update_url_flow import run_use_local_fw_server
+                from core.update_url_flow import run_use_local_fw_server
 
                 err = run_use_local_fw_server(connection_execute)
             except (KeyboardInterrupt, EOFError):
@@ -812,17 +812,17 @@ def parse_and_execute(
         return "back", None
 
     if cmd == "config_show":
-        from commands.config_commands import run_config_show
+        from core.config_commands import run_config_show
         run_config_show()
         return "continue", None
 
     if cmd == "config_update":
-        from commands.config_commands import run_config_update
+        from core.config_commands import run_config_update
         run_config_update()
         return "continue", None
 
     if cmd == "config_delete":
-        from commands.config_commands import run_config_delete
+        from core.config_commands import run_config_delete
         run_config_delete()
         return "continue", None
 
@@ -868,7 +868,7 @@ def parse_and_execute(
         if c["name"].lower() == cmd:
             # fw_setup: Artifactory download, local HTTP server, set camera FOTA URL
             if cmd == "fw_setup" and connection_execute:
-                from commands.update_url_flow import run_update_url_flow
+                from core.update_url_flow import run_update_url_flow
                 err = run_update_url_flow(connection_execute, model)
                 if err is None:
                     return "continue", None

@@ -1,13 +1,13 @@
 ; Inno Setup 6 — single-file installer for testers.
-; Output (commit / zip for testers): ..\release\ArloCameraControl-Windows\Install-ArloCameraControl.exe
+; Output (commit / zip for testers): ..\release\ArloShell-Windows\Install-ArloShell.exe
 ; Build: from repo root run  powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
 
-#define MyAppName "Arlo Camera Control"
+#define MyAppName "ArloShell"
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "Arlo"
-#define MyAppExeName "ArloCameraControl.exe"
+#define MyAppExeName "ArloShell.exe"
 ; Relative to this .iss file (installer\)
-#define SourceDir "..\dist\ArloCameraControl"
+#define SourceDir "..\dist\ArloShell"
 
 [Setup]
 AppId={{E8B4A1C2-9F3D-4E5B-8A7C-1D2E3F4A5B6C}
@@ -16,8 +16,8 @@ AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
-OutputDir=..\release\ArloCameraControl-Windows
-OutputBaseFilename=Install-ArloCameraControl
+OutputDir=..\release\ArloShell-Windows
+OutputBaseFilename=Install-ArloShell
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern

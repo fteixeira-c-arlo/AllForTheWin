@@ -1,14 +1,14 @@
 How to add device commands (current architecture)
 =================================================
 
-Device catalogs are JSON files under commands/. Shared “abstract” workflows
+Device catalogs are JSON files under core/. Shared “abstract” workflows
 (version, factory reset, firmware update steps, etc.) are defined once in
 abstract_command_definitions.json; each device maps its own shell/CLI steps
 to those names. No Python changes are required to add a new device line—only
 JSON plus a camera model entry (see below).
 
 
-1. Create commands/<device>_commands.json
+1. Create core/<device>_commands.json
 -----------------------------------------
 
 Use the same overall shape as e3_wired_commands.json: a top-level object with
@@ -35,7 +35,7 @@ entries are still in the full catalog for execution but are omitted from the
 Advanced list (they run as part of the abstract command’s sequence).
 
 
-2. Register the profile in commands/command_profiles.json
+2. Register the profile in core/command_profiles.json
 ---------------------------------------------------------
 
 Add a key for your profile id (referenced from camera_models):
@@ -51,7 +51,7 @@ only shared system commands apply.
 Optional "notes" on an entry is fine (see existing entries).
 
 
-3. Point models at the profile in commands/camera_models.py
+3. Point models at the profile in core/camera_models.py
 ---------------------------------------------------------
 
 On each relevant CAMERA_MODEL_GROUPS entry, set:

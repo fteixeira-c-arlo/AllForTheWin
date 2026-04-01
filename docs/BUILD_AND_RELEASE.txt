@@ -6,11 +6,11 @@ For maintainers (not for end users)
      powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
 
 2. When it finishes, the installer is written to:
-     release\ArloCameraControl-Windows\Install-ArloCameraControl.exe
+     release\ArloShell-Windows\Install-ArloShell.exe
 
 3. Commit that folder (the new Install-*.exe) and push, or zip only
-   "release\ArloCameraControl-Windows" and send the zip to testers.
+   "release\ArloShell-Windows" and send the zip to testers.
 
 PyInstaller still uses dist\ and build\ (ignored by git). Only the
-release\ArloCameraControl-Windows folder is meant to be zipped or committed
+release\ArloShell-Windows folder is meant to be zipped or committed
 for distribution.

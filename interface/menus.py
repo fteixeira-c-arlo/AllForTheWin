@@ -13,7 +13,7 @@ from rich import box
 console = Console()
 
 if TYPE_CHECKING:
-    from ui.gui_bridge import GuiBridge
+    from interface.gui_bridge import GuiBridge
 
 _gui_menu_bridge: Any = None
 
@@ -99,7 +99,7 @@ def _commands_to_plain_text(commands: list[dict], include_system: bool = True) -
 
 
 # Introduction: what this terminal does (single space after bullets for even alignment)
-WELCOME_INTRO = """[bold]Arlo Camera Control Terminal[/]
+WELCOME_INTRO = """[bold]ArloShell Terminal[/]
 
 [bold]Connect[/] — Pick a [bold]device[/] (see supported connections), then [bold]UART[/], [bold]ADB[/] (USB), or [bold]SSH[/]. Model, FW, and env are auto-detected from [bold]build_info[/] and [bold]kvcmd[/].
 
@@ -116,7 +116,7 @@ WELCOME_INTRO = """[bold]Arlo Camera Control Terminal[/]
 
 def show_welcome() -> None:
     """Display welcome banner with intro to the right of ASCII art. Connection is triggered by 's' (or 'connect')."""
-    title = Text.from_markup("[bold cyan]Arlo Camera Control Terminal[/] [dim]v1.0[/]")
+    title = Text.from_markup("[bold cyan]ArloShell Terminal[/] [dim]v1.0[/]")
     subtitle = Text.from_markup("[dim]Hackathon Demo - Phase 1[/]")
     intro = Text.from_markup(WELCOME_INTRO.strip())
     bird = Text(ASCII_HUMMINGBIRD, style=ASCII_ART_COLOR)
@@ -144,7 +144,7 @@ def show_disconnected_help() -> None:
 
 def show_models_section(models: list[dict]) -> None:
     """Show the model list section (table + hint). Call this when user runs the 'models' command."""
-    from commands.camera_models import format_supported_connections
+    from core.camera_models import format_supported_connections
 
     table = Table(
         show_header=True,
@@ -175,7 +175,7 @@ def show_models_section(models: list[dict]) -> None:
 
 def show_models_table(models: list[dict]) -> None:
     """Display available camera models in a table (used elsewhere if needed without panel)."""
-    from commands.camera_models import format_supported_connections
+    from core.camera_models import format_supported_connections
 
     table = Table(
         show_header=True,

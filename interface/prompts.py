@@ -7,11 +7,11 @@ from typing import TYPE_CHECKING, Any
 import questionary
 from questionary import Choice, Style
 
-from commands.camera_models import format_supported_connections
+from core.camera_models import format_supported_connections
 from utils.validators import validate_ipv4, validate_port
 
 if TYPE_CHECKING:
-    from ui.gui_bridge import GuiBridge
+    from interface.gui_bridge import GuiBridge
 
 _gui_prompt_bridge: GuiBridge | None = None
 
@@ -150,7 +150,7 @@ def prompt_adb_params() -> dict | None:
 
 def prompt_uart_params(default_baud: int = 115200) -> dict | None:
     """Prompt for UART: select port from list, then baud rate. Returns dict with port, baud_rate or None to cancel."""
-    from connections.uart_handler import list_uart_ports
+    from transports.uart_handler import list_uart_ports
 
     ports = list_uart_ports()
     if not ports:
@@ -166,7 +166,7 @@ def prompt_uart_params(default_baud: int = 115200) -> dict | None:
             return None
         baud_str = (baud_str or str(default_baud)).strip()
         if not baud_str.isdigit() or int(baud_str) <= 0:
-            from ui.menus import show_error
+            from interface.menus import show_error
 
             show_error("Enter a positive baud rate.")
             return None
@@ -191,7 +191,7 @@ def prompt_ssh_params(default_port: int = 22) -> dict | None:
     """Prompt for SSH connection parameters. Returns dict or None to cancel."""
     b = _gb()
     if b is not None:
-        from ui.menus import show_error
+        from interface.menus import show_error
 
         ip = None
         while True:
@@ -261,7 +261,7 @@ def prompt_artifactory_base_url(default: str = "") -> str | None:
     """Prompt for Artifactory base URL. Default is Arlo Artifactory. Returns URL or None to cancel."""
     b = _gb()
     if b is not None:
-        from ui.menus import show_error
+        from interface.menus import show_error
 
         d = default or "https://artifactory.arlocloud.com"
         while True:
@@ -329,7 +329,7 @@ def prompt_firmware_version_filter() -> str | None:
     """Prompt for version number to search in Artifactory (e.g. 5.0.18). Returns filter or None."""
     b = _gb()
     if b is not None:
-        from ui.menus import show_error
+        from interface.menus import show_error
 
         while True:
             version = b.ask_text(

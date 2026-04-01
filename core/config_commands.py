@@ -1,6 +1,6 @@
 """Config file commands: config_show, config_update, config_delete."""
-from ui.menus import console, show_error, show_success
-from ui.prompts import (
+from interface.menus import console, show_error, show_success
+from interface.prompts import (
     prompt_artifactory_base_url,
     prompt_artifactory_token,
     prompt_artifactory_username,

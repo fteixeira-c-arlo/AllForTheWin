@@ -14,7 +14,7 @@ _DEFAULT_SETTINGS = {
 
 # E3 Wired model groups: one menu entry per product (2K + FHD grouped).
 # name = primary model (2K where applicable); fw_search_models = list used for Artifactory search.
-# command_profile = key in commands/command_profiles.json → which JSON loads device CLI commands.
+# command_profile = key in core/command_profiles.json → which JSON loads device CLI commands.
 CAMERA_MODEL_GROUPS = [
     {
         "name": "VMC3070",

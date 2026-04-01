@@ -1,4 +1,4 @@
-"""Arlo Camera Control — graphical UI (PySide6)."""
+"""ArloShell — graphical UI (PySide6)."""
 import sys
 
 
@@ -12,10 +12,10 @@ def main() -> None:
 
     from PySide6.QtWidgets import QApplication
 
-    from ui.gui_window import MainWindow
+    from interface.gui_window import MainWindow
 
     app = QApplication(sys.argv)
-    app.setApplicationName("Arlo Camera Control")
+    app.setApplicationName("ArloShell")
     app.setOrganizationName("Arlo")
     win = MainWindow()
     win.show()

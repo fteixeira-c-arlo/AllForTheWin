@@ -1,4 +1,4 @@
-Arlo Camera Control — developer notes
+ArloShell — developer notes
 ======================================
 
 Graphical app (PySide6) for Arlo camera devices. Rich / questionary are still used
@@ -15,18 +15,18 @@ Quick start (from repo root)
   pip install -r requirements.txt
   python main_gui.py
 
-Device CLI commands load by product line: commands/command_profiles.json maps profile ids
-to JSON files (E3 Wired → e3_wired_commands.json). commands/camera_models.py assigns
+Device CLI commands load by product line: core/command_profiles.json maps profile ids
+to JSON files (E3 Wired → e3_wired_commands.json). core/camera_models.py assigns
 command_profile per device row. Unknown detected models get profile "none" (no device
-catalog — only shared tools). See commands/HOW_TO_ADD_DEVICE_COMMANDS.txt to add lines.
+catalog — only shared tools). See core/HOW_TO_ADD_DEVICE_COMMANDS.txt to add lines.
 
 Project layout
 --------------
   main_gui.py — application entry point
-  commands/camera_models.py — camera model groups and profiles
-  connections/ — ADB, SSH, UART, connection_config
-  commands/ — definitions and parser
-  ui/ — menus, prompts, GUI
+  core/camera_models.py — camera model groups and profiles
+  transports/ — ADB, SSH, UART, connection_config
+  core/ — definitions and parser
+  interface/ — menus, prompts, GUI
   utils/ — validators, logger
 
 Windows installer (maintainers)

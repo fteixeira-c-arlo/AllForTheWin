@@ -4,12 +4,12 @@ import socket
 import sys
 from typing import Callable
 
-from commands.artifactory_client import (
+from core.artifactory_client import (
     ARTIFACTORY_REPO,
     download_firmware,
     list_available_firmware,
 )
-from commands.local_server import (
+from core.local_server import (
     DEFAULT_PORT,
     FW_ENV_TAR_GZ_SUFFIXES,
     check_server_status,
@@ -34,8 +34,8 @@ from utils.config_manager import (
     save_config_file,
     update_last_used,
 )
-from ui.menus import console, show_error, show_success
-from ui.prompts import (
+from interface.menus import console, show_error, show_success
+from interface.prompts import (
     prompt_artifactory_base_url,
     prompt_artifactory_token,
     prompt_artifactory_username,
@@ -404,7 +404,7 @@ def run_use_local_fw_server(
 
 def run_stop_server() -> str:
     """Stop the local firmware server. Returns message for user."""
-    from commands.local_server import stop_http_server
+    from core.local_server import stop_http_server
     ok, msg = stop_http_server()
     if ok:
         return msg

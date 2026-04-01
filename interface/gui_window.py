@@ -47,9 +47,9 @@ from PySide6.QtWidgets import (
 
 from rich.console import Console
 
-from commands.build_info import detect_device
-from commands.command_definitions import load_device_commands
-from commands.command_parser import (
+from core.build_info import detect_device
+from core.command_definitions import load_device_commands
+from core.command_parser import (
     ABSTRACT_DEFINITIONS,
     get_abstract_command_help_lines,
     get_system_commands_for_profile,
@@ -58,17 +58,17 @@ from commands.command_parser import (
     parse_and_execute,
     set_tail_live_view_handlers,
 )
-from commands.camera_models import (
+from core.camera_models import (
     format_supported_connections,
     get_command_profile_for_model_name,
     get_model_by_name,
     get_models,
 )
-from connections.adb_handler import ADBHandler
-from connections.ssh_handler import SSHHandler
-from connections.uart_handler import UARTHandler, list_uart_ports
-from connections.connection_config import ConnectionConfig
-from ui.gui_bridge import GuiBridge, _SELECT_CANCELLED
+from transports.adb_handler import ADBHandler
+from transports.ssh_handler import SSHHandler
+from transports.uart_handler import UARTHandler, list_uart_ports
+from transports.connection_config import ConnectionConfig
+from interface.gui_bridge import GuiBridge, _SELECT_CANCELLED
 
 
 DEFAULT_UART_BAUD = 115200
@@ -455,8 +455,8 @@ def _make_config(conn_type: str, settings: dict, device_id: str) -> ConnectionCo
 
 def install_gui_console_and_menus(bridge: GuiBridge) -> None:
     """Redirect Rich console and menu helpers to the GUI log."""
-    import ui.menus as menus
-    from ui import prompts
+    import interface.menus as menus
+    import interface.prompts as prompts
 
     class _LogStream:
         def __init__(self, b: GuiBridge) -> None:
@@ -670,7 +670,7 @@ class SessionWorker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Arlo Camera Control")
+        self.setWindowTitle("ArloShell")
         self.resize(1100, 720)
         self._device_connected = False
 
@@ -708,7 +708,7 @@ class MainWindow(QMainWindow):
             lambda p: self._bridge.tail_live_stop.emit(p),
         )
 
-        title = QLabel("Arlo Camera Control")
+        title = QLabel("ArloShell")
         title_font = QFont()
         title_font.setPointSize(14)
         title_font.setBold(True)
@@ -883,8 +883,8 @@ class MainWindow(QMainWindow):
     def _menu_about(self) -> None:
         QMessageBox.about(
             self,
-            "About Arlo Camera Control",
-            "<h3>Arlo Camera Control</h3>"
+            "About ArloShell",
+            "<h3>ArloShell</h3>"
             "<p>Connect to cameras over UART, ADB (USB), or SSH. "
             "Commands are loaded after the device is detected.</p>"
             "<p><b>Tools → FW Setup</b> runs the full firmware workflow "
@@ -1738,8 +1738,8 @@ class MainWindow(QMainWindow):
         self._worker.disconnect_session.emit()
         self._thread.quit()
         self._thread.wait(5000)
-        import ui.menus as menus
-        from ui import prompts
+        import interface.menus as menus
+        import interface.prompts as prompts
 
         menus.set_gui_menu_bridge(None)
         menus.console = Console()

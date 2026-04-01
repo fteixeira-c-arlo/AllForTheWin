@@ -1,6 +1,6 @@
 # PyInstaller spec — GUI (PySide6)
 # Build: pyinstaller --clean --noconfirm arlo_camera_control_gui.spec
-# Output: dist/ArloCameraControl/ArloCameraControl.exe
+# Output: dist/ArloShell/ArloShell.exe
 #
 # Do NOT use collect_all("PySide6"): that bundles every Qt module (WebEngine, QML, 3D, …)
 # and inflates the folder to ~700MB+. This app only needs QtCore / QtGui / QtWidgets.
@@ -14,8 +14,8 @@ block_cipher = None
 _project_root = Path(SPEC).resolve().parent
 
 datas = [
-    (str(_project_root / "commands" / "e3_wired_commands.json"), "commands"),
-    (str(_project_root / "commands" / "command_profiles.json"), "commands"),
+    (str(_project_root / "core" / "e3_wired_commands.json"), "core"),
+    (str(_project_root / "core" / "command_profiles.json"), "core"),
     (str(_project_root / "docs" / "e3_wired_cli_reference.md"), "docs"),
 ]
 binaries = []
@@ -87,7 +87,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="ArloCameraControl",
+    name="ArloShell",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -108,5 +108,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="ArloCameraControl",
+    name="ArloShell",
 )
