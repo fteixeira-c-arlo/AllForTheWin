@@ -10,7 +10,6 @@
     {"name": "factory_reset", "abstract": "factory reset", "description": "Factory reset device", "syntax": "factory_reset", "category": "arlocmd", "shell": "arlocmd factory_reset"},
     {"name": "migrate", "abstract": "migrate", "description": "Migrate to stage (dev|qa|prod|ftrial)", "syntax": "migrate <stage>", "category": "arlocmd", "shell": "arlocmd migrate"},
     {"name": "update_url", "abstract": "update url", "description": "Get or set update URL for FOTA (no args = show current; with URL = set)", "syntax": "update_url [url]", "category": "arlocmd", "shell": "arlocmd update_url"},
-    {"name": "fw_setup", "abstract": "flash", "description": "Automated FW setup: Artifactory download, local server, set camera update URL", "syntax": "fw_setup", "category": "firmware", "shell": ""},
     {"name": "update_refresh", "abstract": "update check", "description": "Refresh UpdateRule (force=0)", "syntax": "update_refresh", "category": "arlocmd", "shell": "arlocmd update_refresh"},
     {"name": "update_refresh_force", "abstract": "update apply", "description": "Refresh UpdateRule (force=1)", "syntax": "update_refresh_force", "category": "arlocmd", "shell": "arlocmd update_refresh 1"},
     {"name": "manual_upgrade", "description": "Start manual firmware upgrade", "syntax": "manual_upgrade <version> [progress]", "category": "arlocmd", "shell": "arlocmd manual_upgrade"},

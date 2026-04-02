@@ -8,7 +8,7 @@ import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import (
@@ -560,6 +560,8 @@ class SessionWorker(QObject):
     connect_ssh = Signal(str, int, str, str)
     submit_command = Signal(str)
     disconnect_session = Signal()
+    fw_shell_request = Signal(str, object)
+    fw_shell_response = Signal(bool, str)
 
     def __init__(self, bridge: GuiBridge) -> None:
         super().__init__()
@@ -575,6 +577,7 @@ class SessionWorker(QObject):
         self.connect_ssh.connect(self._on_connect_ssh)
         self.submit_command.connect(self._on_command)
         self.disconnect_session.connect(self._on_disconnect)
+        self.fw_shell_request.connect(self._on_fw_shell_request)
 
     def _emit_state(self) -> None:
         if self._cfg and self._handle:
@@ -738,6 +741,15 @@ class SessionWorker(QObject):
             self._on_disconnect()
         self.command_finished.emit(action, message)
 
+    @Slot(str, object)
+    def _on_fw_shell_request(self, command: str, args_obj: object) -> None:
+        args = list(args_obj) if isinstance(args_obj, (list, tuple)) else []
+        if not self._handle:
+            self.fw_shell_response.emit(False, "Not connected.")
+            return
+        ok, text = self._handle.execute(command, args)
+        self.fw_shell_response.emit(ok, text or "")
+
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
@@ -769,6 +781,10 @@ class MainWindow(QMainWindow):
         self._worker.commands_updated.connect(self._merge_command_list)
         self._worker.command_finished.connect(self._on_command_finished)
         self._worker.connect_failed.connect(self._on_connect_failed)
+        self._worker.fw_shell_response.connect(self._on_fw_shell_response)
+
+        self._fw_shell_pending: Callable[[bool, str], None] | None = None
+        self._fw_wizard = None
 
         self._command_profile: str = "none"
         self._conn_type: str = ""
@@ -1039,7 +1055,8 @@ class MainWindow(QMainWindow):
         menu_tools = menubar.addMenu("&Tools")
         self._action_fw_setup = QAction("FW &Setup…", self)
         self._action_fw_setup.setStatusTip(
-            "Download firmware from Artifactory, start a local server, and set the camera update URL (fw_setup)."
+            "Open the firmware setup wizard (Artifactory, local server, update URL). "
+            "You can still type fw_setup in the command line for the text-based flow."
         )
         self._action_fw_setup.triggered.connect(self._menu_fw_setup)
         self._action_fw_setup.setEnabled(False)
@@ -1074,9 +1091,54 @@ class MainWindow(QMainWindow):
             "Firmware is downloaded from the company Artifactory server.\n\n"
             "Before continuing, make sure you are connected to the company VPN "
             "(GlobalProtect).\n\n"
-            "Click OK to start FW Setup.",
+            "Click OK to open the FW Setup wizard.",
         )
-        self._submit_command_line("fw_setup")
+        prompt_name = (getattr(self, "_prompt_model_name", None) or "Device").strip() or "Device"
+        m_info = get_model_by_name(prompt_name)
+        if m_info:
+            fw_search = list(m_info.get("fw_search_models") or [m_info["name"]])
+            primary = (m_info.get("name") or prompt_name).strip() or prompt_name
+        else:
+            fw_search = [prompt_name] if prompt_name and prompt_name != "Device" else ["Camera"]
+            primary = prompt_name
+        model_dict = {
+            "name": primary,
+            "fw_search_models": fw_search,
+            "command_profile": self._command_profile,
+        }
+        from interface.fw_setup_wizard import FwSetupWizard
+
+        wiz = FwSetupWizard(self, model_dict, self._fw_shell_async)
+        wiz.server_started.connect(self._on_fw_wizard_server_started)
+        wiz.update_sent.connect(self._on_fw_wizard_update_sent)
+        wiz.wizard_closed.connect(self._on_fw_wizard_closed)
+        self._fw_wizard = wiz
+        wiz.show()
+
+    def _fw_shell_async(
+        self, cmd: str, args: list[str], on_done: Callable[[bool, str], None]
+    ) -> None:
+        self._fw_shell_pending = on_done
+        self._worker.fw_shell_request.emit(cmd, args)
+
+    @Slot(bool, str)
+    def _on_fw_shell_response(self, ok: bool, text: str) -> None:
+        cb = self._fw_shell_pending
+        self._fw_shell_pending = None
+        if cb:
+            cb(ok, text or "")
+
+    def _on_fw_wizard_server_started(self, url: str) -> None:
+        self._on_append_log(f"FW Setup: camera update URL (local server): {url}\n")
+
+    def _on_fw_wizard_update_sent(self, ok: bool) -> None:
+        if ok:
+            self._on_append_log("FW Setup: update_url command succeeded.\n")
+        else:
+            self._on_append_log("FW Setup: update_url command failed (see wizard).\n")
+
+    def _on_fw_wizard_closed(self) -> None:
+        self._fw_wizard = None
 
     def _menu_about(self) -> None:
         QMessageBox.about(
@@ -1085,8 +1147,9 @@ class MainWindow(QMainWindow):
             "<h3>ArloShell</h3>"
             "<p>Connect to cameras over UART, ADB (USB), or SSH. "
             "Commands are loaded after the device is detected.</p>"
-            "<p><b>Tools → FW Setup</b> runs the full firmware workflow "
-            "(Artifactory, local server, camera <code>update_url</code>).</p>",
+            "<p><b>Tools → FW Setup</b> opens the firmware wizard "
+            "(Artifactory, local server, camera <code>update_url</code>). "
+            "The <code>fw_setup</code> command still runs the text-based flow in the session log.</p>",
         )
 
     def _build_e3_reference_panel(self) -> QWidget:

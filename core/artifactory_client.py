@@ -438,6 +438,7 @@ def download_firmware(
     base_url: str = "https://artifactory.arlocloud.com",
     username: str | None = None,
     progress_callback: Callable[[str, int, int], None] | None = None,
+    byte_progress_callback: Callable[[int, int | None], None] | None = None,
     files_allowlist: list[str] | None = None,
     repo_folder_path: str | None = None,
     archive_dir: str | None = None,
@@ -445,6 +446,7 @@ def download_firmware(
     """
     Download firmware from Artifactory. When archive_dir is set, .zip/.tar.gz files go there;
     otherwise into binaries_dir. UpdateRules.json always goes to updaterules_dir.
+    byte_progress_callback: optional (bytes_downloaded_so_far, total_or_none) for the current file.
     Returns (success, error_message).
     """
     requests = _get_requests()
@@ -493,10 +495,18 @@ def download_firmware(
             if r.status_code == 404:
                 continue  # skip missing file
             r.raise_for_status()
+            cl = r.headers.get("Content-Length")
+            total_bytes: int | None = None
+            if cl and str(cl).isdigit():
+                total_bytes = int(cl)
+            downloaded = 0
             with open(dest_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
+                        downloaded += len(chunk)
+                        if byte_progress_callback:
+                            byte_progress_callback(downloaded, total_bytes)
         except requests.exceptions.RequestException as e:
             return False, f"Download failed for {filename}: {e}"
         except OSError as e:
@@ -509,4 +519,18 @@ def verify_access_token(base_url: str, token: str) -> tuple[bool, str]:
     """Phase 1: accept any non-empty token. Phase 2: call Artifactory API."""
     if not (token or "").strip():
         return False, "Access token cannot be empty."
+    return True, ""
+
+
+def test_artifactory_access(
+    base_url: str, access_token: str, username: str | None = None
+) -> tuple[bool, str]:
+    """List repo root to verify URL and credentials. Returns (ok, error_message)."""
+    if not (access_token or "").strip():
+        return False, "Access token cannot be empty."
+    api_base = _artifactory_api_base(base_url)
+    headers = _auth_headers(access_token, username)
+    ok, _dirs, _files, err = _list_artifactory_children(api_base, ARTIFACTORY_REPO, headers)
+    if not ok:
+        return False, err or "Could not reach Artifactory."
     return True, ""

@@ -74,6 +74,11 @@ SYSTEM_COMMANDS = [
     {"name": "server stop", "description": "Stop the local firmware HTTP server", "command_profiles": ["e3_wired"]},
     {"name": "server status", "description": "Check whether the local firmware HTTP server is running", "command_profiles": ["e3_wired"]},
     {"name": "fw local", "description": "Start local firmware server and set camera update URL to it", "command_profiles": ["e3_wired"]},
+    {
+        "name": "fw_setup",
+        "description": "Firmware setup wizard (CLI): Artifactory download, local server, set camera update URL. In the GUI use Tools → FW Setup.",
+        "command_profiles": ["e3_wired"],
+    },
     {"name": "config_show", "description": "Show saved Artifactory credentials (no token)", "command_profiles": None},
     {"name": "config_update", "description": "Update saved Artifactory credentials", "command_profiles": None},
     {"name": "config_delete", "description": "Delete saved Artifactory credentials", "command_profiles": None},
@@ -761,6 +766,8 @@ def parse_and_execute(
                 device_commands,
                 _execute_shell,
                 connection_type,
+                connection_execute=connection_execute,
+                model=model,
             )
         except ValueError as e:
             show_error(str(e))
@@ -826,6 +833,27 @@ def parse_and_execute(
         run_config_delete()
         return "continue", None
 
+    if cmd == "fw_setup":
+        if not connection_execute:
+            show_error("Connect to the camera first to run fw_setup.")
+            return "continue", None
+        try:
+            from core.update_url_flow import run_update_url_flow
+
+            err = run_update_url_flow(connection_execute, model)
+        except (KeyboardInterrupt, EOFError):
+            return "continue", None
+        except Exception as e:
+            show_error("fw_setup failed.", str(e))
+            return "continue", None
+        if err is None:
+            return "continue", None
+        if err == "disconnected":
+            return "disconnected", None
+        if err == "cancelled":
+            return "continue", None
+        return "continue", None
+
     if cmd == "parse_log_file":
         log_dir = os.path.join(os.getcwd(), "arlo_logs")
         if not os.path.isdir(log_dir):
@@ -866,17 +894,6 @@ def parse_and_execute(
     # Device command: use "shell" for E3 Wired (full cli command), else command name + args
     for c in device_commands:
         if c["name"].lower() == cmd:
-            # fw_setup: Artifactory download, local HTTP server, set camera FOTA URL
-            if cmd == "fw_setup" and connection_execute:
-                from core.update_url_flow import run_update_url_flow
-                err = run_update_url_flow(connection_execute, model)
-                if err is None:
-                    return "continue", None
-                if err == "disconnected":
-                    return "disconnected", None
-                if err == "cancelled":
-                    return "continue", None
-                return "continue", None
             # pull_logs: download log archive from camera to PC (no shell command)
             if cmd == "pull_logs":
                 if connection_type.upper() == "UART":

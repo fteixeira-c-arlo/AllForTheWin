@@ -151,6 +151,8 @@ def execute_abstract_command(
     device_commands: list[dict],
     execute_fn: Callable[[str], Any],
     connection_type: str,
+    connection_execute: Callable[[str, list[str]], tuple[bool, str]] | None = None,
+    model: dict[str, Any] | None = None,
 ) -> list[str] | None:
     """
     Run the abstract command's sequence via execute_fn(full_shell_string).
@@ -184,6 +186,20 @@ def execute_abstract_command(
     for i, raw_step in enumerate(sequence):
         raw_name = str(raw_step).strip()
         step_args = step_arg_lists[i] if i < len(step_arg_lists) else []
+        if raw_name.lower() == "fw_setup":
+            if not connection_execute:
+                raise ValueError("fw_setup requires an active camera connection.")
+            from core.update_url_flow import run_update_url_flow
+
+            err = run_update_url_flow(connection_execute, model or {})
+            if err is not None:
+                if err == "cancelled":
+                    raise RuntimeError("fw_setup cancelled.")
+                if err == "disconnected":
+                    raise RuntimeError("Device disconnected during fw_setup.")
+                raise RuntimeError(f"fw_setup failed: {err}")
+            outputs.append("")
+            continue
         shell_line = resolve_step(raw_name, step_args, device_commands)
         try:
             result = execute_fn(shell_line)
