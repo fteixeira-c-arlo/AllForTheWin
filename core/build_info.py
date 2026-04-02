@@ -1,4 +1,5 @@
 """Parse build_info and kvcmd/update_url output to extract device model (VMCXXXX), FW version, and env."""
+import json
 import re
 from typing import Any, Callable
 
@@ -113,6 +114,74 @@ def parse_build_info(raw_output: str) -> dict[str, Any]:
     return result
 
 
+def _kv_bs_claimed_indicates_onboarded(raw_output: str) -> bool:
+    """True if kvcmd KV_BS_CLAIMED style output indicates value 1 (matches command_parser heuristic)."""
+    if not raw_output:
+        return False
+    text = raw_output.strip()
+    if text == "1":
+        return True
+    if "KV_BS_CLAIMED" in raw_output and ("=1" in raw_output or ": 1" in raw_output or ":1" in raw_output):
+        return True
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for line in lines:
+        if line == "1":
+            return True
+    if lines and lines[-1] == "1":
+        return True
+    return False
+
+
+def parse_onboarded_from_device_info_text(text: str) -> bool | None:
+    """
+    Parse arlocmd device_info / bs_info (or similar) output for claimed or onboarded flags.
+    Returns True if either is true, False if both appear explicitly false, None if unclear.
+    """
+    if not text or not str(text).strip():
+        return None
+    t = str(text)
+
+    try:
+        root = json.loads(t.strip())
+        if isinstance(root, dict):
+            c, o = root.get("claimed"), root.get("onboarded")
+            if c is True or o is True:
+                return True
+            if c is False and o is False:
+                return False
+    except json.JSONDecodeError:
+        pass
+
+    # Embedded JSON objects (scan each {...} block)
+    for m in re.finditer(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", t, re.DOTALL):
+        chunk = m.group(0)
+        try:
+            data = json.loads(chunk)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        c = data.get("claimed")
+        o = data.get("onboarded")
+        if c is True or o is True:
+            return True
+        if c is False and o is False:
+            return False
+
+    # Line / loose patterns (e.g. key: value, "claimed": true)
+    if re.search(r'(?i)"claimed"\s*:\s*true', t) or re.search(r'(?i)"onboarded"\s*:\s*true', t):
+        return True
+    if re.search(r'(?i)(?<![\w-])claimed(?![\w-])\s*[:=]\s*(?:true|1|yes)\b', t) or re.search(
+        r'(?i)(?<![\w-])onboarded(?![\w-])\s*[:=]\s*(?:true|1|yes)\b', t
+    ):
+        return True
+    if re.search(r'(?i)"claimed"\s*:\s*false', t) and re.search(r'(?i)"onboarded"\s*:\s*false', t):
+        if not re.search(r'(?i)"claimed"\s*:\s*true|"onboarded"\s*:\s*true', t):
+            return False
+
+    return None
+
+
 def parse_env_from_update_url(raw_output: str) -> str | None:
     """Parse env (qa/dev/prod/etc.) from arlocmd update_url output (URL or key=value)."""
     if not raw_output or not raw_output.strip():
@@ -123,15 +192,16 @@ def parse_env_from_update_url(raw_output: str) -> str | None:
 
 def detect_device(execute: Callable[[str, list[str]], tuple[bool, str]]) -> dict[str, Any]:
     """
-    Run build_info and update_url (and optional kvcmd) on the device to detect model, FW, env.
+    Run build_info, kvcmd, device_info/bs_info, and optional KV_BS_CLAIMED on the device.
     execute(cmd, args) -> (success, output).
-    Returns dict with: model, fw_version, env, raw_build_info (for debugging).
+    Returns dict with: model, fw_version, env, raw_build_info, is_onboarded (bool | None).
     """
     result: dict[str, Any] = {
         "model": None,
         "fw_version": None,
         "env": None,
         "raw_build_info": "",
+        "is_onboarded": None,
     }
     # 1) build_info
     ok, out = execute(BUILD_INFO_SHELL, [])
@@ -169,4 +239,31 @@ def detect_device(execute: Callable[[str, list[str]], tuple[bool, str]]) -> dict
         )
         if env:
             result["env"] = env
+
+    # Onboarded / claimed: device_info + bs_info (same sources as abstract "info"), then KV_BS_CLAIMED fallback
+    info_blob_parts: list[str] = []
+    ok_di, out_di = execute("arlocmd device_info", [])
+    if ok_di and out_di:
+        info_blob_parts.append(out_di)
+    ok_bs, out_bs = execute("arlocmd bs_info", [])
+    if ok_bs and out_bs:
+        info_blob_parts.append(out_bs)
+    combined_info = "\n".join(info_blob_parts)
+    if combined_info.strip():
+        parsed_ob = parse_onboarded_from_device_info_text(combined_info)
+        if parsed_ob is True:
+            result["is_onboarded"] = True
+        elif parsed_ob is False:
+            result["is_onboarded"] = False
+    if result.get("is_onboarded") is None:
+        ok_kv, out_kv = execute("kvcmd get KV_BS_CLAIMED", [])
+        if ok_kv and out_kv:
+            if _kv_bs_claimed_indicates_onboarded(out_kv):
+                result["is_onboarded"] = True
+            else:
+                z = (out_kv or "").strip()
+                zlines = [ln.strip() for ln in z.splitlines() if ln.strip()]
+                if z == "0" or (zlines and zlines[-1] == "0"):
+                    result["is_onboarded"] = False
+
     return result

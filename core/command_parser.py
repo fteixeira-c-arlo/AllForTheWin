@@ -807,8 +807,10 @@ def parse_and_execute(
         return "continue", None
 
     if cmd == "status":
+        ob = model.get("is_onboarded")
+        is_ob = ob if isinstance(ob, bool) else None
         show_connection_status(
-            connection_type, device_identifier, model_name, connected_at
+            connection_type, device_identifier, model_name, connected_at, is_onboarded=is_ob
         )
         return "continue", None
 

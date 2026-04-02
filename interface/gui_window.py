@@ -592,6 +592,7 @@ class SessionWorker(QObject):
                     "device_id": self._cfg.device_identifier or "",
                     "commands_count": len(self._device_commands),
                     "command_profile": self._command_profile,
+                    "is_onboarded": self._detected.get("is_onboarded"),
                 }
             )
         else:
@@ -665,17 +666,23 @@ class SessionWorker(QObject):
     def _run_detect_and_load(self) -> None:
         if not self._handle:
             return
-        self.append_log.emit("Detecting device (build_info + kvcmd)...\n")
+        self.append_log.emit("Detecting device (build_info, kvcmd, device_info)...\n")
         self._detected = detect_device(self._handle.execute)
         model_for_commands = self._detected.get("model") or "Device"
         self._command_profile = get_command_profile_for_model_name(self._detected.get("model"))
         self._device_commands = load_device_commands(model_for_commands)
         self._emit_state()
         self.commands_updated.emit(list(self._device_commands))
+        ob = self._detected.get("is_onboarded")
+        ob_note = ""
+        if ob is True:
+            ob_note = " | Onboarded (Arlo account)"
+        elif ob is False:
+            ob_note = " | Not onboarded"
         self.append_log.emit(
             f"Model: {self._detected.get('model') or '—'} | "
             f"FW: {self._detected.get('fw_version') or '—'} | "
-            f"Env: {self._detected.get('env') or '—'}\n"
+            f"Env: {self._detected.get('env') or '—'}{ob_note}\n"
         )
         self.append_log.emit(
             "Type a command below, or click a command in the list to run it "
@@ -718,6 +725,7 @@ class SessionWorker(QObject):
             "name": prompt_name,
             "fw_search_models": fw_search,
             "command_profile": self._command_profile,
+            "is_onboarded": self._detected.get("is_onboarded"),
         }
         action, message = parse_and_execute(
             line,
@@ -765,6 +773,7 @@ class MainWindow(QMainWindow):
         self._status_detail_fw: str = "—"
         self._status_detail_transport: str = "—"
         self._status_detail_env: str = "—"
+        self._device_is_onboarded: bool | None = None
 
         self._bridge = GuiBridge()
         self._bridge.set_main_window(self)
@@ -845,7 +854,16 @@ class MainWindow(QMainWindow):
         _text_h = max(22, self._status_text.sizeHint().height())
         dot_container.setFixedHeight(_text_h)
 
+        self._onboarded_badge = QLabel("Onboarded")
+        self._onboarded_badge.setVisible(False)
+        self._onboarded_badge.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._onboarded_badge.setStyleSheet(
+            "QLabel { background-color: #3949ab; color: #e8eaf6; border-radius: 10px; "
+            "padding: 3px 10px; font-size: 11px; font-weight: 600; }"
+        )
+
         status_lay.addWidget(dot_container, 0, Qt.AlignmentFlag.AlignVCenter)
+        status_lay.addWidget(self._onboarded_badge, 0, Qt.AlignmentFlag.AlignVCenter)
         status_lay.addWidget(self._status_text, 1, Qt.AlignmentFlag.AlignVCenter)
         self._sync_status_strip()
 
@@ -1105,6 +1123,7 @@ class MainWindow(QMainWindow):
             "name": primary,
             "fw_search_models": fw_search,
             "command_profile": self._command_profile,
+            "is_onboarded": self._device_is_onboarded,
         }
         from interface.fw_setup_wizard import FwSetupWizard
 
@@ -1283,6 +1302,7 @@ class MainWindow(QMainWindow):
 
         if self._status_phase == "connecting":
             self._set_status_dot_color(_STATUS_DOT_CONNECTING)
+            self._onboarded_badge.setVisible(False)
             self._status_text.setText("Connecting...")
             self._status_text.setStyleSheet(
                 f"color: {muted}; font-size: 12px; padding: 2px 0; border: none; background: transparent;"
@@ -1298,8 +1318,13 @@ class MainWindow(QMainWindow):
                 f"color: {bright}; font-size: 13px; font-weight: 500; padding: 4px 0; "
                 "border: none; background: transparent;"
             )
+            if getattr(self, "_device_is_onboarded", None) is True:
+                self._onboarded_badge.setVisible(True)
+            else:
+                self._onboarded_badge.setVisible(False)
         else:
             self._set_status_dot_color(_STATUS_DOT_DISCONNECTED)
+            self._onboarded_badge.setVisible(False)
             self._status_text.setText("Not connected")
             self._status_text.setStyleSheet(
                 f"color: {muted}; font-size: 12px; padding: 2px 0; border: none; background: transparent;"
@@ -1681,6 +1706,8 @@ class MainWindow(QMainWindow):
             self._status_detail_fw = str(info.get("fw") or "—")
             self._status_detail_transport = transport
             self._status_detail_env = str(env)
+            raw_ob = info.get("is_onboarded")
+            self._device_is_onboarded = raw_ob if isinstance(raw_ob, bool) else None
             self._status_phase = "connected"
             self._prompt_model_name = str(model).strip() or "Device"
             self._set_active_session_tab_title(self._prompt_model_name)
@@ -1695,6 +1722,7 @@ class MainWindow(QMainWindow):
             self._cmd_input.setEnabled(False)
             self._status_phase = "disconnected"
             self._prompt_model_name = "Device"
+            self._device_is_onboarded = None
             self._status_detail_fw = "—"
             self._active_session_log = None
             self._sync_status_strip()

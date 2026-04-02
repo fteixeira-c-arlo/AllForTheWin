@@ -197,6 +197,8 @@ class FwSetupWizard(QDialog):
         self._camera_url = ""
         self._search_thread: _SearchThread | None = None
         self._download_thread: _DownloadThread | None = None
+        raw_ob = self._model_dict.get("is_onboarded")
+        self._is_onboarded: bool | None = raw_ob if isinstance(raw_ob, bool) else None
 
         self._build_ui()
         self._refresh_server_footer()
@@ -483,6 +485,50 @@ class FwSetupWizard(QDialog):
         )
         self._btn_push.clicked.connect(self._push_update_url)
         lay.addWidget(self._btn_push)
+
+        self._panel_factory = QWidget()
+        fl = QVBoxLayout(self._panel_factory)
+        fl.setContentsMargins(0, 8, 0, 0)
+        fl.setSpacing(8)
+        self._lbl_factory_hint = QLabel(
+            "This camera is not onboarded. Reboot it so it picks up the staged firmware on boot."
+        )
+        self._lbl_factory_hint.setWordWrap(True)
+        self._lbl_factory_hint.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
+        fl.addWidget(self._lbl_factory_hint)
+        self._btn_reboot = QPushButton("Reboot camera")
+        self._btn_reboot.setStyleSheet("QPushButton { padding: 8px 16px; }")
+        self._btn_reboot.clicked.connect(self._on_reboot_camera)
+        fl.addWidget(self._btn_reboot)
+        self._reboot_status = QLabel("")
+        self._reboot_status.setWordWrap(True)
+        fl.addWidget(self._reboot_status)
+        lay.addWidget(self._panel_factory)
+        self._panel_factory.hide()
+
+        self._panel_onboarded = QWidget()
+        ol = QVBoxLayout(self._panel_onboarded)
+        ol.setContentsMargins(0, 8, 0, 0)
+        ol.setSpacing(8)
+        self._lbl_onboarded_hint = QLabel(
+            "This camera is onboarded — firmware is staged on your local server. "
+            "Use the Arlo app to trigger an update check, or press the button below to check from the device now."
+        )
+        self._lbl_onboarded_hint.setWordWrap(True)
+        self._lbl_onboarded_hint.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
+        ol.addWidget(self._lbl_onboarded_hint)
+        self._btn_trigger_refresh = QPushButton("Trigger update check")
+        self._btn_trigger_refresh.setStyleSheet(
+            f"QPushButton {{ background-color: #3949ab; color: #e8eaf6; padding: 8px 16px; }}"
+        )
+        self._btn_trigger_refresh.clicked.connect(self._on_trigger_update_refresh)
+        ol.addWidget(self._btn_trigger_refresh)
+        self._refresh_result = QLabel("")
+        self._refresh_result.setWordWrap(True)
+        ol.addWidget(self._refresh_result)
+        lay.addWidget(self._panel_onboarded)
+        self._panel_onboarded.hide()
+
         lay.addStretch(1)
         return w
 
@@ -794,6 +840,10 @@ class FwSetupWizard(QDialog):
         self._enter_serve_step()
 
     def _enter_serve_step(self) -> None:
+        self._panel_factory.hide()
+        self._panel_onboarded.hide()
+        self._reboot_status.clear()
+        self._refresh_result.clear()
         env_lower = self._env_name.lower()
         ok, err, cam_url = ensure_server_and_camera_url(self._fw_root, env_lower)
         if not ok:
@@ -806,6 +856,7 @@ class FwSetupWizard(QDialog):
         self._url_banner.setText(cam_url)
         self._push_status.setText("")
         self._btn_push.setEnabled(True)
+        self._btn_push.setVisible(True)
         self.server_started.emit(cam_url)
         self._refresh_server_footer()
 
@@ -822,12 +873,61 @@ class FwSetupWizard(QDialog):
                 self._push_status.setText("Camera acknowledged update URL.")
                 self._push_status.setStyleSheet(f"color: {_OK};")
                 self.update_sent.emit(True)
+                self._btn_push.setEnabled(False)
+                self._show_step5_after_update_url_success()
             else:
                 self._push_status.setText(msg or "Command failed.")
                 self._push_status.setStyleSheet(f"color: {_ERR};")
                 self.update_sent.emit(False)
 
         self._shell_async("arlocmd update_url", [self._camera_url], done)
+
+    def _show_step5_after_update_url_success(self) -> None:
+        """Branch step 5: reboot path (factory / unknown) vs onboarded + update_refresh."""
+        self._panel_factory.hide()
+        self._panel_onboarded.hide()
+        self._reboot_status.clear()
+        self._refresh_result.clear()
+        if self._is_onboarded is True:
+            self._panel_onboarded.show()
+        else:
+            self._panel_factory.show()
+
+    def _on_trigger_update_refresh(self) -> None:
+        self._btn_trigger_refresh.setEnabled(False)
+        self._refresh_result.setText("Running arlocmd update_refresh 1…")
+        self._refresh_result.setStyleSheet(f"color: {_MUTED};")
+
+        def done(ok: bool, msg: str) -> None:
+            self._btn_trigger_refresh.setEnabled(True)
+            if ok:
+                self._refresh_result.setText(
+                    (msg or "OK").strip() or "update_refresh completed."
+                )
+                self._refresh_result.setStyleSheet(f"color: {_OK};")
+            else:
+                self._refresh_result.setText(msg or "update_refresh failed.")
+                self._refresh_result.setStyleSheet(f"color: {_ERR};")
+
+        self._shell_async("arlocmd update_refresh", ["1"], done)
+
+    def _on_reboot_camera(self) -> None:
+        self._btn_reboot.setEnabled(False)
+        self._reboot_status.setText("Sending arlocmd reboot…")
+        self._reboot_status.setStyleSheet(f"color: {_MUTED};")
+
+        def done(ok: bool, msg: str) -> None:
+            self._btn_reboot.setEnabled(True)
+            if ok:
+                self._reboot_status.setText(
+                    (msg or "Reboot command sent.").strip() or "Reboot command sent."
+                )
+                self._reboot_status.setStyleSheet(f"color: {_OK};")
+            else:
+                self._reboot_status.setText(msg or "Reboot failed.")
+                self._reboot_status.setStyleSheet(f"color: {_ERR};")
+
+        self._shell_async("arlocmd reboot", [], done)
 
     def _refresh_server_footer(self) -> None:
         from core.local_server import DEFAULT_PORT, check_server_status, get_running_server_url

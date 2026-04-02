@@ -346,8 +346,14 @@ def show_connection_status(
     device_identifier: str,
     model_name: str,
     connected_at: str | None = None,
+    is_onboarded: bool | None = None,
 ) -> None:
     """Show current connection status."""
+    ob_line = ""
+    if is_onboarded is True:
+        ob_line = "  Onboarded:     yes (claimed on Arlo account)"
+    elif is_onboarded is False:
+        ob_line = "  Onboarded:     no"
     if _gui_menu_bridge is not None:
         lines = [
             "Connection status",
@@ -355,6 +361,8 @@ def show_connection_status(
             f"  Device:        {device_identifier}",
             f"  Model:         {model_name}",
         ]
+        if ob_line:
+            lines.append(ob_line)
         if connected_at:
             lines.append(f"  Connected at:  {connected_at}")
         _gui_log("\n".join(lines) + "\n\n")
@@ -365,6 +373,10 @@ def show_connection_status(
     table.add_row("Connection", connection_type)
     table.add_row("Device", device_identifier)
     table.add_row("Model", model_name)
+    if is_onboarded is True:
+        table.add_row("Onboarded", "yes (claimed)")
+    elif is_onboarded is False:
+        table.add_row("Onboarded", "no")
     if connected_at:
         table.add_row("Connected at", connected_at)
     console.print(table)
