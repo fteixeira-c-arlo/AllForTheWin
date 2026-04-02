@@ -306,12 +306,23 @@ def _cli_step_start_server_and_update_url(
 def run_update_url_flow(
     connection_execute: Callable[[str, list[str]], tuple[bool, str]],
     model: dict,
+    abstract_cli_args: list[str] | None = None,
 ) -> str | None:
     """
     Run the full fw_setup flow: prompts, list FW from Artifactory, download, server start, send command.
     model: dict with "name", optional "fw_search_models" (list of models for Artifactory search, e.g. 2K + FHD).
+    abstract_cli_args: when invoked via abstract ``flash``, user tokens after the command name (e.g. legacy
+    ``ip`` / ``file``). This flow does not use them; non-empty values are rejected with a clear error.
     Returns None on success, or an error message string.
     """
+    extra = [str(a).strip() for a in (abstract_cli_args or []) if str(a).strip()]
+    if extra:
+        return (
+            "Firmware setup does not use IP or file arguments (Artifactory flow is interactive). "
+            "Run flash or fw_setup with no arguments. "
+            f"Received: {' '.join(extra)}"
+        )
+
     model_name = (model or {}).get("name") or "Camera"
     fw_search_models = (model or {}).get("fw_search_models") or [model_name]
 

@@ -99,8 +99,8 @@
   },
   {
     "name": "flash",
-    "description": "Flash firmware via fw_setup",
-    "args": ["ip", "file"],
+    "description": "Flash firmware via fw_setup (Artifactory + local server; no CLI arguments)",
+    "args": ["ip?", "file?"],
     "sequence": ["fw_setup"],
     "transport_restriction": "no_uart"
   },

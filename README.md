@@ -62,7 +62,7 @@ ArloShell uses a universal `noun verb` syntax. The same command works on every s
 | `update check` | Check for available update (notify only) |
 | `update apply` | Force update check and install |
 | `migrate <stage>` | Migrate to environment (`dev` / `qa` / `prod` / `ftrial`) and reboot |
-| `flash <ip> <file>` | Flash firmware via local HTTP server |
+| `flash` | Firmware setup via Artifactory download and local HTTP server (same as `fw_setup`; no arguments) |
 
 ### Device
 | Command | Description |

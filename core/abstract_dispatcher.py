@@ -191,7 +191,9 @@ def execute_abstract_command(
                 raise ValueError("fw_setup requires an active camera connection.")
             from core.update_url_flow import run_update_url_flow
 
-            err = run_update_url_flow(connection_execute, model or {})
+            err = run_update_url_flow(
+                connection_execute, model or {}, abstract_cli_args=step_args
+            )
             if err is not None:
                 if err == "cancelled":
                     raise RuntimeError("fw_setup cancelled.")

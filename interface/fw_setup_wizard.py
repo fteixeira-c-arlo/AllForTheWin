@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+from html import escape
 from typing import Any, Callable
 
 from PySide6.QtCore import QThread, QTimer, Qt, Signal
@@ -47,12 +48,10 @@ from core.fw_setup_service import (
     download_firmware_to_layout,
     ensure_server_and_camera_url,
     extract_firmware_archive,
-    folder_has_firmware_artifacts,
     list_environment_folders,
     prepare_env_directories,
     rename_server_folder,
     sanitize_server_folder_name,
-    scan_firmware_folders_with_versions,
     search_firmware_archives,
 )
 from core.camera_models import get_models
@@ -313,7 +312,7 @@ class FwSetupWizard(QDialog):
             "Search firmware",
             "Select version",
             "Download",
-            "Serve & update",
+            "Server & update",
         ]
         for i, title in enumerate(titles):
             row = QHBoxLayout()
@@ -510,8 +509,14 @@ class FwSetupWizard(QDialog):
         self._combo_server_folder.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self._combo_server_folder.currentIndexChanged.connect(self._on_search_fields_changed)
         le_sf = self._combo_server_folder.lineEdit()
+        _sf_overwrite_tip = (
+            "If this folder already contains firmware (archive, binaries, or updaterules), "
+            "searching and downloading again may overwrite files in that tree."
+        )
+        self._combo_server_folder.setToolTip(_sf_overwrite_tip)
         if le_sf is not None:
             le_sf.textChanged.connect(self._on_search_fields_changed)
+            le_sf.setToolTip(_sf_overwrite_tip)
         sf_row.addWidget(self._combo_server_folder, 1)
         self._btn_rename_folder = QPushButton("Rename…")
         self._btn_rename_folder.setToolTip("Rename an existing folder under the server root")
@@ -600,12 +605,16 @@ class FwSetupWizard(QDialog):
     def _page_serve(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
-        h = QLabel("Serve & set update URL")
+        h = QLabel("Server & set update URL")
         h.setStyleSheet("font-size: 15px; font-weight: bold;")
         lay.addWidget(h)
 
         self._url_banner = QLabel("")
-        self._url_banner.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._url_banner.setTextFormat(Qt.TextFormat.RichText)
+        self._url_banner.setOpenExternalLinks(True)
+        self._url_banner.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction | Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )
         self._url_banner.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {_ACCENT};")
         self._url_banner.setWordWrap(True)
         lay.addWidget(self._url_banner)
@@ -617,17 +626,6 @@ class FwSetupWizard(QDialog):
         sub.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
         sub.setWordWrap(True)
         lay.addWidget(sub)
-
-        sum_l = QLabel("All firmware folders on this server")
-        sum_l.setStyleSheet(f"color: {_MUTED}; font-size: 11px;")
-        lay.addWidget(sum_l)
-        self._serve_folder_summary = QPlainTextEdit()
-        self._serve_folder_summary.setReadOnly(True)
-        self._serve_folder_summary.setMaximumHeight(96)
-        self._serve_folder_summary.setPlaceholderText("Scanning folders…")
-        sum_mono = QFont("Menlo", 9) if os.name != "nt" else QFont("Consolas", 9)
-        self._serve_folder_summary.setFont(sum_mono)
-        lay.addWidget(self._serve_folder_summary)
 
         self._step5_log = QPlainTextEdit()
         self._step5_log.setReadOnly(True)
@@ -644,40 +642,6 @@ class FwSetupWizard(QDialog):
         )
         self._btn_push.clicked.connect(self._push_update_url)
         lay.addWidget(self._btn_push)
-
-        self._panel_factory = QWidget()
-        fl = QVBoxLayout(self._panel_factory)
-        fl.setContentsMargins(0, 8, 0, 0)
-        fl.setSpacing(8)
-        self._lbl_factory_hint = QLabel(
-            "This camera is not onboarded. After the update URL is set, ArloShell sends a reboot "
-            "automatically so the device picks up firmware from the new URL on boot."
-        )
-        self._lbl_factory_hint.setWordWrap(True)
-        self._lbl_factory_hint.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
-        fl.addWidget(self._lbl_factory_hint)
-        lay.addWidget(self._panel_factory)
-        self._panel_factory.hide()
-
-        self._panel_onboarded = QWidget()
-        ol = QVBoxLayout(self._panel_onboarded)
-        ol.setContentsMargins(0, 8, 0, 0)
-        ol.setSpacing(8)
-        self._lbl_onboarded_hint = QLabel(
-            "This camera is onboarded — firmware is staged on your local server. "
-            "Use the Arlo app to trigger an update check, or press the button below to check from the device now."
-        )
-        self._lbl_onboarded_hint.setWordWrap(True)
-        self._lbl_onboarded_hint.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
-        ol.addWidget(self._lbl_onboarded_hint)
-        self._btn_trigger_refresh = QPushButton("Trigger update check")
-        self._btn_trigger_refresh.setStyleSheet(
-            f"QPushButton {{ background-color: #3949ab; color: #e8eaf6; padding: 8px 16px; }}"
-        )
-        self._btn_trigger_refresh.clicked.connect(self._on_trigger_update_refresh)
-        ol.addWidget(self._btn_trigger_refresh)
-        lay.addWidget(self._panel_onboarded)
-        self._panel_onboarded.hide()
 
         lay.addStretch(1)
         return w
@@ -1039,18 +1003,6 @@ class FwSetupWizard(QDialog):
                 "Enter a valid server folder name (letters, numbers, dash, underscore; no slashes).",
             )
             return
-        existing_path = os.path.join(self._fw_root, folder)
-        if os.path.isdir(existing_path) and folder_has_firmware_artifacts(existing_path):
-            r = QMessageBox.warning(
-                self,
-                "Firmware setup",
-                f'Folder "{folder}" already contains firmware (archive, binaries, or updaterules). '
-                "Continuing can overwrite files in that tree.\n\nProceed with search and download?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if r != QMessageBox.StandardButton.Yes:
-                return
         self._server_folder_name = folder
         self._search_busy = True
         self._sync_nav()
@@ -1219,26 +1171,23 @@ class FwSetupWizard(QDialog):
         self._enter_serve_step()
 
     def _enter_serve_step(self) -> None:
-        self._panel_factory.hide()
-        self._panel_onboarded.hide()
         self._clear_step5_log()
         folder = self._server_folder_name.strip()
         ok, err, cam_url = ensure_server_and_camera_url(self._fw_root, folder)
         if not ok:
+            self._url_banner.setTextFormat(Qt.TextFormat.PlainText)
+            self._url_banner.setOpenExternalLinks(False)
             self._url_banner.setText("Could not start or read server.")
             self._append_step5_log(err or "Server error.")
             self._btn_push.setEnabled(False)
             return
         self._camera_url = cam_url
-        self._url_banner.setText(cam_url)
+        self._url_banner.setTextFormat(Qt.TextFormat.RichText)
+        self._url_banner.setOpenExternalLinks(True)
+        eu = escape(cam_url)
+        self._url_banner.setText(f'<a href="{eu}">{eu}</a>')
         self._btn_push.setEnabled(True)
         self._btn_push.setVisible(True)
-        vmc = self._vmc_binaries_folder_name()
-        rows = scan_firmware_folders_with_versions(self._fw_root, vmc)
-        lines = "\n".join(f"  • {n}  —  {v}" for n, v in rows)
-        self._serve_folder_summary.setPlainText(
-            f"Server root: {self._fw_root}\nFolders for {vmc}:\n{lines if lines else '  (none found)'}"
-        )
         self.server_started.emit(cam_url)
         self._refresh_server_footer()
 
@@ -1262,13 +1211,9 @@ class FwSetupWizard(QDialog):
         self._shell_async("arlocmd update_url", [self._camera_url], done)
 
     def _finish_step5_after_update_url_success(self) -> None:
-        """Onboarded: app/update_refresh UI. Not onboarded: auto-reboot and show both results."""
-        self._panel_factory.hide()
-        self._panel_onboarded.hide()
+        """Not onboarded: auto-reboot so the device picks up firmware from the new URL on boot."""
         if self._is_onboarded is True:
-            self._panel_onboarded.show()
             return
-        self._panel_factory.show()
         self._append_step5_log("Sending arlocmd reboot…")
 
         def reboot_done(ok_r: bool, msg_r: str) -> None:
@@ -1278,19 +1223,6 @@ class FwSetupWizard(QDialog):
                 self._append_step5_log("arlocmd reboot failed: " + (msg_r or "error"))
 
         self._shell_async("arlocmd reboot", [], reboot_done)
-
-    def _on_trigger_update_refresh(self) -> None:
-        self._btn_trigger_refresh.setEnabled(False)
-        self._append_step5_log("Running arlocmd update_refresh 1…")
-
-        def done(ok: bool, msg: str) -> None:
-            self._btn_trigger_refresh.setEnabled(True)
-            if ok:
-                self._append_step5_log((msg or "OK").strip() or "update_refresh completed.")
-            else:
-                self._append_step5_log(msg or "update_refresh failed.")
-
-        self._shell_async("arlocmd update_refresh", ["1"], done)
 
     def _refresh_server_footer(self) -> None:
         hint, line, tooltip = firmware_server_listener_summary()
