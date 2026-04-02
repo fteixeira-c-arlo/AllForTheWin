@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import socket
 import sys
-from typing import Callable
+from typing import Callable, Literal
+
+_FW_LOCAL_DETECT_LOG = logging.getLogger("arlo_shell.fw_local_detect")
 from urllib.parse import quote, unquote, urlparse
 
 from core.artifactory_client import ARTIFACTORY_REPO, download_firmware, list_available_firmware
@@ -69,6 +72,38 @@ def flatten_firmware_archives(
     return [(folder, fn) for folder, files in available_fw for fn in files]
 
 
+def scan_local_firmware_archives(
+    fw_root: str,
+    server_folder: str,
+    version_filter: str,
+) -> list[tuple[str, str]]:
+    """
+    List (version_path, filename) for archives under <fw_root>/<server_folder>/archive/.
+    Runs before Artifactory search; rows use version_path prefix 'local/<folder>/' so the wizard
+    can tell them from remote paths. version_filter: non-empty means filename must contain it (case-insensitive).
+    """
+    root = os.path.abspath(fw_root)
+    folder = sanitize_server_folder_name((server_folder or "").strip())
+    if not folder:
+        return []
+    arch = os.path.join(root, folder, "archive")
+    if not os.path.isdir(arch):
+        return []
+    vf = (version_filter or "").strip().lower()
+    out: list[tuple[str, str]] = []
+    try:
+        names = sorted(os.listdir(arch), key=str.lower)
+    except OSError:
+        return []
+    for fn in names:
+        if not is_firmware_archive(fn):
+            continue
+        if vf and vf not in fn.lower():
+            continue
+        out.append((f"local/{folder}/{fn}", fn))
+    return out
+
+
 def compute_download_model(version: str, selected_filename: str | None, model_name: str) -> str:
     """Folder name under binaries/ for Artifactory download target."""
     if not selected_filename:
@@ -117,6 +152,222 @@ def folder_has_firmware_artifacts(server_folder_dir: str) -> bool:
     except OSError:
         pass
     return False
+
+
+def _normalize_fw_version_token(s: str) -> str:
+    """Lowercase, strip; first dotted numeric run (1.300, 1.300.0.42, etc.)."""
+    t = (s or "").strip().lower()
+    t = re.sub(r"\s+", "", t)
+    m = re.search(r"(\d+(?:\.\d+)+)", t)
+    return m.group(1) if m else t
+
+
+def _fw_build_tokens_compatible(sel_token: str, loc_token: str) -> bool:
+    """True if selection and local version refer to the same build (prefix / exact on dotted tokens)."""
+    s = (sel_token or "").strip().lower()
+    l = (loc_token or "").strip().lower()
+    if not s or not l:
+        return False
+    if s == l:
+        return True
+    if l.startswith(s + ".") or s.startswith(l + "."):
+        return True
+    return False
+
+
+def _archive_suggests_selected_build(
+    archive_dir: str,
+    selected_archive_name: str | None,
+    selected_version_path: str,
+) -> bool:
+    """True if any file in archive/ plausibly is the same build as the Artifactory selection."""
+    if not os.path.isdir(archive_dir):
+        return False
+    sel_name = (selected_archive_name or "").strip()
+    sel_low = sel_name.lower()
+    path_tok = _normalize_fw_version_token(selected_version_path)
+    name_tok = _normalize_fw_version_token(selected_archive_name or "")
+    sel_tok = path_tok or name_tok
+    try:
+        names = os.listdir(archive_dir)
+    except OSError:
+        return False
+    for fn in names:
+        low = fn.lower()
+        if not (low.endswith(".zip") or ".tar.gz" in low):
+            continue
+        if sel_low and low == sel_low:
+            return True
+        if sel_low and sel_low in low or low in sel_low:
+            return True
+        arch_tok = _normalize_fw_version_token(fn)
+        if sel_tok and arch_tok and _fw_build_tokens_compatible(sel_tok, arch_tok):
+            return True
+    return False
+
+
+def _list_files_in_archive_dir(server_folder_dir: str) -> list[str]:
+    arch = os.path.join(server_folder_dir, "archive")
+    if not os.path.isdir(arch):
+        return []
+    try:
+        return sorted(os.listdir(arch))
+    except OSError:
+        return []
+
+
+def debug_probe_local_firmware_folder(
+    tag: str,
+    server_folder_abs: str,
+    *,
+    selected_version_path: str,
+    selected_archive_name: str | None,
+) -> None:
+    """
+    Console + logger probe for skip-download debugging (items 1–4).
+    Typical layout after a successful download + extract: archive/ (.zip or .tar.gz),
+    binaries/<VMC>/ (*.enc), updaterules/ (*update*rule*.json with version fields).
+    """
+    root = os.path.abspath(server_folder_abs)
+
+    def out(msg: str) -> None:
+        print(msg, flush=True)
+        _FW_LOCAL_DETECT_LOG.info(msg)
+
+    out(f"[FW_LOCAL_DETECT] ========== {tag} ==========")
+    out(f"[FW_LOCAL_DETECT] 1. Target server folder (absolute): {root}")
+
+    out("[FW_LOCAL_DETECT] 2. Directory tree (depth-limited):")
+    if not os.path.isdir(root):
+        out(f"[FW_LOCAL_DETECT]    (folder does not exist yet: {root!r})")
+    else:
+        max_depth = 6
+        max_entries = 400
+        n = 0
+        truncated = False
+        for dirpath, dirnames, filenames in os.walk(root):
+            if truncated:
+                break
+            depth = dirpath[len(root) :].count(os.sep)
+            if depth >= max_depth:
+                dirnames[:] = []
+                continue
+            rel = os.path.relpath(dirpath, root)
+            disp = "." if rel in (".", "") else rel
+            out(f"[FW_LOCAL_DETECT]    {disp}/")
+            for fn in sorted(filenames):
+                n += 1
+                if n > max_entries:
+                    out(f"[FW_LOCAL_DETECT]    ... ({max_entries}+ entries, truncated)")
+                    truncated = True
+                    dirnames[:] = []
+                    break
+                out(f"[FW_LOCAL_DETECT]       {fn}")
+
+    has_art = folder_has_firmware_artifacts(root)
+    local_label = firmware_folder_version_label(root)
+    arch_files = _list_files_in_archive_dir(root)
+    archive_dir = os.path.join(root, "archive")
+    archive_path_hit = bool(
+        selected_archive_name
+        and os.path.isfile(os.path.join(archive_dir, selected_archive_name))
+    )
+    archive_heuristic = _archive_suggests_selected_build(
+        archive_dir, selected_archive_name, selected_version_path
+    )
+    combined_sel = f"{selected_version_path or ''}/{selected_archive_name or ''}"
+    sel_tok = (
+        _normalize_fw_version_token(combined_sel)
+        or _normalize_fw_version_token(selected_version_path)
+        or _normalize_fw_version_token(selected_archive_name or "")
+    )
+    loc_tok = _normalize_fw_version_token(local_label) if local_label and local_label != "—" else ""
+    ver_tok_match = bool(
+        sel_tok and loc_tok and (_fw_build_tokens_compatible(sel_tok, loc_tok) or sel_tok == loc_tok)
+    )
+
+    out("[FW_LOCAL_DETECT] 3. What we check for 'already have this build':")
+    out(
+        "[FW_LOCAL_DETECT]    - folder_has_firmware_artifacts() "
+        "(archive/*.zip|*.tar.gz, binaries/**/*.enc, updaterules/*.json)"
+    )
+    out(
+        "[FW_LOCAL_DETECT]    - Exact file: archive/<selected_archive_filename> on disk "
+        f"=> {archive_path_hit!r}"
+    )
+    out(f"[FW_LOCAL_DETECT]    - Archive heuristic (name/token vs archive/*) => {archive_heuristic!r}")
+    out(
+        "[FW_LOCAL_DETECT]    - Version: firmware_folder_version_label() "
+        "(updaterules JSON version* fields, else semver in archive filename) "
+        f"=> {local_label!r}"
+    )
+    out(
+        "[FW_LOCAL_DETECT]    - Normalized semver compare "
+        f"selection({selected_version_path!r} / {selected_archive_name!r}) "
+        f"sel_tok={sel_tok!r} vs local_tok={loc_tok!r} => {ver_tok_match!r}"
+    )
+    if arch_files:
+        out(f"[FW_LOCAL_DETECT]    - archive/ listing: {arch_files!r}")
+
+    cls = classify_local_firmware_vs_selection(root, selected_version_path, selected_archive_name)
+    exact = cls == "exact_match"
+    found = has_art
+    if cls == "empty":
+        reason = "no firmware artifacts in folder (or folder missing)"
+    elif cls == "exact_match":
+        if archive_path_hit:
+            reason = "selected archive filename already present under archive/"
+        elif archive_heuristic:
+            reason = "archive/ file matches selection by name or version token heuristic"
+        elif ver_tok_match:
+            reason = "local version token matches selection (JSON/archive-derived vs path/filename)"
+        else:
+            reason = "classified exact_match"
+    else:
+        reason = f"firmware present but not matched to selection (local label {local_label!r})"
+
+    out(
+        f"[FW_LOCAL_DETECT] 4. Firmware found: {found!s}; "
+        f"exact match vs selection: {exact!s}; classification={cls!r}; reason: {reason}"
+    )
+    out(f"[FW_LOCAL_DETECT] ========== end {tag} ==========")
+
+
+def classify_local_firmware_vs_selection(
+    server_folder_abs: str,
+    selected_version_path: str,
+    selected_archive_name: str | None,
+) -> Literal["empty", "exact_match", "different_present"]:
+    """
+    empty: no prior firmware tree content.
+    exact_match: same archive on disk or same normalized version as selection.
+    different_present: tree has firmware but not the selected build.
+    """
+    root = os.path.abspath(server_folder_abs)
+    if not folder_has_firmware_artifacts(root):
+        return "empty"
+
+    archive_dir = os.path.join(root, "archive")
+    if selected_archive_name and os.path.isfile(os.path.join(archive_dir, selected_archive_name)):
+        return "exact_match"
+
+    if _archive_suggests_selected_build(archive_dir, selected_archive_name, selected_version_path):
+        return "exact_match"
+
+    local_label = firmware_folder_version_label(root)
+    combined_sel = f"{selected_version_path or ''}/{selected_archive_name or ''}"
+    sel_tok = (
+        _normalize_fw_version_token(combined_sel)
+        or _normalize_fw_version_token(selected_version_path)
+        or _normalize_fw_version_token(selected_archive_name or "")
+    )
+    loc_tok = _normalize_fw_version_token(local_label) if local_label and local_label != "—" else ""
+    if sel_tok and loc_tok and (
+        sel_tok == loc_tok or _fw_build_tokens_compatible(sel_tok, loc_tok)
+    ):
+        return "exact_match"
+
+    return "different_present"
 
 
 def rename_server_folder(root: str, old_name: str, new_name: str) -> tuple[bool, str]:

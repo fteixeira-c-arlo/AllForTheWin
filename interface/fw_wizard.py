@@ -1,6 +1,7 @@
 """GUI wizard: Artifactory firmware download, local server, camera update_url (FW Wizard)."""
 from __future__ import annotations
 
+import logging
 import os
 import re
 from functools import partial
@@ -46,7 +47,9 @@ from core.local_server import (
 )
 from core.fw_setup_service import (
     build_camera_fota_url_for_folder,
+    classify_local_firmware_vs_selection,
     compute_download_model,
+    debug_probe_local_firmware_folder,
     default_artifactory_url,
     default_fw_server_root,
     download_firmware_to_layout,
@@ -57,6 +60,7 @@ from core.fw_setup_service import (
     prepare_env_directories,
     rename_server_folder,
     sanitize_server_folder_name,
+    scan_local_firmware_archives,
     search_firmware_archives,
 )
 from core.camera_models import get_models
@@ -67,6 +71,8 @@ from utils.config_manager import (
     save_config_file,
     update_last_used,
 )
+
+_FW_GATE_LOG = logging.getLogger("arlo_shell.fw_local_detect")
 
 # Match main window accents (see gui_window.py)
 _ACCENT = "#00897B"
@@ -251,6 +257,11 @@ class FwWizard(QDialog):
         self._stress_initial_ok = False
         self._stress_search_seq: str | None = None
         self._stress_folder_mismatch_label: QLabel | None = None
+        self._stress_skip_download_a = False
+        self._stress_skip_download_b = False
+        self._prefetched_local_rows: list[tuple[str, str]] = []
+        self._stress_prefetch_local_a: list[tuple[str, str]] = []
+        self._stress_prefetch_local_b: list[tuple[str, str]] = []
 
         self._build_ui()
         self._refresh_server_footer()
@@ -415,6 +426,7 @@ class FwWizard(QDialog):
         self._stack.addWidget(self._page_download())
         self._stack.addWidget(self._page_serve())
         main_lay.addWidget(self._stack, 1)
+        self._stack.currentChanged.connect(self._on_main_stack_page_changed)
 
         nav = QHBoxLayout()
         self._btn_back = QPushButton("Back")
@@ -537,21 +549,24 @@ class FwWizard(QDialog):
         self._radio_fw_single.toggled.connect(self._on_fw_mode_toggled)
         self._radio_fw_stress.toggled.connect(self._on_fw_mode_toggled)
 
-        row.addWidget(
-            _mode_card(
-                self._radio_fw_single,
-                "One Artifactory search, one download, one server folder — typical QA or dev install.",
-            ),
-            1,
+        self._frame_fw_single = _mode_card(
+            self._radio_fw_single,
+            "One Artifactory search, one download, one server folder — typical QA or dev install.",
         )
-        row.addWidget(
-            _mode_card(
-                self._radio_fw_stress,
-                "Two firmware builds side by side for A/B stress testing on the same local server.",
-            ),
-            1,
+        self._frame_fw_stress = _mode_card(
+            self._radio_fw_stress,
+            "Two firmware builds side by side for A/B stress testing on the same local server.",
         )
+        row.addWidget(self._frame_fw_single, 1)
+        row.addWidget(self._frame_fw_stress, 1)
         lay.addLayout(row)
+
+        self._lbl_stress_onboarded_gate = QLabel("")
+        self._lbl_stress_onboarded_gate.setWordWrap(True)
+        self._lbl_stress_onboarded_gate.setStyleSheet(f"color: {_AMBER}; font-size: 12px;")
+        self._lbl_stress_onboarded_gate.hide()
+        lay.addWidget(self._lbl_stress_onboarded_gate)
+
         lay.addStretch(1)
         return w
 
@@ -883,7 +898,7 @@ class FwWizard(QDialog):
         l1.addWidget(self._dl_status_b)
         row2 = QHBoxLayout()
         self._btn_retry_dl_stress = QPushButton("Retry download")
-        self._btn_retry_dl_stress.clicked.connect(self._start_download)
+        self._btn_retry_dl_stress.clicked.connect(self._on_stress_retry_download)
         self._btn_retry_dl_stress.hide()
         row2.addWidget(self._btn_retry_dl_stress)
         row2.addStretch(1)
@@ -1042,6 +1057,26 @@ class FwWizard(QDialog):
             f"Firmware for this camera is stored under …/binaries/{v}/ on the local server "
             "(from the connected model; not configurable)."
         )
+
+    def _on_main_stack_page_changed(self, index: int) -> None:
+        if index == 1:
+            self._refresh_choose_mode_onboarded_gate()
+
+    def _refresh_choose_mode_onboarded_gate(self) -> None:
+        """Entry gate only: block stress mode when the camera is already onboarded (checked once per visit)."""
+        blocked = self._is_onboarded is True
+        self._frame_fw_stress.setEnabled(not blocked)
+        if blocked:
+            self._lbl_stress_onboarded_gate.setText(
+                "Stress test requires a camera that is not onboarded. "
+                "Deregister the camera from its account first."
+            )
+            self._lbl_stress_onboarded_gate.show()
+            if self._radio_fw_stress.isChecked():
+                self._radio_fw_single.setChecked(True)
+        else:
+            self._lbl_stress_onboarded_gate.hide()
+            self._lbl_stress_onboarded_gate.clear()
 
     def _on_fw_mode_toggled(self, *_args: object) -> None:
         self._stress_mode = self._radio_fw_stress.isChecked()
@@ -1435,16 +1470,27 @@ class FwWizard(QDialog):
             if self._stress_mode:
                 if not self._stress_sel_a_file or not self._stress_sel_b_file:
                     return
-            elif not self._selected_filename:
-                return
-            if self._stress_mode:
                 self._stress_version_path_a = self._stress_sel_a_folder or ""
                 self._stress_version_path_b = self._stress_sel_b_folder or ""
+                self._stress_skip_download_a = False
+                self._stress_skip_download_b = False
+                if not self._run_local_firmware_gate_stress():
+                    return
             else:
+                if not self._selected_filename:
+                    return
+                folder_in = sanitize_server_folder_name(self._current_server_folder_input())
+                if folder_in:
+                    self._server_folder_name = folder_in
                 if not self._server_folder_name:
-                    self._server_folder_name = (
-                        sanitize_server_folder_name(self._current_server_folder_input()) or ""
+                    QMessageBox.warning(
+                        self,
+                        "FW Wizard",
+                        "No server folder is set. Go back to Search firmware and choose a folder name.",
                     )
+                    return
+                if not self._run_local_firmware_gate_single():
+                    return
             self._prepare_download_page()
             self._current_step = 4
             self._stack.setCurrentIndex(4)
@@ -1452,6 +1498,150 @@ class FwWizard(QDialog):
             self._sync_nav()
             self._start_download()
             return
+
+    def _on_stress_retry_download(self) -> None:
+        self._stress_skip_download_a = False
+        self._stress_skip_download_b = False
+        self._start_download()
+
+    def _advance_to_serve_skipping_download(self, log_line: str | None = None) -> None:
+        self._prepare_download_page()
+        self._current_step = 5
+        self._stack.setCurrentIndex(5)
+        self._update_sidebar()
+        self._sync_nav()
+        self._enter_serve_step()
+        if log_line:
+            self._append_step5_log(log_line)
+
+    def _run_local_firmware_gate_single(self) -> bool:
+        """False = stay on Select version (or already jumped to serve). True = continue to download step."""
+        try:
+            return self._run_local_firmware_gate_single_impl()
+        except Exception as ex:
+            print(f"[FW_LOCAL_DETECT] gate single exception: {ex!r}", flush=True)
+            _FW_GATE_LOG.exception("local firmware gate (single)")
+            QMessageBox.warning(
+                self,
+                "FW Wizard",
+                "Could not inspect the local firmware folder; download will proceed as usual.\n\n"
+                f"Detail: {ex}",
+            )
+            return True
+
+    def _run_local_firmware_gate_single_impl(self) -> bool:
+        folder = (self._server_folder_name or "").strip()
+        env_dir = os.path.abspath(os.path.join(self._fw_root, folder))
+        debug_probe_local_firmware_folder(
+            "single",
+            env_dir,
+            selected_version_path=self._version_path,
+            selected_archive_name=self._selected_filename,
+        )
+        cl = classify_local_firmware_vs_selection(env_dir, self._version_path, self._selected_filename)
+        if cl == "exact_match":
+            loc = firmware_folder_version_label(env_dir)
+            QMessageBox.information(
+                self,
+                "FW Wizard",
+                f"Firmware {loc} already exists in folder '{folder}'. Skipping download.",
+            )
+            self._advance_to_serve_skipping_download(f"Skipped download: firmware already present ({loc}).")
+            return False
+        if cl == "different_present":
+            loc = firmware_folder_version_label(env_dir)
+            sel_disp = (self._selected_filename or self._version_path or "").strip() or "selection"
+            r = QMessageBox.question(
+                self,
+                "FW Wizard",
+                f"Folder '{folder}' contains {loc}. "
+                f"Downloading the selected build ({sel_disp}) may overwrite existing files. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if r != QMessageBox.StandardButton.Yes:
+                return False
+        return True
+
+    def _run_local_firmware_gate_stress(self) -> bool:
+        try:
+            return self._run_local_firmware_gate_stress_impl()
+        except Exception as ex:
+            print(f"[FW_LOCAL_DETECT] gate stress exception: {ex!r}", flush=True)
+            _FW_GATE_LOG.exception("local firmware gate (stress)")
+            QMessageBox.warning(
+                self,
+                "FW Wizard",
+                "Could not inspect local firmware folders; download will proceed as usual.\n\n"
+                f"Detail: {ex}",
+            )
+            return True
+
+    def _run_local_firmware_gate_stress_impl(self) -> bool:
+        fa = self._stress_server_folder_a
+        fb = self._stress_server_folder_b
+        env_a = os.path.abspath(os.path.join(self._fw_root, fa))
+        env_b = os.path.abspath(os.path.join(self._fw_root, fb))
+        debug_probe_local_firmware_folder(
+            "stress A",
+            env_a,
+            selected_version_path=self._stress_version_path_a,
+            selected_archive_name=self._stress_sel_a_file,
+        )
+        debug_probe_local_firmware_folder(
+            "stress B",
+            env_b,
+            selected_version_path=self._stress_version_path_b,
+            selected_archive_name=self._stress_sel_b_file,
+        )
+        ca = classify_local_firmware_vs_selection(env_a, self._stress_version_path_a, self._stress_sel_a_file)
+        cb = classify_local_firmware_vs_selection(env_b, self._stress_version_path_b, self._stress_sel_b_file)
+
+        if ca == "different_present":
+            loc = firmware_folder_version_label(env_a)
+            sel = (self._stress_sel_a_file or self._stress_version_path_a or "").strip() or "selection"
+            r = QMessageBox.question(
+                self,
+                "FW Wizard",
+                f"Folder '{fa}' contains {loc}. "
+                f"Downloading Firmware A ({sel}) may overwrite existing files. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if r != QMessageBox.StandardButton.Yes:
+                return False
+        if cb == "different_present":
+            loc = firmware_folder_version_label(env_b)
+            sel = (self._stress_sel_b_file or self._stress_version_path_b or "").strip() or "selection"
+            r = QMessageBox.question(
+                self,
+                "FW Wizard",
+                f"Folder '{fb}' contains {loc}. "
+                f"Downloading Firmware B ({sel}) may overwrite existing files. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if r != QMessageBox.StandardButton.Yes:
+                return False
+
+        if ca == "exact_match":
+            self._stress_skip_download_a = True
+        if cb == "exact_match":
+            self._stress_skip_download_b = True
+
+        if ca == "exact_match" and cb == "exact_match":
+            la = firmware_folder_version_label(env_a)
+            lb = firmware_folder_version_label(env_b)
+            QMessageBox.information(
+                self,
+                "FW Wizard",
+                f"Firmware already exists in both folders ({la} in '{fa}', {lb} in '{fb}'). Skipping download.",
+            )
+            self._advance_to_serve_skipping_download(
+                f"Skipped download: Firmware A ({la}) and B ({lb}) already present locally."
+            )
+            return False
+        return True
 
     def _on_step0_fields_changed(self, *_args: object) -> None:
         if self._current_step == 0:
@@ -1520,11 +1710,18 @@ class FwWizard(QDialog):
             self._stress_server_folder_a = fa
             self._stress_server_folder_b = fb
             self._stress_search_seq = "a"
+            vf = (self._fld_version_filter_a.text() or "").strip()
+            self._stress_prefetch_local_a = scan_local_firmware_archives(self._fw_root, fa, vf)
+            self._stress_prefetch_local_b = []
+            nla = len(self._stress_prefetch_local_a)
             self._search_busy = True
             self._sync_nav()
-            self._search_status.setText("Searching Artifactory for Firmware A…")
+            self._search_status.setText(
+                f"Firmware A: scanned local archive/ ({nla} match(es)); searching Artifactory…"
+                if nla
+                else "Firmware A: no matches in local archive/; searching Artifactory…"
+            )
             self._search_status.setStyleSheet(f"color: {_MUTED};")
-            vf = (self._fld_version_filter_a.text() or "").strip()
             self._search_thread = _SearchThread(
                 self._base_url, self._token, self._username, vf, self._fw_search_models
             )
@@ -1540,11 +1737,17 @@ class FwWizard(QDialog):
             )
             return
         self._server_folder_name = folder
+        vf = (self._fld_version_filter.text() or "").strip()
+        self._prefetched_local_rows = scan_local_firmware_archives(self._fw_root, folder, vf)
+        loc_n = len(self._prefetched_local_rows)
         self._search_busy = True
         self._sync_nav()
-        self._search_status.setText("Searching Artifactory…")
+        self._search_status.setText(
+            f"Found {loc_n} archive(s) in local folder; searching Artifactory…"
+            if loc_n
+            else "No matching archives in local folder; searching Artifactory…"
+        )
         self._search_status.setStyleSheet(f"color: {_MUTED};")
-        vf = (self._fld_version_filter.text() or "").strip()
         self._search_thread = _SearchThread(
             self._base_url, self._token, self._username, vf, self._fw_search_models
         )
@@ -1555,29 +1758,41 @@ class FwWizard(QDialog):
         rows = flat if isinstance(flat, list) else []
         if self._stress_mode and self._stress_search_seq in ("a", "b"):
             if self._stress_search_seq == "a":
-                if not ok:
+                pref_a = list(self._stress_prefetch_local_a or [])
+                self._stress_prefetch_local_a = []
+                art_a = [(str(a), str(b)) for a, b in rows] if ok else []
+                merged_a = pref_a + art_a
+                if not merged_a:
                     self._search_busy = False
                     self._stress_results_a = []
-                    self._search_status.setText("Firmware A: " + (err or "Search failed."))
-                    self._search_status.setStyleSheet(f"color: {_ERR};")
                     self._stress_search_seq = None
-                    self._sync_nav()
-                    return
-                self._stress_results_a = [(str(a), str(b)) for a, b in rows]
-                if not self._stress_results_a:
-                    self._search_busy = False
                     self._search_status.setText(
-                        "Firmware A: no matching archives. Adjust the version filter and press Next again."
+                        "Firmware A: no matching archives (local + Artifactory). "
+                        "Adjust filters and press Next again."
                     )
                     self._search_status.setStyleSheet(f"color: {_ERR};")
-                    self._stress_search_seq = None
                     self._sync_nav()
                     return
+                self._stress_results_a = merged_a
+                fb = self._stress_server_folder_b
+                vf_b = (self._fld_version_filter_b.text() or "").strip()
+                self._stress_prefetch_local_b = scan_local_firmware_archives(self._fw_root, fb, vf_b)
+                nlb = len(self._stress_prefetch_local_b)
                 self._stress_search_seq = "b"
                 self._sync_nav()
-                self._search_status.setText("Searching Artifactory for Firmware B…")
-                self._search_status.setStyleSheet(f"color: {_MUTED};")
-                vf_b = (self._fld_version_filter_b.text() or "").strip()
+                if not ok:
+                    self._search_status.setText(
+                        f"Firmware A: Artifactory failed ({err or 'error'}). "
+                        f"Using {len(pref_a)} local archive(s). "
+                        f"Firmware B: scanned local ({nlb}); searching Artifactory…"
+                    )
+                    self._search_status.setStyleSheet(f"color: {_AMBER};")
+                else:
+                    self._search_status.setText(
+                        f"Firmware A: {len(merged_a)} match(es) (local + Artifactory). "
+                        f"Firmware B: scanned local ({nlb}); searching Artifactory…"
+                    )
+                    self._search_status.setStyleSheet(f"color: {_MUTED};")
                 self._search_thread = _SearchThread(
                     self._base_url, self._token, self._username, vf_b, self._fw_search_models
                 )
@@ -1586,25 +1801,33 @@ class FwWizard(QDialog):
                 return
             self._search_busy = False
             self._stress_search_seq = None
-            if not ok:
+            pref_b = list(self._stress_prefetch_local_b or [])
+            self._stress_prefetch_local_b = []
+            art_b = [(str(a), str(b)) for a, b in rows] if ok else []
+            merged_b = pref_b + art_b
+            if not merged_b:
                 self._stress_results_b = []
-                self._search_status.setText("Firmware B: " + (err or "Search failed."))
-                self._search_status.setStyleSheet(f"color: {_ERR};")
-                self._sync_nav()
-                return
-            self._stress_results_b = [(str(a), str(b)) for a, b in rows]
-            if not self._stress_results_b:
                 self._search_status.setText(
-                    "Firmware B: no matching archives. Adjust the version filter and press Next again."
+                    "Firmware B: no matching archives (local + Artifactory). "
+                    "Adjust filters and press Next again."
                 )
                 self._search_status.setStyleSheet(f"color: {_ERR};")
                 self._sync_nav()
                 return
-            self._search_status.setText(
-                f"Firmware A: {len(self._stress_results_a)} match(es). "
-                f"Firmware B: {len(self._stress_results_b)} match(es)."
-            )
-            self._search_status.setStyleSheet(f"color: {_OK};")
+            self._stress_results_b = merged_b
+            if not ok:
+                self._search_status.setText(
+                    f"Firmware A: {len(self._stress_results_a)} match(es). "
+                    f"Firmware B: Artifactory failed ({err or 'error'}). "
+                    f"Using {len(pref_b)} local archive(s)."
+                )
+                self._search_status.setStyleSheet(f"color: {_AMBER};")
+            else:
+                self._search_status.setText(
+                    f"Firmware A: {len(self._stress_results_a)} match(es). "
+                    f"Firmware B: {len(self._stress_results_b)} match(es) (local + Artifactory)."
+                )
+                self._search_status.setStyleSheet(f"color: {_OK};")
             self._lbl_select_a.setText(f"{self._stress_server_folder_a} — select version")
             self._lbl_select_b.setText(f"{self._stress_server_folder_b} — select version")
             self._fill_stress_tables()
@@ -1616,23 +1839,41 @@ class FwWizard(QDialog):
             return
 
         self._search_busy = False
-        if not ok:
+        pref = list(self._prefetched_local_rows or [])
+        self._prefetched_local_rows = []
+        art = [(str(a), str(b)) for a, b in rows] if ok else []
+        merged = pref + art
+        if not merged:
             self._search_results = []
-            self._search_status.setText(err or "Search failed.")
+            if not ok:
+                self._search_status.setText(err or "Search failed.")
+            else:
+                self._search_status.setText(
+                    "No matching firmware archives (.zip or env .tar.gz). "
+                    "Adjust the version filter and press Next again."
+                )
             self._search_status.setStyleSheet(f"color: {_ERR};")
             self._sync_nav()
             return
-        self._search_results = [(str(a), str(b)) for a, b in rows]
-        if not self._search_results:
+        self._search_results = merged
+        nl, na = len(pref), len(art)
+        if not ok:
             self._search_status.setText(
-                "No matching firmware archives (.zip or env .tar.gz). "
-                "Adjust the version filter and press Next again."
+                f"Artifactory search failed ({err or 'error'}). "
+                f"Showing {nl} archive(s) from local folder only."
             )
-            self._search_status.setStyleSheet(f"color: {_ERR};")
-            self._sync_nav()
-            return
-        self._search_status.setText(f"{len(self._search_results)} match(es).")
-        self._search_status.setStyleSheet(f"color: {_OK};")
+            self._search_status.setStyleSheet(f"color: {_AMBER};")
+        elif nl and na:
+            self._search_status.setText(
+                f"{len(merged)} match(es) ({nl} from local archive/, {na} from Artifactory)."
+            )
+            self._search_status.setStyleSheet(f"color: {_OK};")
+        elif nl:
+            self._search_status.setText(f"{nl} match(es) from local archive/ only (Artifactory returned none).")
+            self._search_status.setStyleSheet(f"color: {_OK};")
+        else:
+            self._search_status.setText(f"{len(merged)} match(es).")
+            self._search_status.setStyleSheet(f"color: {_OK};")
         self._select_stack.setCurrentIndex(0)
         self._fill_results_table()
         self._current_step = 3
@@ -1727,6 +1968,119 @@ class FwWizard(QDialog):
         self._stress_sel_b_file = fi1.text()
         self._sync_nav()
 
+    @staticmethod
+    def _binaries_dir_has_enc(path: str) -> bool:
+        if not os.path.isdir(path):
+            return False
+        try:
+            for _r, _, files in os.walk(path):
+                for f in files:
+                    if f.lower().endswith(".enc"):
+                        return True
+        except OSError:
+            return False
+        return False
+
+    @staticmethod
+    def _is_local_archive_row_path(folder_col: str | None) -> bool:
+        return (folder_col or "").strip().lower().startswith("local/")
+
+    def _finish_single_local_archive_only_download(self) -> None:
+        folder = self._server_folder_name or sanitize_server_folder_name(
+            self._current_server_folder_input()
+        )
+        if not folder:
+            self._dl_status.setText("No server folder.")
+            self._dl_status.setStyleSheet(f"color: {_ERR};")
+            self._btn_retry_dl.show()
+            return
+        fn = (self._selected_filename or "").strip()
+        if not fn:
+            self._dl_status.setText("No archive selected.")
+            self._dl_status.setStyleSheet(f"color: {_ERR};")
+            self._btn_retry_dl.show()
+            return
+        archive_path = os.path.abspath(os.path.join(self._fw_root, folder, "archive", fn))
+        if not os.path.isfile(archive_path):
+            self._dl_status.setText(f"Local archive not found: {archive_path}")
+            self._dl_status.setStyleSheet(f"color: {_ERR};")
+            self._btn_retry_dl.show()
+            return
+        vmc = self._vmc_binaries_folder_name()
+        ok_setup, msg_or_env, binaries_base, _pb, updaterules_dir, archive_dir = prepare_env_directories(
+            self._fw_root, folder, vmc, self._fw_search_models
+        )
+        if not ok_setup:
+            self._dl_status.setText(msg_or_env)
+            self._dl_status.setStyleSheet(f"color: {_ERR};")
+            self._btn_retry_dl.show()
+            return
+        chosen_binaries_dir = os.path.abspath(os.path.join(binaries_base, vmc))
+        rules_dir = os.path.abspath(updaterules_dir)
+        low = fn.lower()
+        if not self._binaries_dir_has_enc(chosen_binaries_dir) and (
+            low.endswith(".zip") or ".tar.gz" in low
+        ):
+            self._dl_status.setText("Extracting local archive…")
+            ok_e, err_e = extract_firmware_archive(archive_path, chosen_binaries_dir, rules_dir)
+            if not ok_e:
+                self._dl_status.setText(err_e or "Extraction failed.")
+                self._dl_status.setStyleSheet(f"color: {_ERR};")
+                self._btn_retry_dl.show()
+                return
+        self._dl_progress.setRange(0, 100)
+        self._dl_progress.setValue(100)
+        self._dl_status.setText("Using firmware from local archive/.")
+        self._dl_status.setStyleSheet(f"color: {_OK};")
+        QTimer.singleShot(400, self._auto_advance_serve)
+
+    def _finish_stress_local_archive_leg(self, which: str) -> None:
+        folder = self._stress_server_folder_a if which == "a" else self._stress_server_folder_b
+        fn = ((self._stress_sel_a_file if which == "a" else self._stress_sel_b_file) or "").strip()
+        lbl = self._dl_status_a if which == "a" else self._dl_status_b
+        if not fn:
+            lbl.setText("No archive selected.")
+            lbl.setStyleSheet(f"color: {_ERR};")
+            self._btn_retry_dl_stress.show()
+            return
+        archive_path = os.path.abspath(os.path.join(self._fw_root, folder, "archive", fn))
+        if not os.path.isfile(archive_path):
+            lbl.setText(f"Local archive not found: {archive_path}")
+            lbl.setStyleSheet(f"color: {_ERR};")
+            self._btn_retry_dl_stress.show()
+            return
+        vmc = self._vmc_binaries_folder_name()
+        ok_setup, msg_or_env, binaries_base, _pb, updaterules_dir, archive_dir = prepare_env_directories(
+            self._fw_root, folder, vmc, self._fw_search_models
+        )
+        if not ok_setup:
+            lbl.setText(msg_or_env)
+            lbl.setStyleSheet(f"color: {_ERR};")
+            self._btn_retry_dl_stress.show()
+            return
+        chosen_binaries_dir = os.path.abspath(os.path.join(binaries_base, vmc))
+        rules_dir = os.path.abspath(updaterules_dir)
+        low = fn.lower()
+        if not self._binaries_dir_has_enc(chosen_binaries_dir) and (
+            low.endswith(".zip") or ".tar.gz" in low
+        ):
+            lbl.setText("Extracting local archive…")
+            ok_e, err_e = extract_firmware_archive(archive_path, chosen_binaries_dir, rules_dir)
+            if not ok_e:
+                lbl.setText(err_e or "Extraction failed.")
+                lbl.setStyleSheet(f"color: {_ERR};")
+                self._btn_retry_dl_stress.show()
+                return
+        bar = self._dl_progress_a if which == "a" else self._dl_progress_b
+        bar.setRange(0, 100)
+        bar.setValue(100)
+        lbl.setText("Using firmware from local archive/.")
+        lbl.setStyleSheet(f"color: {_OK};")
+        if which == "a":
+            QTimer.singleShot(200, lambda: self._start_stress_download_leg("b"))
+        else:
+            QTimer.singleShot(400, self._auto_advance_serve)
+
     def _prepare_download_page(self) -> None:
         vmc = self._vmc_binaries_folder_name()
         if self._stress_mode:
@@ -1775,6 +2129,10 @@ class FwWizard(QDialog):
         self._dl_status.setText("")
         self._dl_status.setStyleSheet("")
 
+        if self._is_local_archive_row_path(self._selected_folder):
+            self._finish_single_local_archive_only_download()
+            return
+
         vmc = self._vmc_binaries_folder_name()
         ok_setup, msg_or_env, binaries_base, _pb, updaterules_dir, archive_dir = prepare_env_directories(
             self._fw_root, folder, vmc, self._fw_search_models
@@ -1816,7 +2174,29 @@ class FwWizard(QDialog):
         self._download_thread.failed.connect(self._on_dl_failed)
         self._download_thread.start()
 
+    def _simulate_stress_leg_skip(self, which: str) -> None:
+        bar = self._dl_progress_a if which == "a" else self._dl_progress_b
+        lbl = self._dl_status_a if which == "a" else self._dl_status_b
+        bar.setRange(0, 100)
+        bar.setValue(100)
+        lbl.setText("Already present in folder — skipped download.")
+        lbl.setStyleSheet(f"color: {_OK};")
+        if which == "a":
+            QTimer.singleShot(200, lambda: self._start_stress_download_leg("b"))
+        else:
+            QTimer.singleShot(400, self._auto_advance_serve)
+
     def _start_stress_download_leg(self, which: str) -> None:
+        if which == "a" and self._stress_skip_download_a:
+            self._simulate_stress_leg_skip("a")
+            return
+        if which == "b" and self._stress_skip_download_b:
+            self._simulate_stress_leg_skip("b")
+            return
+        folder_key = self._stress_sel_a_folder if which == "a" else self._stress_sel_b_folder
+        if self._is_local_archive_row_path(folder_key):
+            self._finish_stress_local_archive_leg(which)
+            return
         vmc = self._vmc_binaries_folder_name()
         folder = self._stress_server_folder_a if which == "a" else self._stress_server_folder_b
         version_path = self._stress_version_path_a if which == "a" else self._stress_version_path_b
@@ -2030,16 +2410,18 @@ class FwWizard(QDialog):
             return
         va = firmware_folder_version_label(os.path.join(self._fw_root, self._stress_server_folder_a))
         vb = firmware_folder_version_label(os.path.join(self._fw_root, self._stress_server_folder_b))
-        self.stress_test_ready.emit(
-            {
-                "fw_root": self._fw_root,
-                "folder_a": self._stress_server_folder_a,
-                "folder_b": self._stress_server_folder_b,
-                "version_a": va,
-                "version_b": vb,
-            }
-        )
+        payload = {
+            "fw_root": self._fw_root,
+            "folder_a": self._stress_server_folder_a,
+            "folder_b": self._stress_server_folder_b,
+            "version_a": va,
+            "version_b": vb,
+        }
         self._skip_server_close_dialog = True
+        QTimer.singleShot(0, lambda p=payload: self._deliver_stress_test_ready_and_close(p))
+
+    def _deliver_stress_test_ready_and_close(self, payload: dict[str, Any]) -> None:
+        self.stress_test_ready.emit(payload)
         self.close()
 
     def _push_update_url(self) -> None:

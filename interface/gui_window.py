@@ -1358,20 +1358,35 @@ class MainWindow(QMainWindow):
             version_label_a=str(payload.get("version_a") or "—"),
             version_label_b=str(payload.get("version_b") or "—"),
         )
-        self._stress_test_panel.begin_test(
-            cfg,
-            from_wizard_initial=True,
-            gui_connected_now=bool(self._device_connected),
-        )
         self._stress_test_session_active = True
+        try:
+            self._stress_test_panel.begin_test(
+                cfg,
+                from_wizard_initial=True,
+                gui_connected_now=bool(self._device_connected),
+            )
+        except Exception as ex:
+            self._stress_test_session_active = False
+            QMessageBox.warning(
+                self,
+                "Stress test",
+                f"Could not start the stress test session: {ex}",
+            )
+            return
         act = getattr(self, "_action_stress_test_panel", None)
         if act is not None:
             act.setEnabled(True)
+            act.blockSignals(True)
             act.setChecked(True)
+            act.blockSignals(False)
         fwp = getattr(self, "_fw_switch_panel", None)
         if fwp is not None:
             fwp.set_stress_test_blocks(True)
+        self._stress_test_dock.show()
         self._stress_test_dock.setVisible(True)
+        self._stress_test_dock.raise_()
+        self.raise_()
+        self.activateWindow()
 
     def _menu_fw_wizard(self) -> None:
         if not self._device_connected:
