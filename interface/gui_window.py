@@ -920,6 +920,7 @@ class MainWindow(QMainWindow):
 
         self._fw_shell_pending: Callable[[bool, str], None] | None = None
         self._fw_wizard = None
+        self._stress_test_session_active = False
 
         self._command_profile: str = "none"
         self._conn_type: str = ""
@@ -1226,6 +1227,7 @@ class MainWindow(QMainWindow):
 
         self._setup_menu_bar()
         self._init_fw_folder_switcher_dock()
+        self._init_stress_test_dock()
 
         self._set_command_list_disconnected()
         self._prompt_model_name = "Device"
@@ -1249,6 +1251,14 @@ class MainWindow(QMainWindow):
         self._action_fw_wizard.triggered.connect(self._menu_fw_wizard)
         self._action_fw_wizard.setEnabled(False)
         menu_tools.addAction(self._action_fw_wizard)
+        self._action_stress_test_panel = QAction("Stress &test panel", self)
+        self._action_stress_test_panel.setEnabled(False)
+        self._action_stress_test_panel.setCheckable(True)
+        self._action_stress_test_panel.setStatusTip(
+            "Show the FW stress-test panel (after starting a stress session from the FW Wizard)."
+        )
+        self._action_stress_test_panel.toggled.connect(self._on_stress_test_panel_toggled)
+        menu_tools.addAction(self._action_stress_test_panel)
 
         menu_help = menubar.addMenu("&Help")
         act_ref = QAction("Command &reference", self)
@@ -1288,6 +1298,81 @@ class MainWindow(QMainWindow):
             mv.addSeparator()
             mv.addAction(act)
 
+    def _init_stress_test_dock(self) -> None:
+        from interface.stress_test_panel import StressTestPanel
+
+        self._stress_test_dock = QDockWidget("Stress test", self)
+        self._stress_test_dock.setObjectName("StressTestDock")
+        self._stress_test_panel = StressTestPanel(self)
+        self._stress_test_panel.set_shell_async(self._fw_shell_async)
+        self._stress_test_dock.setWidget(self._stress_test_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._stress_test_dock)
+        self._stress_test_dock.hide()
+        self._stress_test_dock.visibilityChanged.connect(self._on_stress_test_dock_visibility)
+        self._stress_test_panel.test_ended.connect(self._on_stress_test_panel_ended)
+
+    @Slot(bool)
+    def _on_stress_test_dock_visibility(self, visible: bool) -> None:
+        act = getattr(self, "_action_stress_test_panel", None)
+        if act is not None and act.isCheckable():
+            act.blockSignals(True)
+            act.setChecked(visible)
+            act.blockSignals(False)
+
+    @Slot(bool)
+    def _on_stress_test_panel_toggled(self, checked: bool) -> None:
+        if not self._stress_test_session_active:
+            act = getattr(self, "_action_stress_test_panel", None)
+            if act is not None:
+                act.blockSignals(True)
+                act.setChecked(False)
+                act.blockSignals(False)
+            QMessageBox.information(
+                self,
+                "Stress test",
+                "No active stress test. In the FW Wizard, on Choose mode pick Stress test (two firmwares), finish the flow, "
+                "then click “Open stress test panel”.",
+            )
+            return
+        self._stress_test_dock.setVisible(checked)
+
+    @Slot()
+    def _on_stress_test_panel_ended(self) -> None:
+        self._stress_test_session_active = False
+        act = getattr(self, "_action_stress_test_panel", None)
+        if act is not None:
+            act.setEnabled(False)
+            act.setChecked(False)
+        fwp = getattr(self, "_fw_switch_panel", None)
+        if fwp is not None:
+            fwp.set_stress_test_blocks(False)
+
+    @Slot(dict)
+    def _on_stress_test_ready(self, payload: dict) -> None:
+        from interface.stress_test_panel import StressTestConfig
+
+        cfg = StressTestConfig(
+            fw_root=str(payload.get("fw_root") or ""),
+            folder_a=str(payload.get("folder_a") or ""),
+            folder_b=str(payload.get("folder_b") or ""),
+            version_label_a=str(payload.get("version_a") or "—"),
+            version_label_b=str(payload.get("version_b") or "—"),
+        )
+        self._stress_test_panel.begin_test(
+            cfg,
+            from_wizard_initial=True,
+            gui_connected_now=bool(self._device_connected),
+        )
+        self._stress_test_session_active = True
+        act = getattr(self, "_action_stress_test_panel", None)
+        if act is not None:
+            act.setEnabled(True)
+            act.setChecked(True)
+        fwp = getattr(self, "_fw_switch_panel", None)
+        if fwp is not None:
+            fwp.set_stress_test_blocks(True)
+        self._stress_test_dock.setVisible(True)
+
     def _menu_fw_wizard(self) -> None:
         if not self._device_connected:
             QMessageBox.information(
@@ -1324,6 +1409,7 @@ class MainWindow(QMainWindow):
         wiz.server_started.connect(self._on_fw_wizard_server_started)
         wiz.update_sent.connect(self._on_fw_wizard_update_sent)
         wiz.wizard_closed.connect(self._on_fw_wizard_closed)
+        wiz.stress_test_ready.connect(self._on_stress_test_ready)
         self._fw_wizard = wiz
         wiz.show()
 
@@ -1945,6 +2031,9 @@ class MainWindow(QMainWindow):
             fwp = getattr(self, "_fw_switch_panel", None)
             if fwp is not None:
                 fwp.apply_state(info)
+            stp = getattr(self, "_stress_test_panel", None)
+            if stp is not None:
+                stp.apply_state(info)
             wiz = getattr(self, "_fw_wizard", None)
             if wiz is not None:
                 wiz.apply_shell_connection(True)
@@ -1967,6 +2056,9 @@ class MainWindow(QMainWindow):
             fwp = getattr(self, "_fw_switch_panel", None)
             if fwp is not None:
                 fwp.apply_state({"connected": False})
+            stp = getattr(self, "_stress_test_panel", None)
+            if stp is not None:
+                stp.apply_state({"connected": False})
             wiz = getattr(self, "_fw_wizard", None)
             if wiz is not None:
                 wiz.apply_shell_connection(False)

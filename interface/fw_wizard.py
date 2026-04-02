@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import os
 import re
+from functools import partial
 from html import escape
 from typing import Any, Callable
 
 from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -22,6 +24,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -42,12 +45,14 @@ from core.local_server import (
     stop_http_server,
 )
 from core.fw_setup_service import (
+    build_camera_fota_url_for_folder,
     compute_download_model,
     default_artifactory_url,
     default_fw_server_root,
     download_firmware_to_layout,
     ensure_server_and_camera_url,
     extract_firmware_archive,
+    firmware_folder_version_label,
     list_environment_folders,
     prepare_env_directories,
     rename_server_folder,
@@ -183,11 +188,12 @@ class _DownloadThread(QThread):
 
 
 class FwWizard(QDialog):
-    """Five-step FW Wizard (Artifactory, local server, update URL)."""
+    """Six-step FW Wizard (Artifactory, local server, update URL)."""
 
     server_started = Signal(str)
     update_sent = Signal(bool)
     wizard_closed = Signal()
+    stress_test_ready = Signal(dict)
 
     def __init__(
         self,
@@ -197,8 +203,8 @@ class FwWizard(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("FW Wizard")
-        self.setMinimumSize(560, 440)
-        self.setMaximumSize(920, 640)
+        self.setMinimumSize(780, 440)
+        self.setMaximumSize(1200, 720)
         self.resize(900, 600)
         self.setModal(False)
 
@@ -229,6 +235,23 @@ class FwWizard(QDialog):
         raw_ob = self._model_dict.get("is_onboarded")
         self._is_onboarded: bool | None = raw_ob if isinstance(raw_ob, bool) else None
 
+        self._stress_mode = False
+        self._stress_results_a: list[tuple[str, str]] = []
+        self._stress_results_b: list[tuple[str, str]] = []
+        self._stress_sel_a_folder: str | None = None
+        self._stress_sel_a_file: str | None = None
+        self._stress_sel_b_folder: str | None = None
+        self._stress_sel_b_file: str | None = None
+        self._stress_version_path_a = ""
+        self._stress_version_path_b = ""
+        self._stress_server_folder_a = ""
+        self._stress_server_folder_b = ""
+        self._stress_initial_ran = False
+        self._stress_initial_dispatch_started = False
+        self._stress_initial_ok = False
+        self._stress_search_seq: str | None = None
+        self._stress_folder_mismatch_label: QLabel | None = None
+
         self._build_ui()
         self._refresh_server_footer()
         self._server_timer = QTimer(self)
@@ -240,11 +263,16 @@ class FwWizard(QDialog):
     def apply_shell_connection(self, available: bool) -> None:
         """Called when the device session drops or returns; disables camera-only shell actions."""
         self._device_shell_available = available
-        if self._current_step != 4:
+        if self._current_step != 5:
             return
         if not available:
             self._btn_push.setEnabled(False)
             self._btn_trigger_refresh.setEnabled(False)
+            if self._stress_mode:
+                self._btn_open_stress_panel.setEnabled(False)
+            return
+        if self._stress_mode:
+            self._btn_open_stress_panel.setEnabled(self._stress_initial_ok)
             return
         if self._camera_url:
             self._btn_push.setEnabled(not self._update_url_succeeded)
@@ -325,6 +353,7 @@ class FwWizard(QDialog):
         self._step_checks: list[str] = []  # "", "done", "active"
         titles = [
             "Credentials",
+            "Choose mode",
             "Search firmware",
             "Select version",
             "Download",
@@ -380,6 +409,7 @@ class FwWizard(QDialog):
 
         self._stack = QStackedWidget()
         self._stack.addWidget(self._page_credentials())
+        self._stack.addWidget(self._page_choose_mode())
         self._stack.addWidget(self._page_search())
         self._stack.addWidget(self._page_select())
         self._stack.addWidget(self._page_download())
@@ -467,6 +497,64 @@ class FwWizard(QDialog):
         lay.addStretch(1)
         return w
 
+    def _page_choose_mode(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setSpacing(14)
+        h = QLabel("Choose mode")
+        h.setStyleSheet("font-size: 15px; font-weight: bold;")
+        lay.addWidget(h)
+        sub = QLabel("Pick how you want to use the wizard. You can change this later with Back.")
+        sub.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
+        sub.setWordWrap(True)
+        lay.addWidget(sub)
+
+        self._grp_fw_mode = QButtonGroup(self)
+        row = QHBoxLayout()
+        row.setSpacing(12)
+
+        def _mode_card(radio: QRadioButton, subtitle: str) -> QFrame:
+            fr = QFrame()
+            fr.setStyleSheet(
+                f"QFrame {{ border: 1px solid {_BORDER}; border-radius: 10px; background-color: #141414; }}"
+            )
+            inner = QVBoxLayout(fr)
+            inner.setContentsMargins(14, 12, 14, 12)
+            inner.setSpacing(8)
+            radio.setStyleSheet("font-size: 14px; font-weight: bold;")
+            sub_l = QLabel(subtitle)
+            sub_l.setWordWrap(True)
+            sub_l.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
+            inner.addWidget(radio)
+            inner.addWidget(sub_l)
+            return fr
+
+        self._radio_fw_single = QRadioButton("Single firmware")
+        self._radio_fw_stress = QRadioButton("Stress test (two firmwares)")
+        self._radio_fw_single.setChecked(True)
+        self._grp_fw_mode.addButton(self._radio_fw_single)
+        self._grp_fw_mode.addButton(self._radio_fw_stress)
+        self._radio_fw_single.toggled.connect(self._on_fw_mode_toggled)
+        self._radio_fw_stress.toggled.connect(self._on_fw_mode_toggled)
+
+        row.addWidget(
+            _mode_card(
+                self._radio_fw_single,
+                "One Artifactory search, one download, one server folder — typical QA or dev install.",
+            ),
+            1,
+        )
+        row.addWidget(
+            _mode_card(
+                self._radio_fw_stress,
+                "Two firmware builds side by side for A/B stress testing on the same local server.",
+            ),
+            1,
+        )
+        lay.addLayout(row)
+        lay.addStretch(1)
+        return w
+
     def _page_search(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
@@ -494,31 +582,33 @@ class FwWizard(QDialog):
         lay.addWidget(QLabel("Search includes these Artifactory model names:"))
         lay.addWidget(self._pills_host)
 
+        self._lbl_vmc_bin = QLabel("")
+        self._lbl_vmc_bin.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
+        self._lbl_vmc_bin.setWordWrap(True)
+        lay.addWidget(self._lbl_vmc_bin)
+
+        self._search_mode_stack = QStackedWidget()
+        single_pg = QWidget()
+        single_lay = QVBoxLayout(single_pg)
+        single_lay.setContentsMargins(0, 0, 0, 0)
         self._lbl_bin_target = QLabel("Artifactory download target (2K / FHD)")
         self._lbl_bin_target.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
-        lay.addWidget(self._lbl_bin_target)
+        single_lay.addWidget(self._lbl_bin_target)
         self._combo_bin_target = QComboBox()
         self._combo_bin_target.currentIndexChanged.connect(self._on_search_fields_changed)
-        lay.addWidget(self._combo_bin_target)
+        single_lay.addWidget(self._combo_bin_target)
         bin_hint = QLabel(
             "Chooses which Artifactory product folder to download from. Extracted firmware still "
             "goes under binaries/<connected VMC> on the local server."
         )
         bin_hint.setStyleSheet(f"color: {_MUTED}; font-size: 11px;")
         bin_hint.setWordWrap(True)
-        lay.addWidget(bin_hint)
-
+        single_lay.addWidget(bin_hint)
         self._fld_version_filter = QLineEdit()
-        self._fld_version_filter.setPlaceholderText("Version filter (leave empty to match broadly)")
+        self._fld_version_filter.setPlaceholderText("e.g. 1.300 (leave empty for all)")
         self._fld_version_filter.textChanged.connect(self._on_search_fields_changed)
-        lay.addWidget(QLabel("Version filter"))
-        lay.addWidget(self._fld_version_filter)
-
-        self._lbl_vmc_bin = QLabel("")
-        self._lbl_vmc_bin.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
-        self._lbl_vmc_bin.setWordWrap(True)
-        lay.addWidget(self._lbl_vmc_bin)
-
+        single_lay.addWidget(QLabel("Version filter"))
+        single_lay.addWidget(self._fld_version_filter)
         sf_row = QHBoxLayout()
         self._combo_server_folder = QComboBox()
         self._combo_server_folder.setEditable(True)
@@ -538,8 +628,8 @@ class FwWizard(QDialog):
         self._btn_rename_folder.setToolTip("Rename an existing folder under the server root")
         self._btn_rename_folder.clicked.connect(self._on_rename_server_folder)
         sf_row.addWidget(self._btn_rename_folder)
-        lay.addWidget(QLabel("Server folder (local HTTP path segment)"))
-        lay.addLayout(sf_row)
+        single_lay.addWidget(QLabel("Server folder (local HTTP path segment)"))
+        single_lay.addLayout(sf_row)
         sf_hint = QLabel(
             "Name for the folder on the local server (e.g. qa, qa1, downgrade, stress-v2). "
             "Pick an existing folder from the list or type a new name to create one. "
@@ -547,7 +637,98 @@ class FwWizard(QDialog):
         )
         sf_hint.setStyleSheet(f"color: {_MUTED}; font-size: 11px;")
         sf_hint.setWordWrap(True)
-        lay.addWidget(sf_hint)
+        single_lay.addWidget(sf_hint)
+        single_lay.addStretch(1)
+
+        stress_pg = QWidget()
+        stress_lay = QVBoxLayout(stress_pg)
+        stress_lay.setContentsMargins(0, 8, 0, 0)
+        stress_lay.setSpacing(10)
+
+        def _stress_column_card(title: str) -> tuple[QFrame, QVBoxLayout]:
+            card = QFrame()
+            card.setStyleSheet(
+                f"QFrame {{ border: 1px solid {_BORDER}; border-radius: 8px; background-color: #121212; }}"
+            )
+            inner = QVBoxLayout(card)
+            inner.setContentsMargins(12, 10, 12, 10)
+            inner.setSpacing(8)
+            head = QLabel(title)
+            head.setStyleSheet("font-size: 13px; font-weight: bold;")
+            inner.addWidget(head)
+            return card, inner
+
+        col_row = QHBoxLayout()
+        col_row.setSpacing(12)
+
+        card_a, inner_a = _stress_column_card("Firmware A")
+        self._fld_version_filter_a = QLineEdit()
+        self._fld_version_filter_a.setPlaceholderText("e.g. 1.300 (leave empty for all)")
+        self._fld_version_filter_a.textChanged.connect(self._on_search_fields_changed)
+        inner_a.addWidget(QLabel("Version filter"))
+        inner_a.addWidget(self._fld_version_filter_a)
+        inner_a.addWidget(QLabel("Artifactory download target (2K / FHD)"))
+        self._combo_bin_target_a = QComboBox()
+        self._combo_bin_target_a.currentIndexChanged.connect(self._on_search_fields_changed)
+        inner_a.addWidget(self._combo_bin_target_a)
+        inner_a.addWidget(QLabel("Server folder"))
+        sfr = QHBoxLayout()
+        self._combo_server_folder_a = QComboBox()
+        self._combo_server_folder_a.setEditable(True)
+        self._combo_server_folder_a.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._combo_server_folder_a.setToolTip(_sf_overwrite_tip)
+        le_sa = self._combo_server_folder_a.lineEdit()
+        if le_sa is not None:
+            le_sa.textChanged.connect(self._on_search_fields_changed)
+            le_sa.setToolTip(_sf_overwrite_tip)
+        self._combo_server_folder_a.currentIndexChanged.connect(self._on_search_fields_changed)
+        sfr.addWidget(self._combo_server_folder_a, 1)
+        self._btn_rename_a = QPushButton("Rename…")
+        self._btn_rename_a.setToolTip("Rename an existing folder under the server root")
+        self._btn_rename_a.clicked.connect(lambda: self._on_rename_stress_folder("a"))
+        sfr.addWidget(self._btn_rename_a)
+        inner_a.addLayout(sfr)
+        col_row.addWidget(card_a, 1)
+
+        card_b, inner_b = _stress_column_card("Firmware B")
+        self._fld_version_filter_b = QLineEdit()
+        self._fld_version_filter_b.setPlaceholderText("e.g. 1.300 (leave empty for all)")
+        self._fld_version_filter_b.textChanged.connect(self._on_search_fields_changed)
+        inner_b.addWidget(QLabel("Version filter"))
+        inner_b.addWidget(self._fld_version_filter_b)
+        inner_b.addWidget(QLabel("Artifactory download target (2K / FHD)"))
+        self._combo_bin_target_b = QComboBox()
+        self._combo_bin_target_b.currentIndexChanged.connect(self._on_search_fields_changed)
+        inner_b.addWidget(self._combo_bin_target_b)
+        inner_b.addWidget(QLabel("Server folder"))
+        sfr_b = QHBoxLayout()
+        self._combo_server_folder_b = QComboBox()
+        self._combo_server_folder_b.setEditable(True)
+        self._combo_server_folder_b.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._combo_server_folder_b.setToolTip(_sf_overwrite_tip)
+        le_sb = self._combo_server_folder_b.lineEdit()
+        if le_sb is not None:
+            le_sb.textChanged.connect(self._on_search_fields_changed)
+            le_sb.setToolTip(_sf_overwrite_tip)
+        self._combo_server_folder_b.currentIndexChanged.connect(self._on_search_fields_changed)
+        sfr_b.addWidget(self._combo_server_folder_b, 1)
+        self._btn_rename_b = QPushButton("Rename…")
+        self._btn_rename_b.setToolTip("Rename an existing folder under the server root")
+        self._btn_rename_b.clicked.connect(lambda: self._on_rename_stress_folder("b"))
+        sfr_b.addWidget(self._btn_rename_b)
+        inner_b.addLayout(sfr_b)
+        col_row.addWidget(card_b, 1)
+
+        stress_lay.addLayout(col_row)
+        self._stress_folder_mismatch_label = QLabel("")
+        self._stress_folder_mismatch_label.setStyleSheet(f"color: {_ERR}; font-size: 12px;")
+        self._stress_folder_mismatch_label.setWordWrap(True)
+        stress_lay.addWidget(self._stress_folder_mismatch_label)
+        stress_lay.addStretch(1)
+
+        self._search_mode_stack.addWidget(single_pg)
+        self._search_mode_stack.addWidget(stress_pg)
+        lay.addWidget(self._search_mode_stack)
 
         self._search_status = QLabel("")
         self._search_status.setWordWrap(True)
@@ -557,20 +738,26 @@ class FwWizard(QDialog):
 
         self._sync_model_combo_default()
         self._populate_server_folder_combo()
+        self._populate_stress_bin_combos()
+        self._populate_stress_folder_combos()
         self._refresh_vmc_binaries_label()
         return w
 
     def _page_select(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
+        self._select_stack = QStackedWidget()
+        w0 = QWidget()
+        l0 = QVBoxLayout(w0)
         h = QLabel("Select firmware build")
         h.setStyleSheet("font-size: 15px; font-weight: bold;")
-        lay.addWidget(h)
-        hint = QLabel("Choose one row. Version is the Artifactory folder path; Variant is the archive file name.")
+        l0.addWidget(h)
+        hint = QLabel(
+            "Choose one row. Version is the Artifactory folder path; Variant is the archive file name."
+        )
         hint.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
         hint.setWordWrap(True)
-        lay.addWidget(hint)
-
+        l0.addWidget(hint)
         self._table = QTableWidget(0, 5)
         self._table.setHorizontalHeaderLabels(
             ["Version (path)", "Archive", "Size", "Date", "Variant"]
@@ -584,30 +771,80 @@ class FwWizard(QDialog):
         self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self._table.setSortingEnabled(True)
         self._table.itemSelectionChanged.connect(self._on_table_selection)
-        lay.addWidget(self._table)
+        l0.addWidget(self._table)
+        self._select_stack.addWidget(w0)
+
+        w1 = QWidget()
+        l1 = QVBoxLayout(w1)
+        h1 = QLabel("Select one build for each firmware")
+        h1.setStyleSheet("font-size: 15px; font-weight: bold;")
+        l1.addWidget(h1)
+        self._lbl_select_a = QLabel("")
+        self._lbl_select_a.setStyleSheet(f"color: {_ACCENT}; font-size: 12px; font-weight: bold;")
+        l1.addWidget(self._lbl_select_a)
+        self._table_a = QTableWidget(0, 5)
+        self._table_a.setHorizontalHeaderLabels(
+            ["Version (path)", "Archive", "Size", "Date", "Variant"]
+        )
+        for col, mode in (
+            (0, QHeaderView.ResizeMode.Stretch),
+            (1, QHeaderView.ResizeMode.Stretch),
+            (2, QHeaderView.ResizeMode.ResizeToContents),
+            (3, QHeaderView.ResizeMode.ResizeToContents),
+            (4, QHeaderView.ResizeMode.ResizeToContents),
+        ):
+            self._table_a.horizontalHeader().setSectionResizeMode(col, mode)
+        self._table_a.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table_a.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._table_a.setSortingEnabled(True)
+        self._table_a.setMaximumHeight(180)
+        self._table_a.itemSelectionChanged.connect(self._on_table_selection_a)
+        l1.addWidget(self._table_a)
+        self._lbl_select_b = QLabel("")
+        self._lbl_select_b.setStyleSheet(f"color: {_ACCENT}; font-size: 12px; font-weight: bold;")
+        l1.addWidget(self._lbl_select_b)
+        self._table_b = QTableWidget(0, 5)
+        self._table_b.setHorizontalHeaderLabels(
+            ["Version (path)", "Archive", "Size", "Date", "Variant"]
+        )
+        for col, mode in (
+            (0, QHeaderView.ResizeMode.Stretch),
+            (1, QHeaderView.ResizeMode.Stretch),
+            (2, QHeaderView.ResizeMode.ResizeToContents),
+            (3, QHeaderView.ResizeMode.ResizeToContents),
+            (4, QHeaderView.ResizeMode.ResizeToContents),
+        ):
+            self._table_b.horizontalHeader().setSectionResizeMode(col, mode)
+        self._table_b.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table_b.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._table_b.setSortingEnabled(True)
+        self._table_b.setMaximumHeight(180)
+        self._table_b.itemSelectionChanged.connect(self._on_table_selection_b)
+        l1.addWidget(self._table_b)
+        self._select_stack.addWidget(w1)
+        lay.addWidget(self._select_stack)
         return w
 
     def _page_download(self) -> QWidget:
         w = QWidget()
-        lay = QVBoxLayout(w)
+        outer = QVBoxLayout(w)
         h = QLabel("Download & extract")
         h.setStyleSheet("font-size: 15px; font-weight: bold;")
-        lay.addWidget(h)
-
+        outer.addWidget(h)
+        self._download_stack = QStackedWidget()
+        dw0 = QWidget()
+        lay = QVBoxLayout(dw0)
         self._dl_path_label = QLabel("")
         self._dl_path_label.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
         self._dl_path_label.setWordWrap(True)
         lay.addWidget(self._dl_path_label)
-
         self._dl_progress = QProgressBar()
         self._dl_progress.setRange(0, 0)
         self._dl_progress.setTextVisible(True)
         lay.addWidget(self._dl_progress)
-
         self._dl_status = QLabel("")
         self._dl_status.setWordWrap(True)
         lay.addWidget(self._dl_status)
-
         row = QHBoxLayout()
         self._btn_retry_dl = QPushButton("Retry download")
         self._btn_retry_dl.clicked.connect(self._start_download)
@@ -616,6 +853,44 @@ class FwWizard(QDialog):
         row.addStretch(1)
         lay.addLayout(row)
         lay.addStretch(1)
+        self._download_stack.addWidget(dw0)
+
+        dw1 = QWidget()
+        l1 = QVBoxLayout(dw1)
+        self._dl_path_label_stress = QLabel("")
+        self._dl_path_label_stress.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
+        self._dl_path_label_stress.setWordWrap(True)
+        l1.addWidget(self._dl_path_label_stress)
+        self._dl_lbl_a = QLabel("Firmware A")
+        self._dl_lbl_a.setStyleSheet(f"color: {_ACCENT}; font-size: 12px; font-weight: bold;")
+        l1.addWidget(self._dl_lbl_a)
+        self._dl_progress_a = QProgressBar()
+        self._dl_progress_a.setRange(0, 0)
+        self._dl_progress_a.setTextVisible(True)
+        l1.addWidget(self._dl_progress_a)
+        self._dl_status_a = QLabel("")
+        self._dl_status_a.setWordWrap(True)
+        l1.addWidget(self._dl_status_a)
+        self._dl_lbl_b = QLabel("Firmware B")
+        self._dl_lbl_b.setStyleSheet(f"color: {_ACCENT}; font-size: 12px; font-weight: bold;")
+        l1.addWidget(self._dl_lbl_b)
+        self._dl_progress_b = QProgressBar()
+        self._dl_progress_b.setRange(0, 0)
+        self._dl_progress_b.setTextVisible(True)
+        l1.addWidget(self._dl_progress_b)
+        self._dl_status_b = QLabel("")
+        self._dl_status_b.setWordWrap(True)
+        l1.addWidget(self._dl_status_b)
+        row2 = QHBoxLayout()
+        self._btn_retry_dl_stress = QPushButton("Retry download")
+        self._btn_retry_dl_stress.clicked.connect(self._start_download)
+        self._btn_retry_dl_stress.hide()
+        row2.addWidget(self._btn_retry_dl_stress)
+        row2.addStretch(1)
+        l1.addLayout(row2)
+        l1.addStretch(1)
+        self._download_stack.addWidget(dw1)
+        outer.addWidget(self._download_stack)
         return w
 
     def _page_serve(self) -> QWidget:
@@ -635,13 +910,13 @@ class FwWizard(QDialog):
         self._url_banner.setWordWrap(True)
         lay.addWidget(self._url_banner)
 
-        sub = QLabel(
+        self._serve_sub_hint = QLabel(
             "The camera loads firmware from this URL (LAN IP so the device can reach your PC). "
             "The local server keeps running after you close this wizard."
         )
-        sub.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
-        sub.setWordWrap(True)
-        lay.addWidget(sub)
+        self._serve_sub_hint.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
+        self._serve_sub_hint.setWordWrap(True)
+        lay.addWidget(self._serve_sub_hint)
 
         self._step5_log = QPlainTextEdit()
         self._step5_log.setReadOnly(True)
@@ -678,6 +953,23 @@ class FwWizard(QDialog):
         ol.addWidget(self._btn_trigger_refresh)
         lay.addWidget(self._panel_onboarded)
         self._panel_onboarded.hide()
+
+        self._serve_stress_wrap = QWidget()
+        ssl = QVBoxLayout(self._serve_stress_wrap)
+        ssl.setContentsMargins(0, 8, 0, 0)
+        self._lbl_stress_ready = QLabel("")
+        self._lbl_stress_ready.setWordWrap(True)
+        self._lbl_stress_ready.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
+        ssl.addWidget(self._lbl_stress_ready)
+        self._btn_open_stress_panel = QPushButton("Open stress test panel")
+        self._btn_open_stress_panel.setStyleSheet(
+            f"QPushButton {{ background-color: #3949ab; color: #e8eaf6; padding: 8px 16px; }}"
+        )
+        self._btn_open_stress_panel.clicked.connect(self._on_open_stress_panel)
+        self._btn_open_stress_panel.hide()
+        ssl.addWidget(self._btn_open_stress_panel)
+        self._serve_stress_wrap.hide()
+        lay.addWidget(self._serve_stress_wrap)
 
         lay.addStretch(1)
         return w
@@ -728,32 +1020,13 @@ class FwWizard(QDialog):
             self._pills_layout.addWidget(pill)
         self._pills_layout.addStretch(1)
 
-        self._combo_bin_target.blockSignals(True)
-        self._combo_bin_target.clear()
-        for tag in self._fw_search_models:
-            tu = tag.upper()
-            if re.match(r"^VMC3\d{3}$", tu):
-                disp = f"{tag} (2K)"
-            elif re.match(r"^VMC2\d{3}$", tu):
-                disp = f"{tag} (FHD)"
-            else:
-                disp = tag
-            self._combo_bin_target.addItem(disp, tag)
-        self._combo_bin_target.blockSignals(False)
+        self._fill_bin_target_combo(self._combo_bin_target)
         multi = self._combo_bin_target.count() > 1
         self._lbl_bin_target.setVisible(multi)
         self._combo_bin_target.setVisible(multi)
-        if self._combo_bin_target.count() > 0:
-            name_u = self._vmc_binaries_folder_name().upper()
-            idx = 0
-            for i in range(self._combo_bin_target.count()):
-                d = self._combo_bin_target.itemData(i)
-                if isinstance(d, str) and d.upper() == name_u:
-                    idx = i
-                    break
-            self._combo_bin_target.setCurrentIndex(idx)
+        self._populate_stress_bin_combos()
 
-        if self._current_step == 1:
+        if self._current_step == 2:
             self._sync_nav()
         self._refresh_vmc_binaries_label()
 
@@ -769,6 +1042,164 @@ class FwWizard(QDialog):
             f"Firmware for this camera is stored under …/binaries/{v}/ on the local server "
             "(from the connected model; not configurable)."
         )
+
+    def _on_fw_mode_toggled(self, *_args: object) -> None:
+        self._stress_mode = self._radio_fw_stress.isChecked()
+        self._search_mode_stack.setCurrentIndex(1 if self._stress_mode else 0)
+        if self._current_step in (1, 2):
+            self._sync_nav()
+        self._update_stress_folder_error()
+
+    def _update_stress_folder_error(self) -> None:
+        if not self._stress_folder_mismatch_label:
+            return
+        fa = sanitize_server_folder_name((self._combo_server_folder_a.currentText() or "").strip())
+        fb = sanitize_server_folder_name((self._combo_server_folder_b.currentText() or "").strip())
+        if fa and fb and fa.lower() == fb.lower():
+            self._stress_folder_mismatch_label.setText("Firmware A and B must use different server folder names.")
+        else:
+            self._stress_folder_mismatch_label.setText("")
+
+    def _fill_bin_target_combo(self, combo: QComboBox) -> None:
+        combo.blockSignals(True)
+        combo.clear()
+        for tag in self._fw_search_models:
+            tu = tag.upper()
+            if re.match(r"^VMC3\d{3}$", tu):
+                disp = f"{tag} (2K)"
+            elif re.match(r"^VMC2\d{3}$", tu):
+                disp = f"{tag} (FHD)"
+            else:
+                disp = tag
+            combo.addItem(disp, tag)
+        combo.blockSignals(False)
+        name_u = self._vmc_binaries_folder_name().upper()
+        idx = 0
+        for i in range(combo.count()):
+            d = combo.itemData(i)
+            if isinstance(d, str) and d.upper() == name_u:
+                idx = i
+                break
+        combo.setCurrentIndex(idx)
+
+    def _populate_stress_bin_combos(self) -> None:
+        self._fill_bin_target_combo(self._combo_bin_target_a)
+        self._fill_bin_target_combo(self._combo_bin_target_b)
+
+    def _default_stress_folder_b_for_a(self, folder_a: str) -> str:
+        a = (sanitize_server_folder_name((folder_a or "").strip()) or "qa").lower()
+        if a == "qa":
+            return "qa1"
+        base = (folder_a or "").strip() or "qa"
+        cand = f"{base}1"
+        if cand.lower() != a:
+            return cand
+        return f"{base}-b"
+
+    def _populate_stress_folder_combos(self) -> None:
+        ca = (self._combo_server_folder_a.currentText() or "").strip()
+        cb = (self._combo_server_folder_b.currentText() or "").strip()
+        for combo, cur in (
+            (self._combo_server_folder_a, ca),
+            (self._combo_server_folder_b, cb),
+        ):
+            combo.blockSignals(True)
+            combo.clear()
+            for name in list_environment_folders(self._fw_root):
+                combo.addItem(name)
+            combo.blockSignals(False)
+            if cur:
+                idx = -1
+                c_low = cur.lower()
+                for i in range(combo.count()):
+                    if combo.itemText(i).lower() == c_low:
+                        idx = i
+                        break
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+                else:
+                    combo.setEditText(cur)
+        if not ca and not cb:
+            self._combo_server_folder_a.setEditText("qa")
+            self._combo_server_folder_b.setEditText("qa1")
+        elif ca and not cb:
+            self._combo_server_folder_b.setEditText(self._default_stress_folder_b_for_a(ca))
+
+    def _on_rename_stress_folder(self, which: str) -> None:
+        combo = self._combo_server_folder_a if which == "a" else self._combo_server_folder_b
+        old_name = (combo.currentText() or "").strip()
+        if not sanitize_server_folder_name(old_name):
+            QMessageBox.information(
+                self,
+                "Rename folder",
+                "Enter or select a valid folder name first.",
+            )
+            return
+        old_path = os.path.join(self._fw_root, old_name)
+        if not os.path.isdir(old_path):
+            QMessageBox.information(
+                self,
+                "Rename folder",
+                "Rename only applies to folders that already exist under the server root.",
+            )
+            return
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Rename folder",
+            "New folder name:",
+            text=old_name,
+        )
+        if not ok:
+            return
+        blocked = firmware_folder_rename_blocked_reason(old_path)
+        stopped_for_rename = False
+        if blocked:
+            if "this window" in blocked.lower():
+                r = QMessageBox.question(
+                    self,
+                    "Rename folder",
+                    blocked
+                    + "\n\nStop the firmware server in this window now so the folder can be renamed?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes,
+                )
+                if r != QMessageBox.StandardButton.Yes:
+                    return
+                stop_ok, stop_msg = stop_http_server()
+                if not stop_ok:
+                    QMessageBox.warning(
+                        self,
+                        "Rename folder",
+                        f"Could not stop the server: {stop_msg}\n\nStop it manually (e.g. server stop), then try rename again.",
+                    )
+                    return
+                stopped_for_rename = True
+                self._refresh_server_footer()
+            else:
+                QMessageBox.warning(self, "Rename folder", blocked)
+                return
+        ok_r, err = rename_server_folder(self._fw_root, old_name, new_name)
+        if not ok_r:
+            detail = err or "Rename failed."
+            if (
+                "Access is denied" in detail
+                or "WinError 5" in detail
+                or "Errno 13" in detail
+                or "permission denied" in detail.lower()
+            ):
+                detail += "\n\n" + firmware_rename_access_denied_user_hint()
+            QMessageBox.warning(self, "Rename folder", detail)
+            return
+        self._populate_server_folder_combo()
+        self._populate_stress_folder_combos()
+        combo.setEditText(new_name)
+        if stopped_for_rename:
+            QMessageBox.information(
+                self,
+                "Rename folder",
+                f"Renamed to “{new_name}”. The local firmware server was stopped; start it again "
+                "when you are ready (FW Wizard final step or fw local).",
+            )
 
     def _populate_server_folder_combo(self) -> None:
         cur = (self._combo_server_folder.currentText() or "").strip()
@@ -788,6 +1219,8 @@ class FwWizard(QDialog):
                 self._combo_server_folder.setCurrentIndex(idx)
             else:
                 self._combo_server_folder.setEditText(cur)
+        self._populate_stress_folder_combos()
+        self._update_stress_folder_error()
         self._on_search_fields_changed()
 
     def _current_server_folder_input(self) -> str:
@@ -901,6 +1334,14 @@ class FwWizard(QDialog):
         return bool(url and (u.startswith("http://") or u.startswith("https://")))
 
     def _step1_server_folder_valid(self) -> bool:
+        if self._stress_mode:
+            fa = sanitize_server_folder_name((self._combo_server_folder_a.currentText() or "").strip())
+            fb = sanitize_server_folder_name((self._combo_server_folder_b.currentText() or "").strip())
+            if not fa or not fb:
+                return False
+            if fa.lower() == fb.lower():
+                return False
+            return True
         return sanitize_server_folder_name(self._current_server_folder_input()) is not None
 
     def _apply_credentials_from_step0(self) -> None:
@@ -917,37 +1358,51 @@ class FwWizard(QDialog):
                 QMessageBox.warning(self, "FW Wizard", f"Could not save credentials: {e}")
 
     def _sync_nav(self) -> None:
-        self._btn_back.setVisible(self._current_step > 0 and self._current_step < 4)
+        self._btn_back.setVisible(self._current_step > 0 and self._current_step < 5)
         step = self._current_step
-        self._btn_next.setVisible(step < 4)
-        self._btn_done.setVisible(step == 4)
-        self._btn_stop_close.setVisible(step == 4)
+        self._btn_next.setVisible(step < 5)
+        self._btn_done.setVisible(step == 5)
+        self._btn_stop_close.setVisible(step == 5)
 
         if step == 0:
             self._btn_next.setEnabled(self._step0_fields_valid())
             self._btn_next.setText("Next")
         elif step == 1:
+            self._btn_next.setEnabled(True)
+            self._btn_next.setText("Next")
+        elif step == 2:
             self._btn_next.setEnabled(not self._search_busy and self._step1_server_folder_valid())
             self._btn_next.setText("Searching…" if self._search_busy else "Next")
-        elif step == 2:
-            self._btn_next.setEnabled(self._selected_filename is not None)
-            self._btn_next.setText("Next")
         elif step == 3:
+            if self._stress_mode:
+                ok_sel = self._stress_sel_a_file is not None and self._stress_sel_b_file is not None
+                self._btn_next.setEnabled(ok_sel)
+            else:
+                self._btn_next.setEnabled(self._selected_filename is not None)
+            self._btn_next.setText("Next")
+        elif step == 4:
             self._btn_next.setEnabled(False)
             self._btn_next.setText("Next")
 
     def _go_back(self) -> None:
         if self._current_step <= 0:
             return
-        if self._current_step >= 4:
+        if self._current_step >= 5:
             return
-        if self._current_step == 3 and self._download_thread and self._download_thread.isRunning():
+        if self._current_step == 4 and self._download_thread and self._download_thread.isRunning():
             return
-        if self._current_step == 2:
+        if self._current_step == 3:
             self._search_results = []
+            self._stress_results_a = []
+            self._stress_results_b = []
             self._fill_results_table()
+            self._fill_stress_tables()
             self._selected_filename = None
             self._selected_folder = None
+            self._stress_sel_a_folder = None
+            self._stress_sel_a_file = None
+            self._stress_sel_b_folder = None
+            self._stress_sel_b_file = None
             self._search_status.setText("")
             self._search_status.setStyleSheet(f"color: {_MUTED};")
         self._current_step -= 1
@@ -956,7 +1411,7 @@ class FwWizard(QDialog):
         self._sync_nav()
 
     def _go_next(self) -> None:
-        if self._current_step >= 4:
+        if self._current_step >= 5:
             return
         if self._current_step == 0:
             if not self._step0_fields_valid():
@@ -968,18 +1423,31 @@ class FwWizard(QDialog):
             self._sync_nav()
             return
         if self._current_step == 1:
-            self._start_search_from_next()
+            self._current_step = 2
+            self._stack.setCurrentIndex(2)
+            self._update_sidebar()
+            self._sync_nav()
             return
         if self._current_step == 2:
-            if not self._selected_filename:
+            self._start_search_from_next()
+            return
+        if self._current_step == 3:
+            if self._stress_mode:
+                if not self._stress_sel_a_file or not self._stress_sel_b_file:
+                    return
+            elif not self._selected_filename:
                 return
-            if not self._server_folder_name:
-                self._server_folder_name = (
-                    sanitize_server_folder_name(self._current_server_folder_input()) or ""
-                )
+            if self._stress_mode:
+                self._stress_version_path_a = self._stress_sel_a_folder or ""
+                self._stress_version_path_b = self._stress_sel_b_folder or ""
+            else:
+                if not self._server_folder_name:
+                    self._server_folder_name = (
+                        sanitize_server_folder_name(self._current_server_folder_input()) or ""
+                    )
             self._prepare_download_page()
-            self._current_step = 3
-            self._stack.setCurrentIndex(3)
+            self._current_step = 4
+            self._stack.setCurrentIndex(4)
             self._update_sidebar()
             self._sync_nav()
             self._start_download()
@@ -990,7 +1458,8 @@ class FwWizard(QDialog):
             self._sync_nav()
 
     def _on_search_fields_changed(self, *_args: object) -> None:
-        if self._current_step == 1:
+        if self._current_step == 2:
+            self._update_stress_folder_error()
             self._sync_nav()
 
     def _on_done_keep_server(self) -> None:
@@ -1031,6 +1500,37 @@ class FwWizard(QDialog):
     def _start_search_from_next(self) -> None:
         if self._search_thread and self._search_thread.isRunning():
             return
+        if self._stress_mode:
+            fa = sanitize_server_folder_name((self._combo_server_folder_a.currentText() or "").strip())
+            fb = sanitize_server_folder_name((self._combo_server_folder_b.currentText() or "").strip())
+            if not fa or not fb:
+                QMessageBox.warning(
+                    self,
+                    "FW Wizard",
+                    "Enter valid server folder names for Firmware A and B.",
+                )
+                return
+            if fa.lower() == fb.lower():
+                QMessageBox.warning(
+                    self,
+                    "FW Wizard",
+                    "Firmware A and B must use different server folder names.",
+                )
+                return
+            self._stress_server_folder_a = fa
+            self._stress_server_folder_b = fb
+            self._stress_search_seq = "a"
+            self._search_busy = True
+            self._sync_nav()
+            self._search_status.setText("Searching Artifactory for Firmware A…")
+            self._search_status.setStyleSheet(f"color: {_MUTED};")
+            vf = (self._fld_version_filter_a.text() or "").strip()
+            self._search_thread = _SearchThread(
+                self._base_url, self._token, self._username, vf, self._fw_search_models
+            )
+            self._search_thread.finished_search.connect(self._on_search_done)
+            self._search_thread.start()
+            return
         folder = sanitize_server_folder_name(self._current_server_folder_input())
         if not folder:
             QMessageBox.warning(
@@ -1052,8 +1552,70 @@ class FwWizard(QDialog):
         self._search_thread.start()
 
     def _on_search_done(self, ok: bool, flat: object, err: str) -> None:
-        self._search_busy = False
         rows = flat if isinstance(flat, list) else []
+        if self._stress_mode and self._stress_search_seq in ("a", "b"):
+            if self._stress_search_seq == "a":
+                if not ok:
+                    self._search_busy = False
+                    self._stress_results_a = []
+                    self._search_status.setText("Firmware A: " + (err or "Search failed."))
+                    self._search_status.setStyleSheet(f"color: {_ERR};")
+                    self._stress_search_seq = None
+                    self._sync_nav()
+                    return
+                self._stress_results_a = [(str(a), str(b)) for a, b in rows]
+                if not self._stress_results_a:
+                    self._search_busy = False
+                    self._search_status.setText(
+                        "Firmware A: no matching archives. Adjust the version filter and press Next again."
+                    )
+                    self._search_status.setStyleSheet(f"color: {_ERR};")
+                    self._stress_search_seq = None
+                    self._sync_nav()
+                    return
+                self._stress_search_seq = "b"
+                self._sync_nav()
+                self._search_status.setText("Searching Artifactory for Firmware B…")
+                self._search_status.setStyleSheet(f"color: {_MUTED};")
+                vf_b = (self._fld_version_filter_b.text() or "").strip()
+                self._search_thread = _SearchThread(
+                    self._base_url, self._token, self._username, vf_b, self._fw_search_models
+                )
+                self._search_thread.finished_search.connect(self._on_search_done)
+                self._search_thread.start()
+                return
+            self._search_busy = False
+            self._stress_search_seq = None
+            if not ok:
+                self._stress_results_b = []
+                self._search_status.setText("Firmware B: " + (err or "Search failed."))
+                self._search_status.setStyleSheet(f"color: {_ERR};")
+                self._sync_nav()
+                return
+            self._stress_results_b = [(str(a), str(b)) for a, b in rows]
+            if not self._stress_results_b:
+                self._search_status.setText(
+                    "Firmware B: no matching archives. Adjust the version filter and press Next again."
+                )
+                self._search_status.setStyleSheet(f"color: {_ERR};")
+                self._sync_nav()
+                return
+            self._search_status.setText(
+                f"Firmware A: {len(self._stress_results_a)} match(es). "
+                f"Firmware B: {len(self._stress_results_b)} match(es)."
+            )
+            self._search_status.setStyleSheet(f"color: {_OK};")
+            self._lbl_select_a.setText(f"{self._stress_server_folder_a} — select version")
+            self._lbl_select_b.setText(f"{self._stress_server_folder_b} — select version")
+            self._fill_stress_tables()
+            self._select_stack.setCurrentIndex(1)
+            self._current_step = 3
+            self._stack.setCurrentIndex(3)
+            self._update_sidebar()
+            self._sync_nav()
+            return
+
+        self._search_busy = False
         if not ok:
             self._search_results = []
             self._search_status.setText(err or "Search failed.")
@@ -1071,9 +1633,10 @@ class FwWizard(QDialog):
             return
         self._search_status.setText(f"{len(self._search_results)} match(es).")
         self._search_status.setStyleSheet(f"color: {_OK};")
+        self._select_stack.setCurrentIndex(0)
         self._fill_results_table()
-        self._current_step = 2
-        self._stack.setCurrentIndex(2)
+        self._current_step = 3
+        self._stack.setCurrentIndex(3)
         self._update_sidebar()
         self._sync_nav()
 
@@ -1093,6 +1656,28 @@ class FwWizard(QDialog):
         self._selected_filename = None
         self._selected_folder = None
 
+    def _fill_one_table(self, table: QTableWidget, data: list[tuple[str, str]]) -> None:
+        table.setSortingEnabled(False)
+        table.setRowCount(0)
+        for folder, fn in data:
+            r = table.rowCount()
+            table.insertRow(r)
+            table.setItem(r, 0, QTableWidgetItem(folder))
+            table.setItem(r, 1, QTableWidgetItem(fn))
+            table.setItem(r, 2, QTableWidgetItem("—"))
+            table.setItem(r, 3, QTableWidgetItem("—"))
+            ext = fn.lower().split(".")[-1] if "." in fn else fn
+            table.setItem(r, 4, QTableWidgetItem(ext))
+        table.setSortingEnabled(True)
+
+    def _fill_stress_tables(self) -> None:
+        self._fill_one_table(self._table_a, self._stress_results_a)
+        self._fill_one_table(self._table_b, self._stress_results_b)
+        self._stress_sel_a_folder = None
+        self._stress_sel_a_file = None
+        self._stress_sel_b_folder = None
+        self._stress_sel_b_file = None
+
     def _on_table_selection(self) -> None:
         rows = self._table.selectionModel().selectedRows()
         if not rows:
@@ -1110,9 +1695,55 @@ class FwWizard(QDialog):
         self._version_path = self._selected_folder or ""
         self._sync_nav()
 
+    def _on_table_selection_a(self) -> None:
+        rows = self._table_a.selectionModel().selectedRows()
+        if not rows:
+            self._stress_sel_a_folder = None
+            self._stress_sel_a_file = None
+            self._sync_nav()
+            return
+        r = rows[0].row()
+        fi0 = self._table_a.item(r, 0)
+        fi1 = self._table_a.item(r, 1)
+        if not fi0 or not fi1:
+            return
+        self._stress_sel_a_folder = fi0.text()
+        self._stress_sel_a_file = fi1.text()
+        self._sync_nav()
+
+    def _on_table_selection_b(self) -> None:
+        rows = self._table_b.selectionModel().selectedRows()
+        if not rows:
+            self._stress_sel_b_folder = None
+            self._stress_sel_b_file = None
+            self._sync_nav()
+            return
+        r = rows[0].row()
+        fi0 = self._table_b.item(r, 0)
+        fi1 = self._table_b.item(r, 1)
+        if not fi0 or not fi1:
+            return
+        self._stress_sel_b_folder = fi0.text()
+        self._stress_sel_b_file = fi1.text()
+        self._sync_nav()
+
     def _prepare_download_page(self) -> None:
-        path = os.path.join(self._fw_root, self._server_folder_name)
         vmc = self._vmc_binaries_folder_name()
+        if self._stress_mode:
+            self._download_stack.setCurrentIndex(1)
+            pa = os.path.join(self._fw_root, self._stress_server_folder_a)
+            pb = os.path.join(self._fw_root, self._stress_server_folder_b)
+            self._dl_path_label_stress.setText(
+                f"FW server root: {self._fw_root}\n"
+                f"Firmware A → {pa}\n"
+                f"Firmware B → {pb}\n"
+                f"(binaries/{vmc}/ per folder)"
+            )
+            self._dl_lbl_a.setText(f"Firmware A ({self._stress_server_folder_a})")
+            self._dl_lbl_b.setText(f"Firmware B ({self._stress_server_folder_b})")
+            return
+        self._download_stack.setCurrentIndex(0)
+        path = os.path.join(self._fw_root, self._server_folder_name)
         self._dl_path_label.setText(
             f"FW server root: {self._fw_root}\n"
             f"Server folder: {path}  (archive/, binaries/{vmc}/, updaterules/)"
@@ -1120,6 +1751,16 @@ class FwWizard(QDialog):
 
     def _start_download(self) -> None:
         if self._download_thread and self._download_thread.isRunning():
+            return
+        if self._stress_mode:
+            self._btn_retry_dl_stress.hide()
+            self._dl_progress_a.setRange(0, 0)
+            self._dl_progress_b.setRange(0, 0)
+            self._dl_status_a.setText("")
+            self._dl_status_b.setText("")
+            self._dl_status_a.setStyleSheet("")
+            self._dl_status_b.setStyleSheet("")
+            self._start_stress_download_leg("a")
             return
         folder = self._server_folder_name or sanitize_server_folder_name(
             self._current_server_folder_input()
@@ -1175,6 +1816,78 @@ class FwWizard(QDialog):
         self._download_thread.failed.connect(self._on_dl_failed)
         self._download_thread.start()
 
+    def _start_stress_download_leg(self, which: str) -> None:
+        vmc = self._vmc_binaries_folder_name()
+        folder = self._stress_server_folder_a if which == "a" else self._stress_server_folder_b
+        version_path = self._stress_version_path_a if which == "a" else self._stress_version_path_b
+        sel_file = self._stress_sel_a_file if which == "a" else self._stress_sel_b_file
+        combo_art = self._combo_bin_target_a if which == "a" else self._combo_bin_target_b
+        ok_setup, msg_or_env, binaries_base, _pb, updaterules_dir, archive_dir = prepare_env_directories(
+            self._fw_root, folder, vmc, self._fw_search_models
+        )
+        if not ok_setup:
+            lbl = self._dl_status_a if which == "a" else self._dl_status_b
+            lbl.setText(msg_or_env)
+            lbl.setStyleSheet(f"color: {_ERR};")
+            self._btn_retry_dl_stress.show()
+            return
+        art_target = combo_art.currentData()
+        if not isinstance(art_target, str) or not art_target.strip():
+            art_target = self._primary_model_name
+        download_model = compute_download_model(version_path, sel_file, art_target.strip())
+        binaries_dir_for_download = os.path.join(msg_or_env, "binaries", vmc)
+        chosen_binaries_dir = os.path.abspath(os.path.join(binaries_base, vmc))
+        archive_path = os.path.abspath(os.path.join(archive_dir, sel_file or ""))
+        rules_dir = os.path.abspath(updaterules_dir)
+
+        def on_bytes(done: int, total: object) -> None:
+            bar = self._dl_progress_a if which == "a" else self._dl_progress_b
+            tot = int(total) if total is not None else None
+            if tot and tot > 0:
+                bar.setRange(0, tot)
+                bar.setValue(min(done, tot))
+            else:
+                bar.setRange(0, 0)
+
+        self._download_thread = _DownloadThread(
+            self._token,
+            download_model,
+            version_path,
+            binaries_dir_for_download,
+            updaterules_dir,
+            archive_dir,
+            self._base_url,
+            self._username,
+            sel_file,
+            archive_path,
+            chosen_binaries_dir,
+            rules_dir,
+        )
+        self._download_thread.byte_progress.connect(on_bytes)
+        st_lbl = self._dl_status_a if which == "a" else self._dl_status_b
+        self._download_thread.status_text.connect(st_lbl.setText)
+        self._download_thread.finished_ok.connect(partial(self._on_stress_dl_leg_ok, which))
+        self._download_thread.failed.connect(partial(self._on_stress_dl_leg_failed, which))
+        self._download_thread.start()
+
+    def _on_stress_dl_leg_ok(self, which: str) -> None:
+        bar = self._dl_progress_a if which == "a" else self._dl_progress_b
+        lbl = self._dl_status_a if which == "a" else self._dl_status_b
+        bar.setRange(0, 100)
+        bar.setValue(100)
+        lbl.setText("Download and extraction complete.")
+        lbl.setStyleSheet(f"color: {_OK};")
+        if which == "a":
+            QTimer.singleShot(200, lambda: self._start_stress_download_leg("b"))
+            return
+        QTimer.singleShot(400, self._auto_advance_serve)
+
+    def _on_stress_dl_leg_failed(self, which: str, msg: str) -> None:
+        lbl = self._dl_status_a if which == "a" else self._dl_status_b
+        lbl.setText(msg or "Download failed.")
+        lbl.setStyleSheet(f"color: {_ERR};")
+        self._btn_retry_dl_stress.show()
+
     def _on_dl_bytes(self, done: int, total: int | None) -> None:
         if total and total > 0:
             self._dl_progress.setRange(0, int(total))
@@ -1186,6 +1899,8 @@ class FwWizard(QDialog):
         self._dl_status.setText(text)
 
     def _on_dl_ok(self) -> None:
+        if self._stress_mode:
+            return
         self._dl_progress.setRange(0, 100)
         self._dl_progress.setValue(100)
         self._dl_status.setText("Download and extraction complete.")
@@ -1198,10 +1913,10 @@ class FwWizard(QDialog):
         self._btn_retry_dl.show()
 
     def _auto_advance_serve(self) -> None:
-        if self._current_step != 3:
+        if self._current_step != 4:
             return
-        self._current_step = 4
-        self._stack.setCurrentIndex(4)
+        self._current_step = 5
+        self._stack.setCurrentIndex(5)
         self._update_sidebar()
         self._sync_nav()
         self._enter_serve_step()
@@ -1210,6 +1925,50 @@ class FwWizard(QDialog):
         self._clear_step5_log()
         self._panel_onboarded.hide()
         self._btn_trigger_refresh.setEnabled(True)
+        self._stress_initial_ok = False
+        self._stress_initial_ran = False
+        self._stress_initial_dispatch_started = False
+        self._btn_open_stress_panel.hide()
+        self._lbl_stress_ready.setText("")
+        if self._stress_mode:
+            self._serve_stress_wrap.show()
+            self._serve_sub_hint.setText(
+                "Stress test uses two folders on the same local server. Firmware A is applied first "
+                "(update URL + reboot for an unclaimed camera)."
+            )
+            self._btn_push.hide()
+            folder_a = self._stress_server_folder_a.strip()
+            ok, err, cam_url_a = ensure_server_and_camera_url(self._fw_root, folder_a)
+            if not ok:
+                self._url_banner.setTextFormat(Qt.TextFormat.PlainText)
+                self._url_banner.setOpenExternalLinks(False)
+                self._url_banner.setText("Could not start or read server.")
+                self._append_step5_log(err or "Server error.")
+                return
+            self._camera_url = cam_url_a
+            ok_b, err_b, cam_url_b = build_camera_fota_url_for_folder(self._fw_root, self._stress_server_folder_b)
+            if not ok_b:
+                self._append_step5_log(err_b or "Could not build URL for Firmware B.")
+                cam_url_b = "(unavailable)"
+            self._url_banner.setTextFormat(Qt.TextFormat.RichText)
+            self._url_banner.setOpenExternalLinks(True)
+            eua = escape(cam_url_a)
+            eub = escape(cam_url_b) if ok_b else cam_url_b
+            self._url_banner.setText(
+                f"<b>Firmware A ({escape(folder_a)})</b><br/><a href=\"{eua}\">{eua}</a><br/><br/>"
+                f"<b>Firmware B ({escape(self._stress_server_folder_b)})</b><br/>"
+                f"{('<a href=\"' + eub + '\">' + eub + '</a>') if ok_b else eub}"
+            )
+            self.server_started.emit(cam_url_a)
+            self._refresh_server_footer()
+            QTimer.singleShot(400, self._stress_send_initial_url_reboot)
+            return
+        self._serve_stress_wrap.hide()
+        self._serve_sub_hint.setText(
+            "The camera loads firmware from this URL (LAN IP so the device can reach your PC). "
+            "The local server keeps running after you close this wizard."
+        )
+        self._btn_push.show()
         folder = self._server_folder_name.strip()
         ok, err, cam_url = ensure_server_and_camera_url(self._fw_root, folder)
         if not ok:
@@ -1228,6 +1987,60 @@ class FwWizard(QDialog):
         self._btn_push.setVisible(True)
         self.server_started.emit(cam_url)
         self._refresh_server_footer()
+
+    def _stress_send_initial_url_reboot(self) -> None:
+        if not self._stress_mode or self._stress_initial_dispatch_started:
+            return
+        self._stress_initial_dispatch_started = True
+        if not self._camera_url:
+            return
+        self._append_step5_log("Stress test: sending arlocmd update_url (Firmware A)…")
+
+        def after_url(ok: bool, msg: str) -> None:
+            if ok:
+                self._append_step5_log("arlocmd update_url: OK")
+                self.update_sent.emit(True)
+            else:
+                self._append_step5_log(msg or "update_url failed.")
+                self.update_sent.emit(False)
+                self._stress_initial_ok = False
+                return
+            self._append_step5_log("Stress test: sending arlocmd reboot (camera should be unclaimed)…")
+
+            def after_reboot(ok_r: bool, msg_r: str) -> None:
+                if ok_r:
+                    self._append_step5_log("arlocmd reboot: OK")
+                else:
+                    self._append_step5_log("arlocmd reboot failed: " + (msg_r or "error"))
+                self._stress_initial_ok = ok and ok_r
+                self._stress_initial_ran = True
+                self._lbl_stress_ready.setText(
+                    "Stress test ready. The camera will reboot — once it reconnects, onboard it to start "
+                    "the first cycle."
+                )
+                self._btn_open_stress_panel.setVisible(True)
+                self._btn_open_stress_panel.setEnabled(bool(self._device_shell_available and self._stress_initial_ok))
+
+            self._shell_async("arlocmd reboot", [], after_reboot)
+
+        self._shell_async("arlocmd update_url", [self._camera_url], after_url)
+
+    def _on_open_stress_panel(self) -> None:
+        if not self._stress_mode:
+            return
+        va = firmware_folder_version_label(os.path.join(self._fw_root, self._stress_server_folder_a))
+        vb = firmware_folder_version_label(os.path.join(self._fw_root, self._stress_server_folder_b))
+        self.stress_test_ready.emit(
+            {
+                "fw_root": self._fw_root,
+                "folder_a": self._stress_server_folder_a,
+                "folder_b": self._stress_server_folder_b,
+                "version_a": va,
+                "version_b": vb,
+            }
+        )
+        self._skip_server_close_dialog = True
+        self.close()
 
     def _push_update_url(self) -> None:
         if not self._camera_url:

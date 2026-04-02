@@ -41,6 +41,7 @@ class FwQuickSwitchPanel(QWidget):
         self._update_url_raw = ""
         self._onboarded: bool | None = None
         self._fw_root = default_fw_server_root()
+        self._stress_blocks_switch = False
         self._rows_host = QWidget()
         self._rows_layout = QVBoxLayout(self._rows_host)
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
@@ -108,6 +109,10 @@ class FwQuickSwitchPanel(QWidget):
     def set_shell_async(self, fn: ShellAsyncFn) -> None:
         self._shell_async = fn
 
+    def set_stress_test_blocks(self, block: bool) -> None:
+        self._stress_blocks_switch = bool(block)
+        self._rebuild_rows()
+
     def apply_state(self, info: dict[str, Any]) -> None:
         self._connected = bool(info.get("connected"))
         self._profile_ok = (info.get("command_profile") or "") == "e3_wired"
@@ -134,6 +139,17 @@ class FwQuickSwitchPanel(QWidget):
             item = self._rows_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+
+        if self._stress_blocks_switch:
+            lab = QLabel(
+                "Folder switching is disabled while a FW stress test is active. "
+                "Use the Stress test panel to change firmware URLs between cycles."
+            )
+            lab.setWordWrap(True)
+            lab.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
+            self._rows_layout.addWidget(lab)
+            self._rows_layout.addStretch(1)
+            return
 
         if not self._connected or not self._profile_ok:
             lab = QLabel("Connect over E3 wired to use folder switching.")
