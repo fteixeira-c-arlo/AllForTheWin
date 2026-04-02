@@ -1,23 +1,11 @@
 """ADB connection handler using subprocess. Uses USB connection and adb shell auth + password."""
 import subprocess
 import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from typing import Any, Callable
 
 from utils.logger import get_logger
 
 logger = get_logger()
-
-
-@dataclass(frozen=True)
-class AdbPickerDeviceInfo:
-    """One row in the ADB device picker (queried before the dialog opens)."""
-
-    serial: str
-    model: str
-    firmware: str | None
 
 
 def _parse_adb_devices_stdout(stdout: str) -> list[str]:
@@ -31,21 +19,6 @@ def _parse_adb_devices_stdout(stdout: str) -> list[str]:
             if serial:
                 devices.append(serial)
     return devices
-
-
-def _adb_getprop(adb: str, serial: str, prop: str, timeout: float) -> str:
-    try:
-        if timeout <= 0:
-            return ""
-        r = subprocess.run(
-            [adb, "-s", serial, "shell", "getprop", prop],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        return (r.stdout or "").strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return ""
 
 
 class ADBHandler:
@@ -68,104 +41,6 @@ class ADBHandler:
             return _parse_adb_devices_stdout(result.stdout or "")
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return []
-
-    @staticmethod
-    def probe_device_row_detail(serial: str, timeout: float = 1.0) -> str:
-        """
-        Best-effort subtitle for device picker (Model / FW). Uses `cli mfg build_info` with a short timeout;
-        does not run auth. Returns empty string if unavailable.
-        """
-        adb = ADBHandler._adb_cmd()
-        try:
-            r = subprocess.run(
-                [adb, "-s", serial, "shell", "cli", "mfg", "build_info"],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            text = (r.stdout or "") + "\n" + (r.stderr or "")
-            if not text.strip():
-                return ""
-            from core.build_info import parse_build_info
-
-            parsed = parse_build_info(text)
-            model = parsed.get("model")
-            fw = parsed.get("fw_version")
-            parts: list[str] = []
-            if model:
-                parts.append(f"Model: {model}")
-            if fw:
-                parts.append(f"FW: {fw}")
-            if parts:
-                return "  ".join(parts)
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-        except Exception:
-            logger.debug("ADB probe_device_row_detail failed for %s", serial, exc_info=True)
-        return ""
-
-    @staticmethod
-    def _probe_picker_info_for_serial(serial: str, budget: float) -> AdbPickerDeviceInfo:
-        """Fill model (getprop + optional build_info) and FW within ``budget`` seconds (wall)."""
-        adb = ADBHandler._adb_cmd()
-        deadline = time.monotonic() + max(0.15, budget)
-        model = ""
-        fw: str | None = None
-
-        def remaining() -> float:
-            return max(0.0, deadline - time.monotonic())
-
-        t0 = min(1.2, remaining())
-        model = _adb_getprop(adb, serial, "ro.product.model", t0)
-        if not model and remaining() > 0.08:
-            model = _adb_getprop(adb, serial, "ro.product.device", min(0.55, remaining()))
-        if not model and remaining() > 0.08:
-            model = _adb_getprop(adb, serial, "ro.hardware", min(0.45, remaining()))
-
-        if remaining() >= 0.35:
-            try:
-                t_left = min(1.25, remaining())
-                r = subprocess.run(
-                    [adb, "-s", serial, "shell", "cli", "mfg", "build_info"],
-                    capture_output=True,
-                    text=True,
-                    timeout=t_left,
-                )
-                text = (r.stdout or "") + "\n" + (r.stderr or "")
-                if text.strip():
-                    from core.build_info import parse_build_info
-
-                    parsed = parse_build_info(text)
-                    if not model and parsed.get("model"):
-                        model = str(parsed["model"]).strip()
-                    if parsed.get("fw_version"):
-                        fw = str(parsed["fw_version"]).strip() or None
-            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-                pass
-            except Exception:
-                logger.debug("picker build_info probe failed for %s", serial, exc_info=True)
-
-        display_model = model.strip() if model else "Unknown model"
-        return AdbPickerDeviceInfo(serial=serial, model=display_model, firmware=fw)
-
-    @staticmethod
-    def gather_picker_device_infos(
-        serials: list[str], *, per_serial_timeout: float = 2.0
-    ) -> list[AdbPickerDeviceInfo]:
-        """
-        Query each serial in parallel (getprop + quick build_info). Per-device wall time is capped
-        by ``per_serial_timeout`` (default 2s).
-        """
-        if not serials:
-            return []
-        budget = max(0.5, float(per_serial_timeout))
-        max_workers = min(8, len(serials))
-
-        def one(s: str) -> AdbPickerDeviceInfo:
-            return ADBHandler._probe_picker_info_for_serial(s, budget)
-
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            return list(ex.map(one, serials))
 
     def connect(
         self, password: str, device_serial: str | None = None

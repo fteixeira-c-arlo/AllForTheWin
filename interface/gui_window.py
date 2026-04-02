@@ -73,7 +73,7 @@ from core.camera_models import (
     get_model_by_name,
     get_models,
 )
-from transports.adb_handler import ADBHandler, AdbPickerDeviceInfo
+from transports.adb_handler import ADBHandler
 from transports.ssh_handler import SSHHandler
 from transports.uart_handler import UARTHandler, list_uart_ports
 from transports.connection_config import ConnectionConfig
@@ -350,56 +350,36 @@ _TOOL_SUBGROUP_ORDER = ("FIRMWARE", "LOGS", "CONFIG", "SESSION")
 
 
 class _AdbPickerDeviceCard(QFrame):
-    """One selectable device row (model, serial, optional FW) for the ADB picker."""
+    """One selectable row: ADB USB serial only (no device queries)."""
 
     def __init__(
         self,
         dialog: "_AdbDevicePickerDialog",
-        info: AdbPickerDeviceInfo,
+        serial: str,
         parent: QWidget,
     ) -> None:
         super().__init__(parent)
         self._dialog = dialog
-        self._serial = info.serial
+        self._serial = serial
         self._selected = False
         self._hover = False
         self.setObjectName("adbDeviceCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-        mono = QFont("Menlo", 12) if sys.platform == "darwin" else QFont("Consolas", 12)
-        _ensure_explicit_font_size(mono, context="adb picker serial")
+        mono = QFont("Menlo" if sys.platform == "darwin" else "Consolas")
+        mono.setPixelSize(14)
 
         inlay = QVBoxLayout(self)
         inlay.setContentsMargins(14, 12, 14, 12)
-        inlay.setSpacing(6)
+        inlay.setSpacing(0)
 
-        m = QLabel(info.model)
-        m.setObjectName("adbPickerModel")
-        mf = QFont(m.font())
-        _ensure_explicit_font_size(mf, context="adb picker model")
-        _safe_set_point_size(mf, 14, context="adb picker model")
-        mf.setBold(True)
-        m.setFont(mf)
-        m.setStyleSheet("color: #e8eef4; background: transparent; border: none;")
-        inlay.addWidget(m)
-
-        s = QLabel(info.serial)
-        s.setObjectName("adbPickerSerial")
-        s.setFont(mono)
-        s.setStyleSheet("color: #7a8494; background: transparent; border: none;")
-        s.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        inlay.addWidget(s)
-
-        if info.firmware:
-            fw = QLabel(f"FW: {info.firmware}")
-            fw.setObjectName("adbPickerFw")
-            ff = QFont(fw.font())
-            _ensure_explicit_font_size(ff, context="adb picker fw")
-            _safe_set_point_size(ff, 12, context="adb picker fw")
-            fw.setFont(ff)
-            fw.setStyleSheet("color: #7a8494; background: transparent; border: none;")
-            inlay.addWidget(fw)
+        lab = QLabel(serial)
+        lab.setObjectName("adbPickerSerial")
+        lab.setFont(mono)
+        lab.setStyleSheet("color: #e8eef4; background: transparent; border: none;")
+        lab.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        inlay.addWidget(lab)
 
         self._apply_frame_style()
 
@@ -448,9 +428,9 @@ class _AdbPickerDeviceCard(QFrame):
 
 
 class _AdbDevicePickerDialog(QDialog):
-    """Dark-themed ADB USB device chooser with card rows (info gathered before show)."""
+    """Dark-themed ADB USB device chooser: serial IDs only (from ``adb devices``)."""
 
-    def __init__(self, parent: QWidget | None, infos: list[AdbPickerDeviceInfo]) -> None:
+    def __init__(self, parent: QWidget | None, serials: list[str]) -> None:
         super().__init__(parent)
         self.setWindowTitle("Select device")
         self._chosen: str | None = None
@@ -496,8 +476,8 @@ class _AdbDevicePickerDialog(QDialog):
         inner_lay.setContentsMargins(2, 2, 2, 2)
         inner_lay.setSpacing(9)
 
-        for inf in infos:
-            card = _AdbPickerDeviceCard(self, inf, inner)
+        for s in serials:
+            card = _AdbPickerDeviceCard(self, s, inner)
             self._cards.append(card)
             inner_lay.addWidget(card)
         inner_lay.addStretch(1)
@@ -2792,8 +2772,7 @@ class MainWindow(QMainWindow):
                 if pref and pref in serials:
                     adb_serial = pref
                 else:
-                    infos = ADBHandler.gather_picker_device_infos(serials, per_serial_timeout=2.0)
-                    pick = _AdbDevicePickerDialog(self, infos)
+                    pick = _AdbDevicePickerDialog(self, serials)
                     if pick.exec() != QDialog.DialogCode.Accepted:
                         return
                     adb_serial = (pick.selected_serial() or "").strip()
