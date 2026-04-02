@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
@@ -593,6 +594,7 @@ class SessionWorker(QObject):
                     "commands_count": len(self._device_commands),
                     "command_profile": self._command_profile,
                     "is_onboarded": self._detected.get("is_onboarded"),
+                    "raw_build_info": self._detected.get("raw_build_info") or "",
                 }
             )
         else:
@@ -1047,6 +1049,8 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(title)
         header_layout.addWidget(intro)
         header_layout.addWidget(self._status_strip)
+        self._device_info_panel = self._build_device_info_panel()
+        header_layout.addWidget(self._device_info_panel)
         header_layout.addLayout(btn_row)
 
         central = QWidget()
@@ -1688,6 +1692,122 @@ class MainWindow(QMainWindow):
             self._welcome_log.setMinimumHeight(120)
             self._welcome_log.show()
 
+    def _build_device_info_panel(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("deviceInfoPanel")
+        panel.setStyleSheet(
+            "#deviceInfoPanel { "
+            "background-color: #161a20; border: 1px solid #3d4654; border-radius: 6px; }"
+        )
+        outer = QVBoxLayout(panel)
+        outer.setContentsMargins(12, 10, 12, 10)
+        outer.setSpacing(10)
+
+        head = QHBoxLayout()
+        self._dip_model = QLabel("—")
+        mf = QFont()
+        mf.setPointSize(15)
+        mf.setBold(True)
+        self._dip_model.setFont(mf)
+        self._dip_model.setStyleSheet("color: #e8eef4; border: none; background: transparent;")
+        head.addWidget(self._dip_model, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._dip_badge = QLabel("Onboarded")
+        self._dip_badge.setVisible(False)
+        self._dip_badge.setStyleSheet(
+            "QLabel { background-color: #3949ab; color: #e8eaf6; border-radius: 10px; "
+            "padding: 3px 10px; font-size: 11px; font-weight: 600; }"
+        )
+        head.addWidget(self._dip_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        head.addStretch(1)
+        outer.addLayout(head)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(1, 1)
+
+        def _mk_lbl(txt: str) -> QLabel:
+            z = QLabel(txt)
+            z.setStyleSheet("color: #8b95a5; font-size: 11px; border: none; background: transparent;")
+            return z
+
+        r = 0
+        grid.addWidget(_mk_lbl("Firmware"), r, 0, Qt.AlignmentFlag.AlignTop)
+        self._dip_fw = QLabel("—")
+        self._dip_fw.setStyleSheet("color: #c5ced9; font-size: 13px; border: none; background: transparent;")
+        self._dip_fw.setWordWrap(True)
+        grid.addWidget(self._dip_fw, r, 1)
+        r += 1
+
+        grid.addWidget(_mk_lbl("Connection"), r, 0, Qt.AlignmentFlag.AlignTop)
+        self._dip_conn = QLabel("—")
+        self._dip_conn.setStyleSheet("color: #c5ced9; font-size: 13px; border: none; background: transparent;")
+        self._dip_conn.setWordWrap(True)
+        grid.addWidget(self._dip_conn, r, 1)
+        r += 1
+
+        grid.addWidget(_mk_lbl("Device ID"), r, 0, Qt.AlignmentFlag.AlignTop)
+        self._dip_did = QLabel("—")
+        mono = QFont("Menlo", 10) if sys.platform == "darwin" else QFont("Consolas", 10)
+        self._dip_did.setFont(mono)
+        self._dip_did.setStyleSheet(
+            "color: #aeb8c4; font-size: 12px; border: none; background: transparent; "
+            "font-family: Consolas, Menlo, monospace;"
+        )
+        self._dip_did.setWordWrap(True)
+        self._dip_did.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        grid.addWidget(self._dip_did, r, 1)
+        r += 1
+
+        grid.addWidget(_mk_lbl("Stage / URL env"), r, 0, Qt.AlignmentFlag.AlignTop)
+        self._dip_env = QLabel("—")
+        self._dip_env.setStyleSheet("color: #c5ced9; font-size: 13px; border: none; background: transparent;")
+        self._dip_env.setWordWrap(True)
+        grid.addWidget(self._dip_env, r, 1)
+        r += 1
+
+        grid.addWidget(_mk_lbl("Command profile"), r, 0, Qt.AlignmentFlag.AlignTop)
+        self._dip_profile = QLabel("—")
+        self._dip_profile.setStyleSheet("color: #7a8494; font-size: 12px; border: none; background: transparent;")
+        grid.addWidget(self._dip_profile, r, 1)
+        outer.addLayout(grid)
+
+        raw_l = QLabel("Build info (raw)")
+        raw_l.setStyleSheet("color: #8b95a5; font-size: 11px; border: none; background: transparent;")
+        outer.addWidget(raw_l)
+        self._dip_raw = QTextEdit()
+        self._dip_raw.setReadOnly(True)
+        self._dip_raw.setMaximumHeight(140)
+        self._dip_raw.setFont(mono)
+        self._dip_raw.setStyleSheet(
+            "QTextEdit { background-color: #0d1117; color: #aeb8c4; border: 1px solid #2a313a; "
+            "border-radius: 4px; padding: 6px; }"
+        )
+        outer.addWidget(self._dip_raw)
+
+        panel.hide()
+        return panel
+
+    def _refresh_device_info_panel(self, info: dict) -> None:
+        if not info.get("connected"):
+            self._device_info_panel.hide()
+            return
+        self._device_info_panel.show()
+        model = str(info.get("model") or "—")
+        self._dip_model.setText(model)
+        self._dip_fw.setText(str(info.get("fw") or "—"))
+        ct = str(info.get("conn_type") or "—")
+        did = (info.get("device_id") or "").strip()
+        self._dip_conn.setText(ct)
+        self._dip_did.setText(did if did else "—")
+        self._dip_env.setText(str(info.get("env") or "—"))
+        self._dip_profile.setText(str(info.get("command_profile") or "none"))
+        ob = info.get("is_onboarded")
+        self._dip_badge.setVisible(ob is True)
+        raw = (info.get("raw_build_info") or "").strip()
+        self._dip_raw.setPlainText(raw if raw else "(no build_info captured)")
+        self._dip_raw.verticalScrollBar().setValue(0)
+
     @Slot(dict)
     def _on_state_changed(self, info: dict) -> None:
         if info.get("connected"):
@@ -1712,6 +1832,7 @@ class MainWindow(QMainWindow):
             self._prompt_model_name = str(model).strip() or "Device"
             self._set_active_session_tab_title(self._prompt_model_name)
             self._sync_status_strip()
+            self._refresh_device_info_panel(info)
             self._update_tab_close_buttons()
         else:
             self._device_connected = False
@@ -1726,6 +1847,7 @@ class MainWindow(QMainWindow):
             self._status_detail_fw = "—"
             self._active_session_log = None
             self._sync_status_strip()
+            self._refresh_device_info_panel(info)
             self._set_command_list_disconnected()
             self._update_tab_close_buttons()
 

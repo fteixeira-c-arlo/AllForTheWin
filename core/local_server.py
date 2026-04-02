@@ -187,22 +187,24 @@ def setup_directory_structure(
     fw_search_models: list[str] | None = None,
 ) -> tuple[bool, str, str, str, str]:
     """
-    Create under root: [env]/archive/, [env]/binaries/[model]/ for each model, and [env]/updaterules/.
-    When fw_search_models is provided (e.g. 2K + FHD), creates binaries/<m> for each m; otherwise binaries/<model_name>.
-    Returns (success, env_dir, binaries_dir, updaterules_dir, archive_dir). binaries_dir is for model_name (primary).
+    Create under root: [server_folder]/archive/, [server_folder]/binaries/[model_name]/, [server_folder]/updaterules/.
+    Only the connected device's VMC folder (model_name, e.g. VMC3070) is created under binaries/.
+    fw_search_models is ignored for layout (kept for call-site compatibility).
+    environment is the folder name as provided (case preserved); must be a single path segment.
+    Returns (success, env_dir, binaries_dir, updaterules_dir, archive_dir).
     """
-    env_lower = environment.lower()
-    env_dir = os.path.join(root, env_lower)
-    models_to_create = list(fw_search_models) if fw_search_models else [model_name]
+    _ = fw_search_models
+    folder = (environment or "").strip()
+    if not folder or folder in (".", "..") or os.sep in folder or (os.altsep and os.altsep in folder):
+        return False, "Invalid server folder name.", "", "", ""
+    env_dir = os.path.join(root, folder)
     updaterules_dir = os.path.join(env_dir, "updaterules")
     archive_dir = os.path.join(env_dir, "archive")
+    binaries_dir = os.path.join(env_dir, "binaries", model_name)
     try:
-        for m in models_to_create:
-            bin_dir = os.path.join(env_dir, "binaries", m)
-            os.makedirs(bin_dir, exist_ok=True)
+        os.makedirs(binaries_dir, exist_ok=True)
         os.makedirs(updaterules_dir, exist_ok=True)
         os.makedirs(archive_dir, exist_ok=True)
-        binaries_dir = os.path.join(env_dir, "binaries", model_name)
         return True, env_dir, binaries_dir, updaterules_dir, archive_dir
     except OSError as e:
         return False, str(e), "", "", ""
@@ -264,3 +266,63 @@ def check_server_status() -> tuple[bool, str]:
     if _server is None:
         return False, "Firmware server is not running."
     return True, f"Firmware server is running (root: {_server_root})."
+
+
+def is_firmware_port_accepting_connections(port: int | None = None) -> bool:
+    """True if something accepts TCP connections on localhost:port (e.g. 8000)."""
+    p = int(port or DEFAULT_PORT)
+    try:
+        with socket.create_connection(("127.0.0.1", p), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+def firmware_server_listener_summary() -> tuple[str, str, str]:
+    """
+    UI helper: distinguish this-process server vs another listener on the firmware port.
+
+    Returns (dot_color_hint, primary_line, tooltip).
+    dot_color_hint: "green" | "amber" | "gray"
+    """
+    running_here, _msg = check_server_status()
+    if running_here:
+        assert _server is not None
+        _host, prt = _server.server_address
+        return (
+            "green",
+            f"This session · serving on :{prt}",
+            "The firmware HTTP server was started from this ArloShell window.",
+        )
+    if is_firmware_port_accepting_connections():
+        return (
+            "amber",
+            f"Port {DEFAULT_PORT} in use (not this session)",
+            "This window is not running the server, but something is listening on the usual firmware "
+            f"port ({DEFAULT_PORT})—often another ArloShell. That can still lock folders under the server root.",
+        )
+    return (
+        "gray",
+        "This session · server off",
+        "No firmware server is running in this window and the default port is not accepting connections.",
+    )
+
+
+def firmware_rename_access_denied_user_hint() -> str:
+    """Explain likely causes when renaming under the FW root fails with access denied."""
+    if check_server_status()[0]:
+        return (
+            "This window still has the firmware server running. Stop it first (e.g. command "
+            f"server stop), then rename."
+        )
+    if is_firmware_port_accepting_connections():
+        return (
+            f"Port {DEFAULT_PORT} is in use on this PC by another process—often a second ArloShell "
+            "still running the firmware server over the same folder. Close or stop that instance, "
+            "then retry. If it still fails, close File Explorer windows on this folder and wait a few seconds."
+        )
+    return (
+        f"This window is not serving firmware and port {DEFAULT_PORT} is not accepting connections here. "
+        "Access denied is usually File Explorer (folder open in another window), a short delay after a "
+        "server stopped, or antivirus/indexing. Close Explorer on this path, wait a few seconds, retry."
+    )

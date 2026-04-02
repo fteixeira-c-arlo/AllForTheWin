@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from typing import Any, Callable, NamedTuple
+from urllib.parse import quote
 
 from core.artifactory_client import ARTIFACTORY_REPO, list_available_firmware
 from core.fw_setup_service import (
@@ -39,10 +40,11 @@ from interface.prompts import (
     prompt_firmware_version_filter,
     prompt_fw_server_root,
     prompt_save_credentials_to_config,
-    prompt_select_binaries_folder,
     prompt_select_env_folder,
     prompt_select_firmware_version,
 )
+
+
 def _progress_callback(name: str, index: int, total: int) -> None:
     console.print(f"  [dim]\u2713[/] [dim]{name}[/] ({index}/{total})")
 
@@ -182,16 +184,17 @@ def _cli_step_pick_env_and_confirm(
     model_name: str,
     download_model: str,
     version: str,
-    env_lower: str,
+    server_folder: str,
 ) -> bool:
     console.print("\n[bold]Configuration Summary:[/]")
     console.print(
         f"   Model: [cyan]{model_name}[/]"
-        + (f" (download: {download_model})" if download_model != model_name else "")
+        + (f" (Artifactory download key: {download_model})" if download_model != model_name else "")
     )
     console.print(f"   Firmware Version: [cyan]{version}[/]")
     console.print(f"   Repo: [cyan]{ARTIFACTORY_REPO}[/]")
-    console.print(f"   Local Server: http://<this_pc>:{DEFAULT_PORT}/{env_lower}\n")
+    console.print(f"   Local server folder: [cyan]{server_folder}[/]")
+    console.print(f"   Local Server URL: http://<this_pc>:{DEFAULT_PORT}/{quote(server_folder.strip(), safe='')}\n")
     return bool(prompt_confirm_proceed("Proceed with firmware download and server setup? (y/n):"))
 
 
@@ -213,12 +216,12 @@ def _cli_step_download_extract(
         return msg_or_env_dir
 
     path_or_err = msg_or_env_dir
-    env_lower = env.lower()
-    binaries_dir_for_download = os.path.join(path_or_err, "binaries", download_model)
+    server_folder = env.strip()
+    binaries_dir_for_download = os.path.join(path_or_err, "binaries", model_name)
 
     console.print("\n[bold]Setting up local firmware server...[/]")
     show_success(
-        f"Created {env_lower}/archive/, {env_lower}/binaries/{{{', '.join(fw_search_models)}}}/ and {env_lower}/updaterules/"
+        f"Created {server_folder}/archive/, {server_folder}/binaries/{model_name}/ and {server_folder}/updaterules/"
     )
 
     console.print("\n[bold]Downloading firmware to archive folder...[/]")
@@ -246,11 +249,8 @@ def _cli_step_download_extract(
         if not os.path.isfile(archive_path):
             show_error(f"Archive file not found at: {archive_path}", "Download may have saved to a different path.")
             return "Archive not found for extraction."
-        console.print("[bold]Local server model folders (2K / FHD):[/]")
-        chosen_folder = prompt_select_binaries_folder(binaries_base, env_lower)
-        if not chosen_folder:
-            return "cancelled"
-        bin_dir = os.path.abspath(os.path.join(binaries_base, chosen_folder))
+        console.print(f"[bold]Extracting into binaries/{model_name}/[/]")
+        bin_dir = os.path.abspath(os.path.join(binaries_base, model_name))
         lower = selected_filename.lower()
         if lower.endswith(".zip"):
             console.print("[bold]Extracting firmware zip...[/]")
@@ -263,7 +263,7 @@ def _cli_step_download_extract(
         if lower.endswith(".zip") or ".tar.gz" in lower:
             console.print(
                 "  [bold green]\u2713[/] [green].enc → "
-                + f"{env_lower}/binaries/{chosen_folder}/"
+                + f"{server_folder}/binaries/{model_name}/"
                 + ", UpdateRules.json → updaterules/[/]\n"
             )
 
@@ -275,7 +275,7 @@ def _cli_step_download_extract(
 def _cli_step_start_server_and_update_url(
     connection_execute: Callable[[str, list[str]], tuple[bool, str]],
     root: str,
-    env_lower: str,
+    server_folder: str,
 ) -> str | None:
     console.print("[bold]Starting local firmware server...[/]")
     ok, msg = start_http_server(root, DEFAULT_PORT)
@@ -286,7 +286,7 @@ def _cli_step_start_server_and_update_url(
     local_ip = get_local_ipv4()
     host_part = base_url.replace("http://", "").replace("https://", "").strip("/")
     port = host_part.split(":")[1] if ":" in host_part else str(DEFAULT_PORT)
-    firmware_url = f"http://{local_ip}:{port}/{env_lower}"
+    firmware_url = f"http://{local_ip}:{port}/{quote(server_folder.strip(), safe='')}"
     show_success(f"Server started at {base_url}")
     console.print(f"[dim]Camera URL (use this): {firmware_url}[/]\n")
 
@@ -351,9 +351,9 @@ def run_update_url_flow(
             except OSError:
                 pass
         return "cancelled"
-    env_lower = env.lower()
+    server_folder = env.strip()
 
-    if not _cli_step_pick_env_and_confirm(model_name, download_model, version, env_lower):
+    if not _cli_step_pick_env_and_confirm(model_name, download_model, version, server_folder):
         return "cancelled"
 
     err_dl = _cli_step_download_extract(
@@ -362,7 +362,7 @@ def run_update_url_flow(
     if err_dl is not None:
         return err_dl
 
-    return _cli_step_start_server_and_update_url(connection_execute, root, env_lower)
+    return _cli_step_start_server_and_update_url(connection_execute, root, server_folder)
 
 
 def try_handle_fw_setup_command(
@@ -449,9 +449,9 @@ def run_use_local_fw_server(
             except OSError:
                 pass
         return "cancelled"
-    env_lower = env.lower()
+    server_folder = env.strip()
     local_ip = get_local_ipv4()
-    firmware_url = f"http://{local_ip}:{port}/{env_lower}"
+    firmware_url = f"http://{local_ip}:{port}/{quote(server_folder, safe='')}"
 
     console.print(f"[dim]Camera URL: {firmware_url}[/]\n")
     console.print("[bold]Sending update_url command to camera...[/]")

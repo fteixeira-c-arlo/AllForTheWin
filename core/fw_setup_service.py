@@ -5,6 +5,7 @@ import os
 import socket
 import sys
 from typing import Callable
+from urllib.parse import quote
 
 from core.artifactory_client import ARTIFACTORY_REPO, download_firmware, list_available_firmware
 from core.local_server import (
@@ -71,8 +72,74 @@ def compute_download_model(version: str, selected_filename: str | None, model_na
     return version.split("/")[0] if "/" in version else version
 
 
+def sanitize_server_folder_name(name: str) -> str | None:
+    """
+    Single path segment under the FW server root. No slashes or Windows-forbidden chars.
+    Returns None if invalid.
+    """
+    s = (name or "").strip()
+    if not s or s in (".", ".."):
+        return None
+    forbidden = '\\/:*?"<>|'
+    if any(c in s for c in forbidden):
+        return None
+    if os.sep in s or (os.altsep and os.altsep in s):
+        return None
+    return s
+
+
+def folder_has_firmware_artifacts(server_folder_dir: str) -> bool:
+    """True if this server folder already has firmware files (overwrite warning)."""
+    if not os.path.isdir(server_folder_dir):
+        return False
+    archive = os.path.join(server_folder_dir, "archive")
+    binaries = os.path.join(server_folder_dir, "binaries")
+    rules = os.path.join(server_folder_dir, "updaterules")
+    try:
+        if os.path.isdir(archive):
+            for f in os.listdir(archive):
+                fl = f.lower()
+                if fl.endswith((".zip", ".tar.gz")) or any(fl.endswith(s) for s in FW_ENV_TAR_GZ_SUFFIXES):
+                    return True
+        if os.path.isdir(binaries):
+            for root, _dirs, files in os.walk(binaries):
+                for f in files:
+                    if f.lower().endswith(".enc"):
+                        return True
+        if os.path.isdir(rules):
+            for f in os.listdir(rules):
+                if f.lower().endswith(".json"):
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def rename_server_folder(root: str, old_name: str, new_name: str) -> tuple[bool, str]:
+    """Rename a folder under the FW server root. Returns (ok, error_message)."""
+    o = sanitize_server_folder_name(old_name)
+    n = sanitize_server_folder_name(new_name)
+    if not o:
+        return False, "Invalid current folder name."
+    if not n:
+        return False, "Invalid new folder name."
+    if o == n:
+        return True, ""
+    op = os.path.join(root, o)
+    np = os.path.join(root, n)
+    if not os.path.isdir(op):
+        return False, f"Folder not found: {o}"
+    if os.path.exists(np):
+        return False, f"A folder named {n!r} already exists."
+    try:
+        os.rename(op, np)
+    except OSError as e:
+        return False, str(e)
+    return True, ""
+
+
 def list_environment_folders(root: str) -> list[str]:
-    """Subdirectory names under FW server root (qa, dev, prod, …)."""
+    """Subdirectory names under FW server root (user-defined server folders)."""
     if not os.path.isdir(root):
         return []
     try:
@@ -150,10 +217,10 @@ def extract_firmware_archive(
     return True, ""
 
 
-def ensure_server_and_camera_url(root: str, env_lower: str) -> tuple[bool, str, str]:
+def ensure_server_and_camera_url(root: str, server_folder: str) -> tuple[bool, str, str]:
     """
     Start the local HTTP server if needed. Returns (ok, error_or_empty, camera_fota_url).
-    camera_fota_url is http://<lan-ip>:<port>/<env_lower>.
+    camera_fota_url is http://<lan-ip>:<port>/<encoded-folder>; folder name preserves case.
     """
     running, _ = check_server_status()
     if running:
@@ -169,7 +236,8 @@ def ensure_server_and_camera_url(root: str, env_lower: str) -> tuple[bool, str, 
     local_ip = get_local_ipv4()
     host_part = base_url.replace("http://", "").replace("https://", "").strip("/")
     port = host_part.split(":")[1] if ":" in host_part else str(DEFAULT_PORT)
-    firmware_url = f"http://{local_ip}:{port}/{env_lower}"
+    seg = quote((server_folder or "").strip(), safe="")
+    firmware_url = f"http://{local_ip}:{port}/{seg}"
     return True, "", firmware_url
 
 
@@ -180,8 +248,9 @@ def prepare_env_directories(
     fw_search_models: list[str],
 ) -> tuple[bool, str, str, str, str, str]:
     """
-    Create env folder layout. Returns (ok, env_dir, binaries_base, binaries_primary_dir, updaterules_dir, archive_dir).
-    binaries_primary_dir is env/binaries/<model_name> (legacy primary path from setup_directory_structure).
+    Create server-folder layout under root. Returns (ok, env_dir, binaries_base, binaries_primary_dir, updaterules_dir, archive_dir).
+    binaries_primary_dir is <folder>/binaries/<model_name> for the connected device (VMCxxxx).
+    fw_search_models is only passed through for API compatibility with setup_directory_structure.
     """
     ok, path_or_err, binaries_dir, updaterules_dir, archive_dir = setup_directory_structure(
         root, env, model_name, fw_search_models=fw_search_models

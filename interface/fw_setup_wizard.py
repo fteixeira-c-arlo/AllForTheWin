@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Callable
 
 from PySide6.QtCore import QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -13,9 +14,11 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QStackedWidget,
@@ -29,6 +32,8 @@ from core.artifactory_client import ARTIFACTORY_REPO, test_artifactory_access
 from core.local_server import (
     DEFAULT_PORT,
     check_server_status,
+    firmware_rename_access_denied_user_hint,
+    firmware_server_listener_summary,
     get_running_server_url,
     stop_http_server,
 )
@@ -39,8 +44,11 @@ from core.fw_setup_service import (
     download_firmware_to_layout,
     ensure_server_and_camera_url,
     extract_firmware_archive,
+    folder_has_firmware_artifacts,
     list_environment_folders,
     prepare_env_directories,
+    rename_server_folder,
+    sanitize_server_folder_name,
     search_firmware_archives,
 )
 from core.camera_models import get_models
@@ -56,6 +64,7 @@ from utils.config_manager import (
 _ACCENT = "#00897B"
 _OK = "#4caf7d"
 _ERR = "#e05555"
+_AMBER = "#c9a227"
 _MUTED = "#9e9e9e"
 _SIDEBAR_BG = "#0d0d0d"
 _BORDER = "#1e1e1e"
@@ -185,7 +194,9 @@ class FwSetupWizard(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Firmware setup")
-        self.resize(920, 560)
+        self.setMinimumSize(560, 440)
+        self.setMaximumSize(920, 640)
+        self.resize(900, 600)
         self.setModal(False)
 
         self._model_dict = dict(model_dict)
@@ -202,7 +213,7 @@ class FwSetupWizard(QDialog):
         self._selected_folder: str | None = None
         self._selected_filename: str | None = None
         self._version_path: str = ""
-        self._env_name = ""
+        self._server_folder_name = ""
         self._primary_model_name = (self._model_dict.get("name") or "Camera").strip()
         self._fw_search_models: list[str] = list(
             self._model_dict.get("fw_search_models") or [self._primary_model_name]
@@ -440,16 +451,34 @@ class FwSetupWizard(QDialog):
         lay.addWidget(QLabel("Version filter"))
         lay.addWidget(self._fld_version_filter)
 
-        self._combo_env = QComboBox()
-        self._combo_env.currentIndexChanged.connect(self._on_search_fields_changed)
-        lay.addWidget(
-            QLabel("Environment (qa / dev / prod — folder under your local FW server root)")
-        )
-        lay.addWidget(self._combo_env)
+        self._lbl_vmc_bin = QLabel("")
+        self._lbl_vmc_bin.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
+        self._lbl_vmc_bin.setWordWrap(True)
+        lay.addWidget(self._lbl_vmc_bin)
 
-        self._combo_binary = QComboBox()
-        lay.addWidget(QLabel("Binary target (extract .enc into this folder under env/binaries/)"))
-        lay.addWidget(self._combo_binary)
+        sf_row = QHBoxLayout()
+        self._combo_server_folder = QComboBox()
+        self._combo_server_folder.setEditable(True)
+        self._combo_server_folder.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._combo_server_folder.currentIndexChanged.connect(self._on_search_fields_changed)
+        le_sf = self._combo_server_folder.lineEdit()
+        if le_sf is not None:
+            le_sf.textChanged.connect(self._on_search_fields_changed)
+        sf_row.addWidget(self._combo_server_folder, 1)
+        self._btn_rename_folder = QPushButton("Rename…")
+        self._btn_rename_folder.setToolTip("Rename an existing folder under the server root")
+        self._btn_rename_folder.clicked.connect(self._on_rename_server_folder)
+        sf_row.addWidget(self._btn_rename_folder)
+        lay.addWidget(QLabel("Server folder (local HTTP path segment)"))
+        lay.addLayout(sf_row)
+        sf_hint = QLabel(
+            "Name for the folder on the local server (e.g. qa, qa1, downgrade, stress-v2). "
+            "Pick an existing folder from the list or type a new name to create one. "
+            "Different names let you keep multiple firmware trees side by side."
+        )
+        sf_hint.setStyleSheet(f"color: {_MUTED}; font-size: 11px;")
+        sf_hint.setWordWrap(True)
+        lay.addWidget(sf_hint)
 
         self._search_status = QLabel("")
         self._search_status.setWordWrap(True)
@@ -458,7 +487,8 @@ class FwSetupWizard(QDialog):
         lay.addStretch(1)
 
         self._sync_model_combo_default()
-        self._populate_env_combo()
+        self._populate_server_folder_combo()
+        self._refresh_vmc_binaries_label()
         return w
 
     def _page_select(self) -> QWidget:
@@ -540,9 +570,14 @@ class FwSetupWizard(QDialog):
         sub.setWordWrap(True)
         lay.addWidget(sub)
 
-        self._push_status = QLabel("")
-        self._push_status.setWordWrap(True)
-        lay.addWidget(self._push_status)
+        self._step5_log = QPlainTextEdit()
+        self._step5_log.setReadOnly(True)
+        self._step5_log.setMinimumHeight(120)
+        self._step5_log.setMaximumHeight(160)
+        self._step5_log.setPlaceholderText("Command output appears here…")
+        mono = QFont("Menlo", 9) if os.name != "nt" else QFont("Consolas", 9)
+        self._step5_log.setFont(mono)
+        lay.addWidget(self._step5_log)
 
         self._btn_push = QPushButton("Set update URL")
         self._btn_push.setStyleSheet(
@@ -582,9 +617,6 @@ class FwSetupWizard(QDialog):
         )
         self._btn_trigger_refresh.clicked.connect(self._on_trigger_update_refresh)
         ol.addWidget(self._btn_trigger_refresh)
-        self._refresh_result = QLabel("")
-        self._refresh_result.setWordWrap(True)
-        ol.addWidget(self._refresh_result)
         lay.addWidget(self._panel_onboarded)
         self._panel_onboarded.hide()
 
@@ -637,19 +669,128 @@ class FwSetupWizard(QDialog):
             self._pills_layout.addWidget(pill)
         self._pills_layout.addStretch(1)
 
-        self._combo_binary.clear()
-        for tag in self._fw_search_models:
-            self._combo_binary.addItem(tag)
-
         if self._current_step == 1:
             self._sync_nav()
+        self._refresh_vmc_binaries_label()
 
-    def _populate_env_combo(self) -> None:
-        self._combo_env.clear()
+    def _vmc_binaries_folder_name(self) -> str:
+        n = (self._primary_model_name or "").strip().upper()
+        if re.match(r"^VMC\d{4}$", n):
+            return n
+        return (self._primary_model_name or "Camera").strip() or "Camera"
+
+    def _refresh_vmc_binaries_label(self) -> None:
+        v = self._vmc_binaries_folder_name()
+        self._lbl_vmc_bin.setText(
+            f"Firmware for this camera is stored under …/binaries/{v}/ on the local server "
+            "(from the connected model; not configurable)."
+        )
+
+    def _populate_server_folder_combo(self) -> None:
+        cur = (self._combo_server_folder.currentText() or "").strip()
+        self._combo_server_folder.blockSignals(True)
+        self._combo_server_folder.clear()
         for name in list_environment_folders(self._fw_root):
-            self._combo_env.addItem(name)
-        if self._combo_env.count() == 0:
-            self._combo_env.addItem("(create folders under FW root first)")
+            self._combo_server_folder.addItem(name)
+        self._combo_server_folder.blockSignals(False)
+        if cur:
+            idx = -1
+            c_low = cur.lower()
+            for i in range(self._combo_server_folder.count()):
+                if self._combo_server_folder.itemText(i).lower() == c_low:
+                    idx = i
+                    break
+            if idx >= 0:
+                self._combo_server_folder.setCurrentIndex(idx)
+            else:
+                self._combo_server_folder.setEditText(cur)
+        self._on_search_fields_changed()
+
+    def _current_server_folder_input(self) -> str:
+        return (self._combo_server_folder.currentText() or "").strip()
+
+    def _on_rename_server_folder(self) -> None:
+        old_name = self._current_server_folder_input()
+        if not sanitize_server_folder_name(old_name):
+            QMessageBox.information(
+                self,
+                "Rename folder",
+                "Enter or select a valid folder name first.",
+            )
+            return
+        old_path = os.path.join(self._fw_root, old_name)
+        if not os.path.isdir(old_path):
+            QMessageBox.information(
+                self,
+                "Rename folder",
+                "Rename only applies to folders that already exist under the server root.",
+            )
+            return
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Rename folder",
+            "New folder name:",
+            text=old_name,
+        )
+        if not ok:
+            return
+
+        running, _ = check_server_status()
+        stopped_for_rename = False
+        if running:
+            r = QMessageBox.question(
+                self,
+                "Rename folder",
+                "This ArloShell window has the firmware HTTP server running. On Windows, renaming a "
+                "folder under the server root usually fails with “Access is denied” while that server "
+                "is active.\n\n"
+                "Stop the server in this window now so the folder can be renamed? You can start it "
+                "again later from this wizard or from fw local.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if r != QMessageBox.StandardButton.Yes:
+                return
+            stop_ok, stop_msg = stop_http_server()
+            if not stop_ok:
+                QMessageBox.warning(
+                    self,
+                    "Rename folder",
+                    f"Could not stop the server: {stop_msg}\n\nStop it manually (e.g. server stop), then try rename again.",
+                )
+                return
+            stopped_for_rename = True
+            self._refresh_server_footer()
+
+        ok_r, err = rename_server_folder(self._fw_root, old_name, new_name)
+        if not ok_r:
+            detail = err or "Rename failed."
+            if (
+                "Access is denied" in detail
+                or "WinError 5" in detail
+                or "Errno 13" in detail
+                or "permission denied" in detail.lower()
+            ):
+                detail += "\n\n" + firmware_rename_access_denied_user_hint()
+            QMessageBox.warning(self, "Rename folder", detail)
+            return
+        self._populate_server_folder_combo()
+        self._combo_server_folder.setEditText(new_name)
+        if stopped_for_rename:
+            QMessageBox.information(
+                self,
+                "Rename folder",
+                f"Renamed to “{new_name}”. The local firmware server was stopped; start it again "
+                "when you are ready (FW Setup final step or fw local).",
+            )
+
+    def _append_step5_log(self, line: str) -> None:
+        t = (line or "").rstrip()
+        if t:
+            self._step5_log.appendPlainText(t)
+
+    def _clear_step5_log(self) -> None:
+        self._step5_log.clear()
 
     def _update_sidebar(self) -> None:
         for i, lab in enumerate(self._step_labels):
@@ -674,9 +815,8 @@ class FwSetupWizard(QDialog):
         u = url.lower()
         return bool(url and (u.startswith("http://") or u.startswith("https://")))
 
-    def _step1_env_valid(self) -> bool:
-        env_txt = (self._combo_env.currentText() or "").strip()
-        return bool(env_txt and not env_txt.startswith("("))
+    def _step1_server_folder_valid(self) -> bool:
+        return sanitize_server_folder_name(self._current_server_folder_input()) is not None
 
     def _apply_credentials_from_step0(self) -> None:
         raw_url = (self._fld_url.text() or "").strip() or default_artifactory_url()
@@ -702,7 +842,7 @@ class FwSetupWizard(QDialog):
             self._btn_next.setEnabled(self._step0_fields_valid())
             self._btn_next.setText("Next")
         elif step == 1:
-            self._btn_next.setEnabled(not self._search_busy and self._step1_env_valid())
+            self._btn_next.setEnabled(not self._search_busy and self._step1_server_folder_valid())
             self._btn_next.setText("Searching…" if self._search_busy else "Next")
         elif step == 2:
             self._btn_next.setEnabled(self._selected_filename is not None)
@@ -748,8 +888,11 @@ class FwSetupWizard(QDialog):
         if self._current_step == 2:
             if not self._selected_filename:
                 return
+            if not self._server_folder_name:
+                self._server_folder_name = (
+                    sanitize_server_folder_name(self._current_server_folder_input()) or ""
+                )
             self._prepare_download_page()
-            self._env_name = (self._combo_env.currentText() or "").strip()
             self._current_step = 3
             self._stack.setCurrentIndex(3)
             self._update_sidebar()
@@ -803,15 +946,27 @@ class FwSetupWizard(QDialog):
     def _start_search_from_next(self) -> None:
         if self._search_thread and self._search_thread.isRunning():
             return
-        env_txt = self._combo_env.currentText()
-        if not env_txt or env_txt.startswith("("):
+        folder = sanitize_server_folder_name(self._current_server_folder_input())
+        if not folder:
             QMessageBox.warning(
                 self,
                 "Firmware setup",
-                f"No environment folders under:\n{self._fw_root}\n\nCreate e.g. qa, dev, prod and retry.",
+                "Enter a valid server folder name (letters, numbers, dash, underscore; no slashes).",
             )
             return
-        self._env_name = env_txt
+        existing_path = os.path.join(self._fw_root, folder)
+        if os.path.isdir(existing_path) and folder_has_firmware_artifacts(existing_path):
+            r = QMessageBox.warning(
+                self,
+                "Firmware setup",
+                f'Folder "{folder}" already contains firmware (archive, binaries, or updaterules). '
+                "Continuing can overwrite files in that tree.\n\nProceed with search and download?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if r != QMessageBox.StandardButton.Yes:
+                return
+        self._server_folder_name = folder
         self._search_busy = True
         self._sync_nav()
         self._search_status.setText("Searching Artifactory…")
@@ -883,19 +1038,21 @@ class FwSetupWizard(QDialog):
         self._sync_nav()
 
     def _prepare_download_page(self) -> None:
-        env_lower = self._env_name.lower()
-        path = os.path.join(self._fw_root, env_lower)
+        path = os.path.join(self._fw_root, self._server_folder_name)
+        vmc = self._vmc_binaries_folder_name()
         self._dl_path_label.setText(
             f"FW server root: {self._fw_root}\n"
-            f"Environment: {path}  (archive/, binaries/, updaterules/)"
+            f"Server folder: {path}  (archive/, binaries/{vmc}/, updaterules/)"
         )
 
     def _start_download(self) -> None:
         if self._download_thread and self._download_thread.isRunning():
             return
-        self._env_name = (self._combo_env.currentText() or "").strip()
-        if not self._env_name or self._env_name.startswith("("):
-            self._dl_status.setText("Select a valid environment folder first.")
+        folder = self._server_folder_name or sanitize_server_folder_name(
+            self._current_server_folder_input()
+        )
+        if not folder:
+            self._dl_status.setText("Enter a valid server folder name.")
             self._dl_status.setStyleSheet(f"color: {_ERR};")
             self._btn_retry_dl.show()
             return
@@ -904,8 +1061,9 @@ class FwSetupWizard(QDialog):
         self._dl_status.setText("")
         self._dl_status.setStyleSheet("")
 
+        vmc = self._vmc_binaries_folder_name()
         ok_setup, msg_or_env, binaries_base, _pb, updaterules_dir, archive_dir = prepare_env_directories(
-            self._fw_root, self._env_name, self._primary_model_name, self._fw_search_models
+            self._fw_root, folder, vmc, self._fw_search_models
         )
         if not ok_setup:
             self._dl_status.setText(msg_or_env)
@@ -916,9 +1074,8 @@ class FwSetupWizard(QDialog):
         download_model = compute_download_model(
             self._version_path, self._selected_filename, self._primary_model_name
         )
-        binaries_dir_for_download = os.path.join(msg_or_env, "binaries", download_model)
-        chosen_name = self._combo_binary.currentText()
-        chosen_binaries_dir = os.path.abspath(os.path.join(binaries_base, chosen_name))
+        binaries_dir_for_download = os.path.join(msg_or_env, "binaries", vmc)
+        chosen_binaries_dir = os.path.abspath(os.path.join(binaries_base, vmc))
         archive_path = os.path.abspath(os.path.join(archive_dir, self._selected_filename or ""))
         rules_dir = os.path.abspath(updaterules_dir)
 
@@ -976,18 +1133,16 @@ class FwSetupWizard(QDialog):
     def _enter_serve_step(self) -> None:
         self._panel_factory.hide()
         self._panel_onboarded.hide()
-        self._refresh_result.setText("")
-        env_lower = self._env_name.lower()
-        ok, err, cam_url = ensure_server_and_camera_url(self._fw_root, env_lower)
+        self._clear_step5_log()
+        folder = self._server_folder_name.strip()
+        ok, err, cam_url = ensure_server_and_camera_url(self._fw_root, folder)
         if not ok:
             self._url_banner.setText("Could not start or read server.")
-            self._push_status.setText(err)
-            self._push_status.setStyleSheet(f"color: {_ERR};")
+            self._append_step5_log(err or "Server error.")
             self._btn_push.setEnabled(False)
             return
         self._camera_url = cam_url
         self._url_banner.setText(cam_url)
-        self._push_status.setText("")
         self._btn_push.setEnabled(True)
         self._btn_push.setVisible(True)
         self.server_started.emit(cam_url)
@@ -997,20 +1152,17 @@ class FwSetupWizard(QDialog):
         if not self._camera_url:
             return
         self._btn_push.setEnabled(False)
-        self._push_status.setText("Sending arlocmd update_url…")
-        self._push_status.setStyleSheet(f"color: {_MUTED};")
+        self._append_step5_log("Sending arlocmd update_url…")
 
         def done(ok: bool, msg: str) -> None:
             self._btn_push.setEnabled(True)
             if ok:
-                self._push_status.setText("arlocmd update_url: OK")
-                self._push_status.setStyleSheet(f"color: {_OK};")
+                self._append_step5_log("arlocmd update_url: OK")
                 self.update_sent.emit(True)
                 self._btn_push.setEnabled(False)
                 self._finish_step5_after_update_url_success()
             else:
-                self._push_status.setText(msg or "Command failed.")
-                self._push_status.setStyleSheet(f"color: {_ERR};")
+                self._append_step5_log(msg or "Command failed.")
                 self.update_sent.emit(False)
 
         self._shell_async("arlocmd update_url", [self._camera_url], done)
@@ -1019,56 +1171,41 @@ class FwSetupWizard(QDialog):
         """Onboarded: app/update_refresh UI. Not onboarded: auto-reboot and show both results."""
         self._panel_factory.hide()
         self._panel_onboarded.hide()
-        self._refresh_result.setText("")
         if self._is_onboarded is True:
             self._panel_onboarded.show()
             return
         self._panel_factory.show()
-        self._push_status.setText("arlocmd update_url: OK\nSending arlocmd reboot…")
-        self._push_status.setStyleSheet(f"color: {_MUTED};")
+        self._append_step5_log("Sending arlocmd reboot…")
 
         def reboot_done(ok_r: bool, msg_r: str) -> None:
             if ok_r:
-                self._push_status.setText("arlocmd update_url: OK\narlocmd reboot: OK")
-                self._push_status.setStyleSheet(f"color: {_OK};")
+                self._append_step5_log("arlocmd reboot: OK")
             else:
-                self._push_status.setText(
-                    "arlocmd update_url: OK\narlocmd reboot failed: " + (msg_r or "error")
-                )
-                self._push_status.setStyleSheet(f"color: {_ERR};")
+                self._append_step5_log("arlocmd reboot failed: " + (msg_r or "error"))
 
         self._shell_async("arlocmd reboot", [], reboot_done)
 
     def _on_trigger_update_refresh(self) -> None:
         self._btn_trigger_refresh.setEnabled(False)
-        self._refresh_result.setText("Running arlocmd update_refresh 1…")
-        self._refresh_result.setStyleSheet(f"color: {_MUTED};")
+        self._append_step5_log("Running arlocmd update_refresh 1…")
 
         def done(ok: bool, msg: str) -> None:
             self._btn_trigger_refresh.setEnabled(True)
             if ok:
-                self._refresh_result.setText(
-                    (msg or "OK").strip() or "update_refresh completed."
-                )
-                self._refresh_result.setStyleSheet(f"color: {_OK};")
+                self._append_step5_log((msg or "OK").strip() or "update_refresh completed.")
             else:
-                self._refresh_result.setText(msg or "update_refresh failed.")
-                self._refresh_result.setStyleSheet(f"color: {_ERR};")
+                self._append_step5_log(msg or "update_refresh failed.")
 
         self._shell_async("arlocmd update_refresh", ["1"], done)
 
     def _refresh_server_footer(self) -> None:
-        running, msg = check_server_status()
-        if running:
-            ok, url = get_running_server_url()
-            if ok and url:
-                part = url.replace("http://", "").replace("https://", "").strip("/")
-                port = part.split(":")[-1] if ":" in part else str(DEFAULT_PORT)
-                self._server_footer_dot.setStyleSheet(f"color: {_OK}; font-size: 14px;")
-                self._server_footer_text.setText(f"Server running · port {port}")
-            else:
-                self._server_footer_dot.setStyleSheet(f"color: {_OK}; font-size: 14px;")
-                self._server_footer_text.setText(msg or "Server running")
+        hint, line, tooltip = firmware_server_listener_summary()
+        if hint == "green":
+            self._server_footer_dot.setStyleSheet(f"color: {_OK}; font-size: 14px;")
+        elif hint == "amber":
+            self._server_footer_dot.setStyleSheet(f"color: {_AMBER}; font-size: 14px;")
         else:
             self._server_footer_dot.setStyleSheet(f"color: {_MUTED}; font-size: 14px;")
-            self._server_footer_text.setText("Server stopped")
+        self._server_footer_text.setText(line)
+        self._server_footer_text.setToolTip(tooltip)
+        self._server_footer_dot.setToolTip(tooltip)
