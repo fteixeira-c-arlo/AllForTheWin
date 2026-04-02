@@ -56,7 +56,7 @@ class FwQuickSwitchPanel(QWidget):
 
         hint = QLabel(
             "Requires a running local firmware server and E3 wired profile. "
-            "Switch sends update_url to the camera (same rules as the FW Setup wizard)."
+            "Switch sends update_url to the camera (same rules as the FW Wizard)."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color: {_MUTED}; font-size: 11px;")

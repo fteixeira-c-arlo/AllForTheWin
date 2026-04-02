@@ -28,7 +28,7 @@ def set_tail_live_view_handlers(
     _tail_live_view_stop = stop
 
 from core.log_parser import parse_line, write_html
-from core.update_url_flow import try_handle_fw_setup_command
+from core.update_url_flow import try_handle_fw_wizard_command
 from interface.menus import (
     show_abstract_commands_section,
     show_commands_table,
@@ -76,8 +76,8 @@ SYSTEM_COMMANDS = [
     {"name": "server status", "description": "Check whether the local firmware HTTP server is running", "command_profiles": ["e3_wired"]},
     {"name": "fw local", "description": "Start local firmware server and set camera update URL to it", "command_profiles": ["e3_wired"]},
     {
-        "name": "fw_setup",
-        "description": "Firmware setup (CLI prompts): Artifactory download, local server, set camera update URL. In the GUI prefer Tools → FW Setup.",
+        "name": "fw_wizard",
+        "description": "FW Wizard (CLI prompts): Artifactory download, local server, set camera update URL. In the GUI prefer Tools → FW Wizard.",
         "command_profiles": ["e3_wired"],
     },
     {"name": "config_show", "description": "Show saved Artifactory credentials (no token)", "command_profiles": None},
@@ -836,9 +836,9 @@ def parse_and_execute(
         run_config_delete()
         return "continue", None
 
-    _fw_setup_result = try_handle_fw_setup_command(cmd, connection_execute, model)
-    if _fw_setup_result is not None:
-        return _fw_setup_result
+    _fw_wizard_result = try_handle_fw_wizard_command(cmd, connection_execute, model)
+    if _fw_wizard_result is not None:
+        return _fw_wizard_result
 
     if cmd == "parse_log_file":
         log_dir = os.path.join(os.getcwd(), "arlo_logs")

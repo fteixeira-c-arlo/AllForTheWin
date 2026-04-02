@@ -30,7 +30,6 @@ from PySide6.QtWidgets import (
     QDockWidget,
     QFormLayout,
     QFrame,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
@@ -38,7 +37,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -48,7 +46,6 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTextBrowser,
     QTextEdit,
-    QToolButton,
     QToolTip,
     QVBoxLayout,
     QWidget,
@@ -93,7 +90,7 @@ _STATUS_DOT_CONNECTED = "#4caf7d"
 
 
 def _env_stage_badge_qss(env_raw: str) -> str:
-    """Distinct pill colors for common FW stages (dark UI)."""
+    """Distinct pill colors for common FW stages (dark UI). Uses internal env value for matching."""
     e = (env_raw or "").lower().strip()
     if not e or e == "—":
         bg, fg = "#455a64", "#eceff1"
@@ -106,20 +103,24 @@ def _env_stage_badge_qss(env_raw: str) -> str:
     else:
         bg, fg = "#455a64", "#eceff1"
     return (
-        f"QLabel {{ background-color: {bg}; color: {fg}; border-radius: 8px; "
-        "padding: 2px 8px; font-size: 11px; font-weight: 600; }}"
+        f"QLabel {{ background-color: {bg}; color: {fg}; border-radius: 10px; "
+        "padding: 4px 12px; font-size: 12px; font-weight: 700; }}"
     )
 
 
-def _transport_id_caption(conn_type: str) -> str:
-    c = (conn_type or "").strip().upper()
-    if c == "ADB":
-        return "ADB"
-    if c == "SSH":
-        return "Host"
-    if c == "UART":
-        return "UART"
-    return "Device"
+def _env_stage_display_label(env_raw: str) -> str:
+    """User-facing env badge text; colors still come from _env_stage_badge_qss(env_raw)."""
+    e = (env_raw or "").strip()
+    if not e or e == "—":
+        return "—"
+    el = e.lower().replace("-", "_")
+    if el == "qa":
+        return "GQA"
+    if el == "dev":
+        return "GDev"
+    if el == "prod" or el.startswith("prod_"):
+        return "Production"
+    return e
 
 
 def _elide_status_value(text: str, max_px: int, fm: QFontMetrics) -> str:
@@ -304,7 +305,7 @@ def _device_command_args_hint(meta: dict | None) -> str:
 def _tool_subgroup_for_system_name(name: str) -> str | None:
     disp = _display_command_label(name).lower()
     raw = name.strip().lower()
-    if disp in ("fw local", "server stop", "server status"):
+    if disp in ("fw local", "fw wizard", "server stop", "server status"):
         return "FIRMWARE"
     if disp in ("log tail", "log tail stop", "log parse", "log parse stop", "log export"):
         return "LOGS"
@@ -624,6 +625,9 @@ def install_gui_console_and_menus(bridge: GuiBridge) -> None:
     prompts.set_gui_prompt_bridge(bridge)
 
 
+_HEARTBEAT_INTERVAL_MS = 4000
+
+
 class SessionWorker(QObject):
     """Owns connection handle; all I/O runs on this object's thread."""
 
@@ -649,6 +653,10 @@ class SessionWorker(QObject):
         self._device_commands: list[dict] = []
         self._detected: dict[str, Any] = {}
         self._command_profile: str = "none"
+        self._io_busy = False
+        self._heartbeat_timer = QTimer(self)
+        self._heartbeat_timer.setInterval(_HEARTBEAT_INTERVAL_MS)
+        self._heartbeat_timer.timeout.connect(self._on_heartbeat_tick)
 
         self.connect_uart.connect(self._on_connect_uart)
         self.connect_adb.connect(self._on_connect_adb)
@@ -769,9 +777,10 @@ class SessionWorker(QObject):
             "Type a command below, or click a command in the list to run it "
             "(double-click to put the name in the input for editing).\n\n"
         )
+        self._heartbeat_timer.start()
 
-    @Slot()
-    def _on_disconnect(self) -> None:
+    def _do_disconnect(self, log_message: str | None) -> None:
+        self._heartbeat_timer.stop()
         if self._handle:
             try:
                 self._handle.disconnect()
@@ -783,8 +792,23 @@ class SessionWorker(QObject):
         self._device_commands = []
         self._command_profile = "none"
         # Log before state_changed so the UI still routes this line to the session tab.
-        self.append_log.emit("Disconnected.\n\n")
+        self.append_log.emit((log_message or "Disconnected.") + "\n\n")
         self._emit_state()
+
+    @Slot()
+    def _on_disconnect(self) -> None:
+        self._do_disconnect(None)
+
+    def _on_heartbeat_tick(self) -> None:
+        if self._io_busy or not self._cfg or not self._handle:
+            return
+        alive_fn = getattr(self._handle, "transport_heartbeat", None)
+        if callable(alive_fn):
+            alive = alive_fn()
+        else:
+            alive = getattr(self._handle, "is_connected", lambda: True)()
+        if not alive:
+            self._do_disconnect("Connection lost — device disconnected. Use Connect to reconnect.")
 
     @Slot(str)
     def _on_command(self, line: str) -> None:
@@ -796,39 +820,49 @@ class SessionWorker(QObject):
             self.command_finished.emit("continue", None)
             return
 
-        prompt_name = (self._detected.get("model") or "Device").strip() or "Device"
-        m_info = get_model_by_name(prompt_name)
-        if m_info:
-            fw_search = list(m_info.get("fw_search_models") or [m_info["name"]])
-        else:
-            fw_search = [prompt_name] if self._detected.get("model") else []
-        current_model_dict = {
-            "name": prompt_name,
-            "fw_search_models": fw_search,
-            "command_profile": self._command_profile,
-            "is_onboarded": self._detected.get("is_onboarded"),
-        }
-        action, message = parse_and_execute(
-            line,
-            current_model_dict,
-            self._cfg.type,
-            self._cfg.device_identifier or "",
-            self._cfg.connected_at,
-            self._device_commands,
-            self._handle.execute,
-            connection_pull_file=getattr(self._handle, "pull_file", None),
-            pull_logs_local_dir=os.getcwd(),
-            connection_get_tail_logs_command=getattr(self._handle, "get_tail_logs_command", None),
-            connection_handle=self._handle,
-            command_profile=self._command_profile,
-        )
-        if message:
-            self.append_log.emit(_strip_rich_markup(message) + "\n")
-        if action == "exit":
-            self._on_disconnect()
-        elif action == "disconnected":
-            self._on_disconnect()
-        self.command_finished.emit(action, message)
+        self._io_busy = True
+        try:
+            prompt_name = (self._detected.get("model") or "Device").strip() or "Device"
+            m_info = get_model_by_name(prompt_name)
+            if m_info:
+                fw_search = list(m_info.get("fw_search_models") or [m_info["name"]])
+            else:
+                fw_search = [prompt_name] if self._detected.get("model") else []
+            current_model_dict = {
+                "name": prompt_name,
+                "fw_search_models": fw_search,
+                "command_profile": self._command_profile,
+                "is_onboarded": self._detected.get("is_onboarded"),
+            }
+            action, message = parse_and_execute(
+                line,
+                current_model_dict,
+                self._cfg.type,
+                self._cfg.device_identifier or "",
+                self._cfg.connected_at,
+                self._device_commands,
+                self._handle.execute,
+                connection_pull_file=getattr(self._handle, "pull_file", None),
+                pull_logs_local_dir=os.getcwd(),
+                connection_get_tail_logs_command=getattr(self._handle, "get_tail_logs_command", None),
+                connection_handle=self._handle,
+                command_profile=self._command_profile,
+            )
+            if message:
+                self.append_log.emit(_strip_rich_markup(message) + "\n")
+            if action == "exit":
+                self._do_disconnect(None)
+            elif action == "disconnected":
+                self._do_disconnect("The camera disconnected from the PC.")
+            elif (
+                self._handle
+                and hasattr(self._handle, "is_connected")
+                and not self._handle.is_connected()
+            ):
+                self._do_disconnect("Connection lost — device disconnected. Use Connect to reconnect.")
+            self.command_finished.emit(action, message)
+        finally:
+            self._io_busy = False
 
     @Slot(str, object)
     def _on_fw_shell_request(self, command: str, args_obj: object) -> None:
@@ -836,8 +870,18 @@ class SessionWorker(QObject):
         if not self._handle:
             self.fw_shell_response.emit(False, "Not connected.")
             return
-        ok, text = self._handle.execute(command, args)
-        self.fw_shell_response.emit(ok, text or "")
+        self._io_busy = True
+        try:
+            ok, text = self._handle.execute(command, args)
+            if (not ok and text and "Device disconnected" in text) or (
+                self._handle
+                and hasattr(self._handle, "is_connected")
+                and not self._handle.is_connected()
+            ):
+                self._do_disconnect("Connection lost — device disconnected. Use Connect to reconnect.")
+            self.fw_shell_response.emit(ok, text or "")
+        finally:
+            self._io_busy = False
 
 
 class MainWindow(QMainWindow):
@@ -852,11 +896,8 @@ class MainWindow(QMainWindow):
         self._status_phase: str = "disconnected"
         self._status_detail_model: str = "—"
         self._status_detail_fw: str = "—"
-        self._status_detail_transport: str = "—"
         self._status_detail_env: str = "—"
         self._status_detail_serial: str = ""
-        self._status_detail_device_id: str = ""
-        self._status_raw_build_info: str = ""
         self._status_update_url_raw: str = ""
         self._device_is_onboarded: bool | None = None
 
@@ -913,28 +954,17 @@ class MainWindow(QMainWindow):
         strip_outer.setContentsMargins(0, 6, 0, 4)
         strip_outer.setSpacing(0)
 
-        status_grid = QGridLayout()
-        status_grid.setContentsMargins(0, 0, 0, 0)
-        status_grid.setHorizontalSpacing(10)
-        status_grid.setVerticalSpacing(2)
-        status_grid.setColumnStretch(1, 1)
+        status_main = QHBoxLayout()
+        status_main.setContentsMargins(0, 0, 0, 0)
+        status_main.setSpacing(10)
 
-        dot_container = QWidget(self._status_strip)
-        dot_container.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
-        dot_container.setMinimumHeight(40)
-        dot_lay = QVBoxLayout(dot_container)
-        dot_lay.setContentsMargins(0, 4, 0, 0)
-        dot_lay.setSpacing(0)
-
-        self._status_dot = QWidget(dot_container)
+        self._status_dot = QWidget(self._status_strip)
         self._status_dot.setObjectName("statusDot")
         self._status_dot.setFixedSize(10, 10)
         self._status_dot.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._status_dot.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._set_status_dot_color(_STATUS_DOT_DISCONNECTED)
-        dot_lay.addStretch(1)
-        dot_lay.addWidget(self._status_dot, 0, Qt.AlignmentFlag.AlignHCenter)
-        dot_lay.addStretch(1)
+        status_main.addWidget(self._status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._onboarded_badge = QLabel("Onboarded")
         self._onboarded_badge.setVisible(False)
@@ -958,16 +988,16 @@ class MainWindow(QMainWindow):
         )
         self._status_model = QLabel("—")
         self._status_model.setStyleSheet(
-            "font-size: 13px; font-weight: 600; color: #e8eef4; border: none; background: transparent;"
+            "font-size: 16px; font-weight: 700; color: #e8eef4; border: none; background: transparent;"
         )
         self._status_sep1 = QLabel("·")
-        self._status_sep1.setStyleSheet("color: #5c6570; font-size: 14px; background: transparent;")
+        self._status_sep1.setStyleSheet("color: #5c6570; font-size: 13px; background: transparent;")
         self._status_fw = _CopyableValueLabel()
         self._status_fw.setStyleSheet(
-            "font-size: 13px; font-weight: 500; color: #c5ced9; border: none; background: transparent;"
+            "font-size: 11px; font-weight: 500; color: #8b95a5; border: none; background: transparent;"
         )
         self._status_sep2 = QLabel("·")
-        self._status_sep2.setStyleSheet("color: #5c6570; font-size: 14px; background: transparent;")
+        self._status_sep2.setStyleSheet("color: #5c6570; font-size: 13px; background: transparent;")
         self._status_env_pill = QLabel("—")
         self._status_env_pill.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
 
@@ -984,14 +1014,6 @@ class MainWindow(QMainWindow):
         row2 = QHBoxLayout(self._status_row2)
         row2.setContentsMargins(0, 0, 0, 0)
         row2.setSpacing(8)
-        self._status_id_caption = QLabel("Device")
-        self._status_id_caption.setStyleSheet("color: #7a8494; font-size: 11px; background: transparent;")
-        self._status_id_val = _CopyableValueLabel()
-        self._status_id_val.setStyleSheet(
-            "color: #9aa5b4; font-size: 11px; border: none; background: transparent;"
-        )
-        self._status_sep3 = QLabel("·")
-        self._status_sep3.setStyleSheet("color: #5c6570; font-size: 11px; background: transparent;")
         self._status_serial_caption = QLabel("Serial")
         self._status_serial_caption.setStyleSheet("color: #7a8494; font-size: 11px; background: transparent;")
         self._status_serial_val = _CopyableValueLabel()
@@ -1001,9 +1023,6 @@ class MainWindow(QMainWindow):
             "color: #9aa5b4; font-size: 11px; font-family: Consolas, Menlo, monospace; "
             "border: none; background: transparent;"
         )
-        row2.addWidget(self._status_id_caption)
-        row2.addWidget(self._status_id_val)
-        row2.addWidget(self._status_sep3)
         row2.addWidget(self._status_serial_caption)
         row2.addWidget(self._status_serial_val)
         row2.addStretch(1)
@@ -1011,41 +1030,8 @@ class MainWindow(QMainWindow):
         rsv.addLayout(row1)
         rsv.addWidget(self._status_row2)
 
-        status_grid.addWidget(dot_container, 0, 0, 2, 1, Qt.AlignmentFlag.AlignTop)
-        status_grid.addWidget(right_stack, 0, 1, 2, 1, Qt.AlignmentFlag.AlignTop)
-        strip_outer.addLayout(status_grid)
-
-        self._device_logs_wrap = QWidget()
-        dl_outer = QVBoxLayout(self._device_logs_wrap)
-        dl_outer.setContentsMargins(0, 2, 0, 0)
-        dl_outer.setSpacing(4)
-        self._device_logs_toggle = QToolButton()
-        self._device_logs_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self._device_logs_toggle.setArrowType(Qt.ArrowType.RightArrow)
-        self._device_logs_toggle.setText("Show device logs")
-        self._device_logs_toggle.setCheckable(True)
-        self._device_logs_toggle.setStyleSheet(
-            "QToolButton { color: #8b95a5; font-size: 11px; border: none; text-align: left; }"
-        )
-        self._device_logs_toggle.toggled.connect(self._on_device_logs_toggled)
-        self._device_logs_body = QPlainTextEdit()
-        self._device_logs_body.setReadOnly(True)
-        self._device_logs_body.setVisible(False)
-        self._device_logs_body.setMaximumHeight(200)
-        self._device_logs_body.setFont(_mono_sm)
-        self._device_logs_body.setStyleSheet(
-            "QPlainTextEdit { background-color: #0d1117; color: #aeb8c4; "
-            "border: 1px solid #2a313a; border-radius: 4px; padding: 6px; }"
-        )
-        self._device_logs_hint = QLabel(
-            "Full device output is also available via the info command in the shell."
-        )
-        self._device_logs_hint.setStyleSheet("color: #5c6570; font-size: 10px; background: transparent;")
-        self._device_logs_hint.setWordWrap(True)
-        dl_outer.addWidget(self._device_logs_toggle)
-        dl_outer.addWidget(self._device_logs_body)
-        dl_outer.addWidget(self._device_logs_hint)
-        self._device_logs_wrap.hide()
+        status_main.addWidget(right_stack, 1)
+        strip_outer.addLayout(status_main)
 
         self._sync_status_strip()
 
@@ -1229,7 +1215,6 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(title)
         header_layout.addWidget(intro)
         header_layout.addWidget(self._status_strip)
-        header_layout.addWidget(self._device_logs_wrap)
         header_layout.addLayout(btn_row)
 
         central = QWidget()
@@ -1256,14 +1241,14 @@ class MainWindow(QMainWindow):
         menu_view.addAction(act_session_log)
 
         menu_tools = menubar.addMenu("&Tools")
-        self._action_fw_setup = QAction("FW &Setup…", self)
-        self._action_fw_setup.setStatusTip(
-            "Open the firmware setup wizard (Artifactory, local server, update URL). "
-            "The fw_setup command runs the same steps as text prompts in the session log."
+        self._action_fw_wizard = QAction("FW &Wizard…", self)
+        self._action_fw_wizard.setStatusTip(
+            "Open the FW Wizard (Artifactory, local server, update URL). "
+            "The fw_wizard command runs the same steps as text prompts in the session log."
         )
-        self._action_fw_setup.triggered.connect(self._menu_fw_setup)
-        self._action_fw_setup.setEnabled(False)
-        menu_tools.addAction(self._action_fw_setup)
+        self._action_fw_wizard.triggered.connect(self._menu_fw_wizard)
+        self._action_fw_wizard.setEnabled(False)
+        menu_tools.addAction(self._action_fw_wizard)
 
         menu_help = menubar.addMenu("&Help")
         act_ref = QAction("Command &reference", self)
@@ -1303,21 +1288,21 @@ class MainWindow(QMainWindow):
             mv.addSeparator()
             mv.addAction(act)
 
-    def _menu_fw_setup(self) -> None:
+    def _menu_fw_wizard(self) -> None:
         if not self._device_connected:
             QMessageBox.information(
                 self,
-                "FW Setup",
-                "Connect to a camera first (use Connect… on the toolbar), then choose Tools → FW Setup.",
+                "FW Wizard",
+                "Connect to a camera first (use Connect… on the toolbar), then choose Tools → FW Wizard.",
             )
             return
         QMessageBox.information(
             self,
-            "FW Setup — company VPN",
+            "FW Wizard — company VPN",
             "Firmware is downloaded from the company Artifactory server.\n\n"
             "Before continuing, make sure you are connected to the company VPN "
             "(GlobalProtect).\n\n"
-            "Click OK to open the FW Setup wizard.",
+            "Click OK to open the FW Wizard.",
         )
         prompt_name = (getattr(self, "_prompt_model_name", None) or "Device").strip() or "Device"
         m_info = get_model_by_name(prompt_name)
@@ -1333,9 +1318,9 @@ class MainWindow(QMainWindow):
             "command_profile": self._command_profile,
             "is_onboarded": self._device_is_onboarded,
         }
-        from interface.fw_setup_wizard import FwSetupWizard
+        from interface.fw_wizard import FwWizard
 
-        wiz = FwSetupWizard(self, model_dict, self._fw_shell_async)
+        wiz = FwWizard(self, model_dict, self._fw_shell_async)
         wiz.server_started.connect(self._on_fw_wizard_server_started)
         wiz.update_sent.connect(self._on_fw_wizard_update_sent)
         wiz.wizard_closed.connect(self._on_fw_wizard_closed)
@@ -1356,13 +1341,13 @@ class MainWindow(QMainWindow):
             cb(ok, text or "")
 
     def _on_fw_wizard_server_started(self, url: str) -> None:
-        self._on_append_log(f"FW Setup: camera update URL (local server): {url}\n")
+        self._on_append_log(f"FW Wizard: camera update URL (local server): {url}\n")
 
     def _on_fw_wizard_update_sent(self, ok: bool) -> None:
         if ok:
-            self._on_append_log("FW Setup: update_url command succeeded.\n")
+            self._on_append_log("FW Wizard: update_url command succeeded.\n")
         else:
-            self._on_append_log("FW Setup: update_url command failed (see wizard).\n")
+            self._on_append_log("FW Wizard: update_url command failed (see wizard).\n")
 
     def _on_fw_wizard_closed(self) -> None:
         self._fw_wizard = None
@@ -1374,9 +1359,9 @@ class MainWindow(QMainWindow):
             "<h3>ArloShell</h3>"
             "<p>Connect to cameras over UART, ADB (USB), or SSH. "
             "Commands are loaded after the device is detected.</p>"
-            "<p><b>Tools → FW Setup</b> opens the firmware wizard "
+            "<p><b>Tools → FW Wizard</b> opens the firmware wizard "
             "(Artifactory, local server, camera <code>update_url</code>). "
-            "Typing <code>fw_setup</code> in the command line runs the same flow with text prompts.</p>",
+            "Typing <code>fw_wizard</code> in the command line runs the same flow with text prompts.</p>",
         )
 
     def _build_e3_reference_panel(self) -> QWidget:
@@ -1527,9 +1512,6 @@ class MainWindow(QMainWindow):
                 f"color: {_STATUS_DOT_CONNECTING}; font-size: 12px; font-weight: 600; "
                 "padding: 2px 0; border: none; background: transparent;"
             )
-            self._device_logs_wrap.hide()
-            self._device_logs_toggle.setChecked(False)
-            self._device_logs_body.clear()
         elif self._device_connected:
             self._set_status_dot_color(_STATUS_DOT_CONNECTED)
             for w in detail_widgets:
@@ -1554,35 +1536,20 @@ class MainWindow(QMainWindow):
             fw_disp = _elide_status_value(fw_full, 260, fm_fw)
             self._status_fw.set_copy_value(fw_full, fw_disp)
 
-            env = (self._status_detail_env or "—").strip() or "—"
-            self._status_env_pill.setText(env)
-            self._status_env_pill.setStyleSheet(_env_stage_badge_qss(env))
+            env_internal = (self._status_detail_env or "—").strip() or "—"
+            env_display = _env_stage_display_label(env_internal)
+            self._status_env_pill.setText(env_display)
+            self._status_env_pill.setStyleSheet(_env_stage_badge_qss(env_internal))
             url_raw = (getattr(self, "_status_update_url_raw", "") or "").strip()
             if url_raw:
-                self._status_env_pill.setToolTip(f"Stage / env: {env}\nUpdate URL: {url_raw}")
+                self._status_env_pill.setToolTip(f"Stage / env: {env_display}\nUpdate URL: {url_raw}")
             else:
-                self._status_env_pill.setToolTip(f"Stage / env: {env}")
-
-            cap = _transport_id_caption(self._conn_type)
-            self._status_id_caption.setText(cap)
-            did = (getattr(self, "_status_detail_device_id", "") or "").strip() or "—"
-            fm_id = QFontMetrics(self._status_id_val.font())
-            id_disp = _elide_status_value(did, 300, fm_id)
-            self._status_id_val.set_copy_value(did, id_disp)
+                self._status_env_pill.setToolTip(f"Stage / env: {env_display}")
 
             ser = (getattr(self, "_status_detail_serial", "") or "").strip() or "—"
             fm_ser = QFontMetrics(self._status_serial_val.font())
             ser_disp = _elide_status_value(ser, 220, fm_ser)
             self._status_serial_val.set_copy_value(ser, ser_disp)
-
-            raw = (getattr(self, "_status_raw_build_info", "") or "").strip()
-            if raw:
-                self._device_logs_wrap.show()
-                self._device_logs_body.setPlainText(raw)
-            else:
-                self._device_logs_wrap.hide()
-                self._device_logs_toggle.setChecked(False)
-                self._device_logs_body.clear()
         else:
             self._set_status_dot_color(_STATUS_DOT_DISCONNECTED)
             self._onboarded_badge.setVisible(False)
@@ -1594,17 +1561,6 @@ class MainWindow(QMainWindow):
                 f"color: {_STATUS_DOT_DISCONNECTED}; font-size: 12px; font-weight: 600; "
                 "padding: 2px 0; border: none; background: transparent;"
             )
-            self._device_logs_wrap.hide()
-            self._device_logs_toggle.setChecked(False)
-            self._device_logs_body.clear()
-
-    @Slot(bool)
-    def _on_device_logs_toggled(self, checked: bool) -> None:
-        self._device_logs_body.setVisible(checked)
-        self._device_logs_toggle.setArrowType(
-            Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow
-        )
-        self._device_logs_toggle.setText("Hide device logs" if checked else "Show device logs")
 
     def _begin_connection_log_tab(self) -> None:
         """Open a new tab for this connection attempt; worker log lines go here until disconnect or failure."""
@@ -1970,21 +1926,15 @@ class MainWindow(QMainWindow):
             self._device_connected = True
             self._command_profile = str(info.get("command_profile") or "none")
             self._conn_type = str(info.get("conn_type") or "")
-            self._action_fw_setup.setEnabled(self._command_profile == "e3_wired")
+            self._action_fw_wizard.setEnabled(self._command_profile == "e3_wired")
             self._btn_disconnect.setEnabled(True)
             self._cmd_input.setEnabled(True)
             model = info.get("model") or "—"
-            ct = info.get("conn_type") or "—"
-            did = (info.get("device_id") or "").strip()
             env = info.get("env") or "—"
-            transport = f"{ct} {did}".strip() if did else str(ct)
             self._status_detail_model = str(model)
             self._status_detail_fw = str(info.get("fw") or "—")
-            self._status_detail_transport = transport
             self._status_detail_env = str(env)
             self._status_detail_serial = str(info.get("serial") or "").strip()
-            self._status_detail_device_id = did
-            self._status_raw_build_info = str(info.get("raw_build_info") or "").strip()
             self._status_update_url_raw = str(info.get("update_url_raw") or "").strip()
             raw_ob = info.get("is_onboarded")
             self._device_is_onboarded = raw_ob if isinstance(raw_ob, bool) else None
@@ -1995,12 +1945,15 @@ class MainWindow(QMainWindow):
             fwp = getattr(self, "_fw_switch_panel", None)
             if fwp is not None:
                 fwp.apply_state(info)
+            wiz = getattr(self, "_fw_wizard", None)
+            if wiz is not None:
+                wiz.apply_shell_connection(True)
             self._update_tab_close_buttons()
         else:
             self._device_connected = False
             self._command_profile = "none"
             self._conn_type = ""
-            self._action_fw_setup.setEnabled(False)
+            self._action_fw_wizard.setEnabled(False)
             self._btn_disconnect.setEnabled(False)
             self._cmd_input.setEnabled(False)
             self._status_phase = "disconnected"
@@ -2008,14 +1961,15 @@ class MainWindow(QMainWindow):
             self._device_is_onboarded = None
             self._status_detail_fw = "—"
             self._status_detail_serial = ""
-            self._status_detail_device_id = ""
-            self._status_raw_build_info = ""
             self._status_update_url_raw = ""
             self._active_session_log = None
             self._sync_status_strip()
             fwp = getattr(self, "_fw_switch_panel", None)
             if fwp is not None:
                 fwp.apply_state({"connected": False})
+            wiz = getattr(self, "_fw_wizard", None)
+            if wiz is not None:
+                wiz.apply_shell_connection(False)
             self._set_command_list_disconnected()
             self._update_tab_close_buttons()
 

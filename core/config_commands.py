@@ -27,7 +27,7 @@ def run_config_show() -> str | None:
         return None
     if not config:
         console.print("No configuration file found.")
-        console.print("To create one, run [bold]fw_setup[/] and choose to save credentials.\n")
+        console.print("To create one, run [bold]fw_wizard[/] and choose to save credentials.\n")
         return None
     art = config["artifactory"]
     console.print(f"Configuration file: [dim]{get_config_path()}[/]")

@@ -1,4 +1,4 @@
-"""GUI wizard: Artifactory firmware setup, local server, camera update_url."""
+"""GUI wizard: Artifactory firmware download, local server, camera update_url (FW Wizard)."""
 from __future__ import annotations
 
 import os
@@ -182,8 +182,8 @@ class _DownloadThread(QThread):
         self.finished_ok.emit()
 
 
-class FwSetupWizard(QDialog):
-    """Five-step firmware setup wizard."""
+class FwWizard(QDialog):
+    """Five-step FW Wizard (Artifactory, local server, update URL)."""
 
     server_started = Signal(str)
     update_sent = Signal(bool)
@@ -196,7 +196,7 @@ class FwSetupWizard(QDialog):
         shell_async: ShellAsyncFn,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Firmware setup")
+        self.setWindowTitle("FW Wizard")
         self.setMinimumSize(560, 440)
         self.setMaximumSize(920, 640)
         self.resize(900, 600)
@@ -204,6 +204,8 @@ class FwSetupWizard(QDialog):
 
         self._model_dict = dict(model_dict)
         self._shell_async = shell_async
+        self._device_shell_available = True
+        self._update_url_succeeded = False
 
         self._base_url = default_artifactory_url()
         self._username: str | None = None
@@ -235,6 +237,20 @@ class FwSetupWizard(QDialog):
 
         self._load_config_into_step1()
 
+    def apply_shell_connection(self, available: bool) -> None:
+        """Called when the device session drops or returns; disables camera-only shell actions."""
+        self._device_shell_available = available
+        if self._current_step != 4:
+            return
+        if not available:
+            self._btn_push.setEnabled(False)
+            self._btn_trigger_refresh.setEnabled(False)
+            return
+        if self._camera_url:
+            self._btn_push.setEnabled(not self._update_url_succeeded)
+        if self._panel_onboarded.isVisible():
+            self._btn_trigger_refresh.setEnabled(True)
+
     def closeEvent(self, event: QCloseEvent) -> None:
         if not self._skip_server_close_dialog:
             running, _ = check_server_status()
@@ -242,7 +258,7 @@ class FwSetupWizard(QDialog):
                 ok_u, url = get_running_server_url()
                 port = _port_from_running_server_url(ok_u, url)
                 mb = QMessageBox(self)
-                mb.setWindowTitle("Firmware setup")
+                mb.setWindowTitle("FW Wizard")
                 mb.setIcon(QMessageBox.Icon.Question)
                 mb.setText(
                     f"Local firmware server is still running on port {port}. "
@@ -270,7 +286,7 @@ class FwSetupWizard(QDialog):
                     busy_port = DEFAULT_PORT
                 if busy_port is not None:
                     mb = QMessageBox(self)
-                    mb.setWindowTitle("Firmware setup")
+                    mb.setWindowTitle("FW Wizard")
                     mb.setIcon(QMessageBox.Icon.Question)
                     if foreign and st:
                         mb.setText(
@@ -850,7 +866,7 @@ class FwSetupWizard(QDialog):
                 self,
                 "Rename folder",
                 f"Renamed to “{new_name}”. The local firmware server was stopped; start it again "
-                "when you are ready (FW Setup final step or fw local).",
+                "when you are ready (FW Wizard final step or fw local).",
             )
 
     def _append_step5_log(self, line: str) -> None:
@@ -898,7 +914,7 @@ class FwSetupWizard(QDialog):
                 save_config_file(u, self._token, self._base_url, ARTIFACTORY_REPO)
                 update_last_used()
             except OSError as e:
-                QMessageBox.warning(self, "Firmware setup", f"Could not save credentials: {e}")
+                QMessageBox.warning(self, "FW Wizard", f"Could not save credentials: {e}")
 
     def _sync_nav(self) -> None:
         self._btn_back.setVisible(self._current_step > 0 and self._current_step < 4)
@@ -1019,7 +1035,7 @@ class FwSetupWizard(QDialog):
         if not folder:
             QMessageBox.warning(
                 self,
-                "Firmware setup",
+                "FW Wizard",
                 "Enter a valid server folder name (letters, numbers, dash, underscore; no slashes).",
             )
             return
@@ -1208,7 +1224,7 @@ class FwSetupWizard(QDialog):
         self._url_banner.setOpenExternalLinks(True)
         eu = escape(cam_url)
         self._url_banner.setText(f'<a href="{eu}">{eu}</a>')
-        self._btn_push.setEnabled(True)
+        self._btn_push.setEnabled(bool(self._device_shell_available))
         self._btn_push.setVisible(True)
         self.server_started.emit(cam_url)
         self._refresh_server_footer()
@@ -1220,8 +1236,8 @@ class FwSetupWizard(QDialog):
         self._append_step5_log("Sending arlocmd update_url…")
 
         def done(ok: bool, msg: str) -> None:
-            self._btn_push.setEnabled(True)
             if ok:
+                self._update_url_succeeded = True
                 self._append_step5_log("arlocmd update_url: OK")
                 self.update_sent.emit(True)
                 self._btn_push.setEnabled(False)
@@ -1229,6 +1245,7 @@ class FwSetupWizard(QDialog):
             else:
                 self._append_step5_log(msg or "Command failed.")
                 self.update_sent.emit(False)
+                self._btn_push.setEnabled(self._device_shell_available)
 
         self._shell_async("arlocmd update_url", [self._camera_url], done)
 
@@ -1238,6 +1255,9 @@ class FwSetupWizard(QDialog):
             self._panel_onboarded.show()
             return
         self._append_step5_log("Sending arlocmd reboot…")
+        self._append_step5_log(
+            "The camera is rebooting; the connection may drop until it finishes booting.\n"
+        )
 
         def reboot_done(ok_r: bool, msg_r: str) -> None:
             if ok_r:

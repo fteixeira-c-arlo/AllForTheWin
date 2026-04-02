@@ -69,6 +69,14 @@ def list_uart_ports() -> list[tuple[str, str]]:
         return []
 
 
+def _port_key_for_match(port: str) -> str:
+    """Normalize COM port names for comparison (handles \\\\.\\COM12 style)."""
+    x = str(port).upper()
+    if x.startswith("\\\\.\\"):
+        return x[4:]
+    return x
+
+
 # Camera console credentials when UART prompts (login root, password arlo)
 UART_CONSOLE_LOGIN = "root"
 UART_CONSOLE_PASSWORD = "arlo"
@@ -296,6 +304,48 @@ class UARTHandler:
             self._serial = None
         self._port = None
         self._connected = False
+
+    def _mark_uart_dead(self) -> None:
+        self._connected = False
+        if self._serial:
+            try:
+                self._serial.close()
+            except Exception:
+                pass
+            self._serial = None
+        self._port = None
+
+    def transport_heartbeat(self) -> bool:
+        """Return False if the serial port is closed, errors on access, or COM no longer exists."""
+        if not self._connected or not self._serial or not self._port:
+            return False
+        if not _SERIAL_AVAILABLE:
+            return False
+        try:
+            if not self._serial.is_open:
+                self._mark_uart_dead()
+                return False
+            _ = self._serial.in_waiting
+        except Exception:
+            self._mark_uart_dead()
+            return False
+        try:
+            if list_ports is not None:
+                present: set[str] = set()
+                for info in list_ports.comports():
+                    dev = getattr(info, "device", None) or getattr(info, "name", None)
+                    if isinstance(info, (list, tuple)) and len(info) >= 1 and dev is None:
+                        dev = info[0]
+                    if dev:
+                        present.add(str(dev).upper())
+                if present:
+                    keys = {_port_key_for_match(x) for x in present}
+                    if _port_key_for_match(self._port) not in keys:
+                        self._mark_uart_dead()
+                        return False
+        except Exception:
+            pass
+        return True
 
     def execute(self, command: str, args: list[str] | None = None) -> tuple[bool, str]:
         """

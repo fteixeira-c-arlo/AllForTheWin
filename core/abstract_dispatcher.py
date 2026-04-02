@@ -186,9 +186,9 @@ def execute_abstract_command(
     for i, raw_step in enumerate(sequence):
         raw_name = str(raw_step).strip()
         step_args = step_arg_lists[i] if i < len(step_arg_lists) else []
-        if raw_name.lower() == "fw_setup":
+        if raw_name.lower() == "fw_wizard":
             if not connection_execute:
-                raise ValueError("fw_setup requires an active camera connection.")
+                raise ValueError("fw_wizard requires an active camera connection.")
             from core.update_url_flow import run_update_url_flow
 
             err = run_update_url_flow(
@@ -196,10 +196,10 @@ def execute_abstract_command(
             )
             if err is not None:
                 if err == "cancelled":
-                    raise RuntimeError("fw_setup cancelled.")
+                    raise RuntimeError("fw_wizard cancelled.")
                 if err == "disconnected":
-                    raise RuntimeError("Device disconnected during fw_setup.")
-                raise RuntimeError(f"fw_setup failed: {err}")
+                    raise RuntimeError("Device disconnected during fw_wizard.")
+                raise RuntimeError(f"fw_wizard failed: {err}")
             outputs.append("")
             continue
         shell_line = resolve_step(raw_name, step_args, device_commands)

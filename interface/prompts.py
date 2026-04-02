@@ -411,7 +411,7 @@ def prompt_fw_server_root(default: str = "") -> str | None:
 def prompt_select_env_folder(base_path: str) -> str | None:
     """
     List subdirectories of base_path (e.g. C:\\FxTest\\fw_server\\local_server) and let user pick one.
-    Used for update URL folder (env) in fw_setup. Returns folder name (e.g. qa, dev, prod) or None to cancel.
+    Used for update URL folder (env) in fw_wizard / FW Wizard. Returns folder name (e.g. qa, dev, prod) or None to cancel.
     """
     if not base_path or not os.path.isdir(base_path):
         return None

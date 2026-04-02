@@ -122,6 +122,28 @@ class SSHHandler:
     def is_connected(self) -> bool:
         return self._connected
 
+    def transport_heartbeat(self) -> bool:
+        """Return False if the SSH session is no longer active."""
+        if not self._connected or not self._client:
+            return False
+        try:
+            transport = self._client.get_transport()
+            if transport is None or not transport.is_active():
+                self._connected = False
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
+                self._client = None
+                self._device_id = None
+                return False
+            return True
+        except Exception:
+            self._connected = False
+            self._client = None
+            self._device_id = None
+            return False
+
     def device_identifier(self) -> str | None:
         return self._device_id
 

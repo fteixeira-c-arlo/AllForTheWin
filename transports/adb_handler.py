@@ -125,6 +125,47 @@ class ADBHandler:
     def is_connected(self) -> bool:
         return self._connected
 
+    def transport_heartbeat(self) -> bool:
+        """Return False if the USB device is gone (get-state not device). Cheap periodic check for GUI."""
+        if not self._connected or not self._device_serial:
+            return False
+        try:
+            r = subprocess.run(
+                [self._adb_cmd(), "-s", self._device_serial, "get-state"],
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+            stderr = (r.stderr or "").strip().lower()
+            stdout = (r.stdout or "").strip().lower()
+            if _is_adb_disconnect_error(stderr, r.returncode):
+                self._connected = False
+                self._device_serial = None
+                return False
+            if "offline" in stdout or "offline" in stderr:
+                self._connected = False
+                self._device_serial = None
+                return False
+            if r.returncode != 0:
+                combined = stderr + " " + stdout
+                if "no devices" in combined or "not found" in combined or "device not found" in combined:
+                    self._connected = False
+                    self._device_serial = None
+                    return False
+                return True
+            if stdout == "unauthorized":
+                return True
+            return stdout == "device"
+        except subprocess.TimeoutExpired:
+            return True
+        except Exception as e:
+            err = str(e).lower()
+            if "device" in err and ("offline" in err or "not found" in err):
+                self._connected = False
+                self._device_serial = None
+                return False
+            return True
+
     def device_identifier(self) -> str | None:
         return self._device_serial or None
 

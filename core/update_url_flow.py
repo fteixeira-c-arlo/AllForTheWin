@@ -309,7 +309,7 @@ def run_update_url_flow(
     abstract_cli_args: list[str] | None = None,
 ) -> str | None:
     """
-    Run the full fw_setup flow: prompts, list FW from Artifactory, download, server start, send command.
+    Run the full FW Wizard flow: prompts, list FW from Artifactory, download, server start, send command.
     model: dict with "name", optional "fw_search_models" (list of models for Artifactory search, e.g. 2K + FHD).
     abstract_cli_args: when invoked via abstract ``flash``, user tokens after the command name (e.g. legacy
     ``ip`` / ``file``). This flow does not use them; non-empty values are rejected with a clear error.
@@ -318,15 +318,15 @@ def run_update_url_flow(
     extra = [str(a).strip() for a in (abstract_cli_args or []) if str(a).strip()]
     if extra:
         return (
-            "Firmware setup does not use IP or file arguments (Artifactory flow is interactive). "
-            "Run flash or fw_setup with no arguments. "
+            "FW Wizard does not use IP or file arguments (Artifactory flow is interactive). "
+            "Run flash or fw_wizard with no arguments. "
             f"Received: {' '.join(extra)}"
         )
 
     model_name = (model or {}).get("name") or "Camera"
     fw_search_models = (model or {}).get("fw_search_models") or [model_name]
 
-    console.print("\n[bold cyan]\u21C4 Firmware Setup (Artifactory + Local Server)[/]")
+    console.print("\n[bold cyan]\u21C4 FW Wizard (Artifactory + Local Server)[/]")
     console.print(
         "This will download FW from [bold]camera-fw-generic-release-local[/], set up a local server, and configure the camera.\n"
     )
@@ -376,26 +376,26 @@ def run_update_url_flow(
     return _cli_step_start_server_and_update_url(connection_execute, root, server_folder)
 
 
-def try_handle_fw_setup_command(
+def try_handle_fw_wizard_command(
     cmd: str,
     connection_execute: Callable[[str, list[str]], tuple[bool, str]] | None,
     model: dict[str, Any],
 ) -> tuple[str, str | None] | None:
     """
-    If cmd is fw_setup, run the text-based flow and return parse_and_execute-style (action, message).
+    If cmd is fw_wizard, run the text-based flow and return parse_and_execute-style (action, message).
     Otherwise return None so the caller can continue dispatch.
     """
-    if cmd != "fw_setup":
+    if cmd != "fw_wizard":
         return None
     if not connection_execute:
-        show_error("Connect to the camera first to run fw_setup.")
+        show_error("Connect to the camera first to run fw_wizard.")
         return ("continue", None)
     try:
         err = run_update_url_flow(connection_execute, model)
     except (KeyboardInterrupt, EOFError):
         return ("continue", None)
     except Exception as e:
-        show_error("fw_setup failed.", str(e))
+        show_error("fw_wizard failed.", str(e))
         return ("continue", None)
     if err is None:
         return ("continue", None)

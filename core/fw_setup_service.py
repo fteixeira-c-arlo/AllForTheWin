@@ -1,4 +1,4 @@
-"""Shared firmware-setup logic for CLI flow and GUI wizard (no UI)."""
+"""Shared firmware wizard logic for CLI flow and GUI FW Wizard (no UI)."""
 from __future__ import annotations
 
 import json

@@ -62,7 +62,8 @@ ArloShell uses a universal `noun verb` syntax. The same command works on every s
 | `update check` | Check for available update (notify only) |
 | `update apply` | Force update check and install |
 | `migrate <stage>` | Migrate to environment (`dev` / `qa` / `prod` / `ftrial`) and reboot |
-| `flash` | Firmware setup via Artifactory download and local HTTP server (same as `fw_setup`; no arguments) |
+| `flash` | FW Wizard flow via Artifactory download and local HTTP server (same as `fw_wizard`; no arguments) |
+| `fw_wizard` | FW Wizard (CLI prompts): Artifactory download, local server, set `update_url` (same flow as **Tools → FW Wizard**) |
 
 ### Device
 | Command | Description |

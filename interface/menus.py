@@ -128,7 +128,7 @@ WELCOME_INTRO = """[bold]ArloShell Terminal[/]
 
 [bold]Device commands[/] — [bold]E3 Wired[/] cameras load the Confluence CLI catalog; other models only show shared tools until you add a catalog. Run [bold]help[/] when connected.
 
-[bold]Firmware[/] — [bold]fw_setup[/] downloads from Artifactory, runs a local server, and sets the camera [bold]update_url[/]. [bold]use_local_fw[/] uses an existing FW server folder.
+[bold]Firmware[/] — [bold]fw_wizard[/] (FW Wizard) downloads from Artifactory, runs a local server, and sets the camera [bold]update_url[/]. [bold]use_local_fw[/] uses an existing FW server folder.
 
 [bold]Logs[/] — [bold]tail_logs[/] / [bold]parse_logs[/] stream and parse live. [bold]parse_log_file[/] parses a log file from the [bold]arlo_logs[/bold] folder. [bold]export_logs_tftp[/] (UART) uploads logs via TFTP.
 
