@@ -152,6 +152,20 @@ def _clean_uart_command_output(raw: str, sent_cmd: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _garbage_ratio(text: str) -> float:
+    """Fraction of non-printable chars (excluding common whitespace). High => likely wrong baud."""
+    if not text:
+        return 0.0
+    bad = 0
+    for ch in text:
+        o = ord(ch)
+        if ch in "\r\n\t":
+            continue
+        if o < 32 or o == 127:
+            bad += 1
+    return bad / max(len(text), 1)
+
+
 class UARTHandler:
     """Handle UART/serial connect, disconnect, and command execution (send command, read response)."""
 
@@ -160,44 +174,118 @@ class UARTHandler:
         self._port: str | None = None
         self._baud: int = 115200
         self._connected = False
+        self._console_style: str = "linux_shell"  # linux_shell | amebapro2 | mcu
 
-    def connect(self, port: str, baud_rate: int = 115200) -> tuple[bool, str, dict[str, Any] | None]:
+    def connect(
+        self,
+        port: str,
+        baud_rate: int = 115200,
+        *,
+        console_style: str | None = None,
+        legacy_baud: int | None = None,
+        device_display_name: str | None = None,
+    ) -> tuple[bool, str, dict[str, Any] | None]:
         """
         Open serial port at given baud rate. Returns (success, message, settings_for_config).
+
+        console_style:
+          - linux_shell (default): BusyBox/Linux login (root/arlo) then echo verify.
+          - amebapro2: no login; verify with `build_info` and AGW_MODEL_ID / model token.
+          - mcu: Gen5 MCU CLI; no login; open port and drain (no shell echo verify).
+        legacy_baud: if primary verify fails and this is set, retry at legacy baud (Finch/Robin).
         """
         if not _SERIAL_AVAILABLE:
             return False, "pyserial is required for UART. Install with: pip install pyserial", None
-        try:
-            ser = serial.Serial(
-                port=port,
-                baudrate=baud_rate,
-                bytesize=serial.EIGHTBITS,
-                parity=serial.PARITY_NONE,
-                stopbits=serial.STOPBITS_ONE,
-                timeout=0.5,
-                write_timeout=5,
-            )
+        style = (console_style or "linux_shell").strip().lower()
+        if style not in ("linux_shell", "amebapro2", "mcu"):
+            style = "linux_shell"
+        dev_label = (device_display_name or "device").strip()
+
+        def _try_once(baud: int) -> tuple[bool, str | None]:
+            try:
+                ser = serial.Serial(
+                    port=port,
+                    baudrate=baud,
+                    bytesize=serial.EIGHTBITS,
+                    parity=serial.PARITY_NONE,
+                    stopbits=serial.STOPBITS_ONE,
+                    timeout=0.5,
+                    write_timeout=5,
+                )
+            except serial.SerialException as e:
+                return False, str(e)
             self._serial = ser
             self._port = port
-            self._baud = baud_rate
+            self._baud = baud
             self._connected = True
-            # Perform login (root / arlo) so the session is authenticated
-            self._uart_do_login()
-            # Verify we can talk to the device (wrong baud rate would pass login but commands fail)
-            if not self._uart_verify_connection():
+            self._console_style = style
+            if style == "linux_shell":
+                self._uart_do_login()
+                if not self._uart_verify_connection():
+                    return False, None
+            elif style == "amebapro2":
+                if not self._uart_verify_amebapro2():
+                    return False, None
+            else:
+                if not self._uart_verify_mcu():
+                    return False, None
+            return True, None
+
+        try:
+            ok, err = _try_once(baud_rate)
+            used_legacy = False
+            if not ok and legacy_baud and legacy_baud != baud_rate:
                 try:
-                    self._serial.close()
+                    if self._serial:
+                        self._serial.close()
                 except Exception:
                     pass
                 self._serial = None
                 self._port = None
                 self._connected = False
-                return False, (
-                    "Connection could not be verified. Check baud rate (e.g. 115200) and cable, then try again."
-                ), None
-            return True, f"Connected to {port} at {baud_rate} baud", {
+                ok2, err2 = _try_once(legacy_baud)
+                if ok2:
+                    used_legacy = True
+                    logger.warning(
+                        "Retried connection at legacy baudrate %s for %s",
+                        legacy_baud,
+                        dev_label,
+                    )
+                    msg = (
+                        f"Connected to {port} at {legacy_baud} baud "
+                        f"(retried at legacy baudrate {legacy_baud} for {dev_label})"
+                    )
+                    return True, msg, {
+                        "port": port,
+                        "baud_rate": legacy_baud,
+                        "used_legacy_uart_baud": True,
+                        "console_style": style,
+                    }
+                err = err2
+
+            if not ok:
+                try:
+                    if self._serial:
+                        self._serial.close()
+                except Exception:
+                    pass
+                self._serial = None
+                self._port = None
+                self._connected = False
+                detail = (
+                    (err or "").strip()
+                    or "Connection could not be verified. Check baud rate and cable, then try again."
+                )
+                return False, detail, None
+
+            msg = f"Connected to {port} at {self._baud} baud"
+            if used_legacy:
+                msg += f" (legacy baud {self._baud} for {dev_label})"
+            return True, msg, {
                 "port": port,
-                "baud_rate": baud_rate,
+                "baud_rate": self._baud,
+                "used_legacy_uart_baud": used_legacy,
+                "console_style": style,
             }
         except serial.SerialException as e:
             err_str = str(e).lower()
@@ -294,6 +382,59 @@ class UARTHandler:
         except Exception:
             return False
 
+    def _uart_verify_amebapro2(self) -> bool:
+        """ISP console: send build_info; accept AGW_MODEL_ID or VMC/AVD token, reject heavy garbage."""
+        if not self._serial:
+            return False
+        try:
+            self._serial.reset_input_buffer()
+            self._serial.write(b"build_info\r\n")
+            self._serial.flush()
+            chunks: list[bytes] = []
+            deadline = time.monotonic() + 6.0
+            last_data = time.monotonic()
+            while time.monotonic() < deadline:
+                if self._serial.in_waiting:
+                    data = self._serial.read(self._serial.in_waiting)
+                    if data:
+                        chunks.append(data)
+                        last_data = time.monotonic()
+                else:
+                    if time.monotonic() - last_data >= 1.2 and chunks:
+                        break
+                    time.sleep(0.05)
+            raw = b"".join(chunks).decode(errors="replace")
+            if _garbage_ratio(raw) > 0.08 and len(raw) > 40:
+                return False
+            if re.search(r"AGW_MODEL_ID", raw, re.IGNORECASE):
+                return True
+            if re.search(r"\bVMC\d{4}[A-Z]?\b", raw, re.IGNORECASE):
+                return True
+            if re.search(r"\bAVD\d{4}\b", raw, re.IGNORECASE):
+                return True
+            return len(raw.strip()) >= 8 and _garbage_ratio(raw) <= 0.05
+        except Exception:
+            return False
+
+    def _uart_verify_mcu(self) -> bool:
+        """Gen5 MCU UART: no Linux shell; drain boot noise then treat link as ready."""
+        if not self._serial:
+            return False
+        try:
+            self._serial.reset_input_buffer()
+            end = time.monotonic() + 0.4
+            while time.monotonic() < end:
+                if self._serial.in_waiting:
+                    data = self._serial.read(self._serial.in_waiting)
+                    if data:
+                        text = data.decode(errors="replace")
+                        if len(text) > 80 and _garbage_ratio(text) > 0.15:
+                            return False
+                time.sleep(0.05)
+            return True
+        except Exception:
+            return False
+
     def disconnect(self) -> None:
         """Close serial connection."""
         if self._serial:
@@ -380,6 +521,9 @@ class UARTHandler:
             else:
                 total_timeout = 120.0
                 idle_timeout = 12.0
+            _style = getattr(self, "_console_style", "linux_shell")
+            if _style in ("amebapro2", "mcu") and not (is_tar or is_tftp or is_base64):
+                idle_timeout = 2.0
             deadline = time.monotonic() + total_timeout
             last_data = time.monotonic()
             print_offset = 0  # For streaming: how many chars we've already printed

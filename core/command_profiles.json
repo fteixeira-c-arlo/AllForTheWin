@@ -4,6 +4,21 @@
     "commands_file": "e3_wired_commands.json",
     "notes": "Populated from Confluence; add sibling JSON files and entries here for other product lines."
   },
+  "amebapro2": {
+    "label": "AmebaPro2 ISP (Finch / Robin / Swallow)",
+    "commands_file": "amebapro2_commands.json",
+    "notes": "UART ISP console; no ADB."
+  },
+  "gen5": {
+    "label": "Gen5 ISP + MCU (Pro 5 Phoenix/Griffin)",
+    "commands_file": "gen5_commands.json",
+    "notes": "ISP shell commands; MCU lines require MCU UART (console=mcu)."
+  },
+  "linux_kealory": {
+    "label": "Linux (Pro 6 Kea / Lory)",
+    "commands_file": "linux_kealory_commands.json",
+    "notes": "arloutil / arlocmd / systemd style."
+  },
   "none": {
     "label": "No device command catalog",
     "commands_file": null,

@@ -1,11 +1,51 @@
 """ADB connection handler using subprocess. Uses USB connection and adb shell auth + password."""
 import subprocess
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from utils.logger import get_logger
 
 logger = get_logger()
+
+
+@dataclass(frozen=True)
+class AdbPickerDeviceInfo:
+    """One row in the ADB device picker (queried before the dialog opens)."""
+
+    serial: str
+    model: str
+    firmware: str | None
+
+
+def _parse_adb_devices_stdout(stdout: str) -> list[str]:
+    """Parse `adb devices` stdout; return serials from each data line (same rules as historical connect)."""
+    lines = (stdout or "").strip().splitlines()
+    devices: list[str] = []
+    for line in lines[1:]:  # skip "List of devices attached"
+        line = line.strip()
+        if line and not line.startswith("*") and "\t" in line:
+            serial = line.split("\t")[0].strip()
+            if serial:
+                devices.append(serial)
+    return devices
+
+
+def _adb_getprop(adb: str, serial: str, prop: str, timeout: float) -> str:
+    try:
+        if timeout <= 0:
+            return ""
+        r = subprocess.run(
+            [adb, "-s", serial, "shell", "getprop", prop],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return (r.stdout or "").strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return ""
 
 
 class ADBHandler:
@@ -15,34 +55,148 @@ class ADBHandler:
         self._device_serial: str | None = None  # from adb devices
         self._connected = False
 
-    def connect(self, password: str) -> tuple[bool, str, dict[str, Any] | None]:
-        """
-        Ensure a single USB device is present, run 'adb shell auth' and send password,
-        then mark connected. Returns (success, message, settings_for_config).
-        No IP is used; connection is over USB.
-        """
+    @staticmethod
+    def list_attached_usb_serials() -> list[str]:
+        """Return device serials reported by `adb devices` (same lines the connect flow considers attached)."""
         try:
-            # Get attached devices (USB)
             result = subprocess.run(
-                [self._adb_cmd(), "devices"],
+                [ADBHandler._adb_cmd(), "devices"],
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
-            lines = (result.stdout or "").strip().splitlines()
-            devices = []
-            for line in lines[1:]:  # skip "List of devices attached"
-                line = line.strip()
-                if line and not line.startswith("*") and "\t" in line:
-                    serial = line.split("\t")[0].strip()
-                    if serial:
-                        devices.append(serial)
+            return _parse_adb_devices_stdout(result.stdout or "")
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return []
+
+    @staticmethod
+    def probe_device_row_detail(serial: str, timeout: float = 1.0) -> str:
+        """
+        Best-effort subtitle for device picker (Model / FW). Uses `cli mfg build_info` with a short timeout;
+        does not run auth. Returns empty string if unavailable.
+        """
+        adb = ADBHandler._adb_cmd()
+        try:
+            r = subprocess.run(
+                [adb, "-s", serial, "shell", "cli", "mfg", "build_info"],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            text = (r.stdout or "") + "\n" + (r.stderr or "")
+            if not text.strip():
+                return ""
+            from core.build_info import parse_build_info
+
+            parsed = parse_build_info(text)
+            model = parsed.get("model")
+            fw = parsed.get("fw_version")
+            parts: list[str] = []
+            if model:
+                parts.append(f"Model: {model}")
+            if fw:
+                parts.append(f"FW: {fw}")
+            if parts:
+                return "  ".join(parts)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        except Exception:
+            logger.debug("ADB probe_device_row_detail failed for %s", serial, exc_info=True)
+        return ""
+
+    @staticmethod
+    def _probe_picker_info_for_serial(serial: str, budget: float) -> AdbPickerDeviceInfo:
+        """Fill model (getprop + optional build_info) and FW within ``budget`` seconds (wall)."""
+        adb = ADBHandler._adb_cmd()
+        deadline = time.monotonic() + max(0.15, budget)
+        model = ""
+        fw: str | None = None
+
+        def remaining() -> float:
+            return max(0.0, deadline - time.monotonic())
+
+        t0 = min(1.2, remaining())
+        model = _adb_getprop(adb, serial, "ro.product.model", t0)
+        if not model and remaining() > 0.08:
+            model = _adb_getprop(adb, serial, "ro.product.device", min(0.55, remaining()))
+        if not model and remaining() > 0.08:
+            model = _adb_getprop(adb, serial, "ro.hardware", min(0.45, remaining()))
+
+        if remaining() >= 0.35:
+            try:
+                t_left = min(1.25, remaining())
+                r = subprocess.run(
+                    [adb, "-s", serial, "shell", "cli", "mfg", "build_info"],
+                    capture_output=True,
+                    text=True,
+                    timeout=t_left,
+                )
+                text = (r.stdout or "") + "\n" + (r.stderr or "")
+                if text.strip():
+                    from core.build_info import parse_build_info
+
+                    parsed = parse_build_info(text)
+                    if not model and parsed.get("model"):
+                        model = str(parsed["model"]).strip()
+                    if parsed.get("fw_version"):
+                        fw = str(parsed["fw_version"]).strip() or None
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                pass
+            except Exception:
+                logger.debug("picker build_info probe failed for %s", serial, exc_info=True)
+
+        display_model = model.strip() if model else "Unknown model"
+        return AdbPickerDeviceInfo(serial=serial, model=display_model, firmware=fw)
+
+    @staticmethod
+    def gather_picker_device_infos(
+        serials: list[str], *, per_serial_timeout: float = 2.0
+    ) -> list[AdbPickerDeviceInfo]:
+        """
+        Query each serial in parallel (getprop + quick build_info). Per-device wall time is capped
+        by ``per_serial_timeout`` (default 2s).
+        """
+        if not serials:
+            return []
+        budget = max(0.5, float(per_serial_timeout))
+        max_workers = min(8, len(serials))
+
+        def one(s: str) -> AdbPickerDeviceInfo:
+            return ADBHandler._probe_picker_info_for_serial(s, budget)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            return list(ex.map(one, serials))
+
+    def connect(
+        self, password: str, device_serial: str | None = None
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        """
+        Run 'adb shell auth' with password for the chosen USB device, then mark connected.
+        If device_serial is None, uses the only attached device; fails if more than one is attached.
+        Returns (success, message, settings_for_config).
+        """
+        try:
+            devices = self.list_attached_usb_serials()
             if not devices:
                 return False, "No ADB device found. Connect the camera via USB and ensure USB debugging is enabled.", None
-            if len(devices) > 1:
-                return False, f"Multiple ADB devices found: {devices}. Disconnect others or use a single device.", None
 
-            serial = devices[0]
+            if device_serial and device_serial.strip():
+                serial = device_serial.strip()
+                if serial not in devices:
+                    return (
+                        False,
+                        f"ADB device {serial!r} is not connected or not authorized.",
+                        None,
+                    )
+            else:
+                if len(devices) > 1:
+                    return (
+                        False,
+                        "Multiple ADB devices attached; select one in the dialog.",
+                        None,
+                    )
+                serial = devices[0]
+
             self._device_serial = serial
 
             # Run adb shell auth and send password on stdin

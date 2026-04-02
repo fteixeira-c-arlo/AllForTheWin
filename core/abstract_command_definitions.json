@@ -138,5 +138,173 @@
     "args": ["local_path"],
     "sequence": [],
     "transport_restriction": "adb_only"
+  },
+  {
+    "name": "get_firmware_version",
+    "description": "Read firmware / build version (platform-specific)",
+    "args": [],
+    "sequence": ["get_firmware_version"],
+    "transport_restriction": null
+  },
+  {
+    "name": "get_model_id",
+    "description": "Read model identifier from device",
+    "args": [],
+    "sequence": ["get_model_id"],
+    "transport_restriction": null
+  },
+  {
+    "name": "get_serial_number",
+    "description": "Read device serial number",
+    "args": [],
+    "sequence": ["get_serial_number"],
+    "transport_restriction": null
+  },
+  {
+    "name": "get_device_info",
+    "description": "Device information dump (platform-specific)",
+    "args": [],
+    "sequence": ["get_device_info"],
+    "transport_restriction": null
+  },
+  {
+    "name": "factory_reset",
+    "description": "Factory reset (single step; use spaced factory reset on E3 Wired for log archive first)",
+    "args": [],
+    "sequence": ["factory_reset"],
+    "transport_restriction": null
+  },
+  {
+    "name": "get_update_url",
+    "description": "Read firmware update URL",
+    "args": [],
+    "sequence": ["get_update_url"],
+    "transport_restriction": null
+  },
+  {
+    "name": "refresh_update_rules",
+    "description": "Refresh OTA / update rules from server",
+    "args": [],
+    "sequence": ["refresh_update_rules"],
+    "transport_restriction": null
+  },
+  {
+    "name": "migrate_environment",
+    "description": "Migrate to target environment then reboot",
+    "args": ["env"],
+    "sequence": ["migrate_run", "reboot"],
+    "transport_restriction": null
+  },
+  {
+    "name": "get_current_environment",
+    "description": "Show current FW stage / environment",
+    "args": [],
+    "sequence": ["get_current_environment"],
+    "transport_restriction": null
+  },
+  {
+    "name": "get_kv_item",
+    "description": "Read a key-value item",
+    "args": ["key"],
+    "sequence": ["get_kv_item"],
+    "transport_restriction": null
+  },
+  {
+    "name": "set_kv_item",
+    "description": "Write a key-value item and commit",
+    "args": ["key", "value"],
+    "sequence": ["set_kv_write", "kv_commit"],
+    "transport_restriction": null
+  },
+  {
+    "name": "tail_logs",
+    "description": "Follow live logs (journal / file tail)",
+    "args": [],
+    "sequence": ["tail_logs"],
+    "transport_restriction": null
+  },
+  {
+    "name": "get_wifi_status",
+    "description": "WiFi / WLAN status",
+    "args": [],
+    "sequence": ["get_wifi_status"],
+    "transport_restriction": null
+  },
+  {
+    "name": "connect_wifi_ip",
+    "description": "Connect to WiFi (Linux itool WPA2)",
+    "args": ["ssid", "password"],
+    "sequence": ["connect_wifi"],
+    "transport_restriction": null
+  },
+  {
+    "name": "ping",
+    "description": "Ping a host",
+    "args": ["host"],
+    "sequence": ["ping"],
+    "transport_restriction": null
+  },
+  {
+    "name": "get_boot_partition",
+    "description": "AmebaPro2: read boot partition",
+    "args": [],
+    "sequence": ["get_boot_partition"],
+    "transport_restriction": null
+  },
+  {
+    "name": "set_boot_partition",
+    "description": "AmebaPro2: set boot partition index",
+    "args": ["index"],
+    "sequence": ["set_boot_partition"],
+    "transport_restriction": null
+  },
+  {
+    "name": "read_adc",
+    "description": "Gen5 MCU: read ADC",
+    "args": [],
+    "sequence": ["read_adc"],
+    "transport_restriction": null
+  },
+  {
+    "name": "read_lux",
+    "description": "Gen5 MCU: ambient light",
+    "args": [],
+    "sequence": ["read_lux"],
+    "transport_restriction": null
+  },
+  {
+    "name": "read_temperature",
+    "description": "Gen5 MCU: temperature sensor",
+    "args": [],
+    "sequence": ["read_temperature"],
+    "transport_restriction": null
+  },
+  {
+    "name": "floodlight_on",
+    "description": "Gen5 MCU: floodlight on",
+    "args": [],
+    "sequence": ["floodlight_on"],
+    "transport_restriction": null
+  },
+  {
+    "name": "floodlight_off",
+    "description": "Gen5 MCU: floodlight off",
+    "args": [],
+    "sequence": ["floodlight_off"],
+    "transport_restriction": null
+  },
+  {
+    "name": "stop_arlo_service",
+    "description": "Linux: systemctl stop arlod",
+    "args": [],
+    "sequence": ["stop_arlo_service"],
+    "transport_restriction": null
+  },
+  {
+    "name": "manual_ota",
+    "description": "Linux: manual firmware upgrade from URL",
+    "args": ["url"],
+    "sequence": ["manual_ota"],
+    "transport_restriction": null
   }
 ]

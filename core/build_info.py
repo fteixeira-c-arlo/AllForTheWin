@@ -76,8 +76,8 @@ def parse_build_info(raw_output: str) -> dict[str, Any]:
     text = raw_output.strip()
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
-    # Model: VMC + 4 digits (e.g. VMC3070, model_num: VMC3070, Model: VMC3070)
-    model_pattern = re.compile(r"\b(VMC\d{4})\b", re.IGNORECASE)
+    # Model: VMC + 4 digits + optional suffix, or AVD doorbell (e.g. VMC3070, AVD5001)
+    model_pattern = re.compile(r"\b(VMC\d{4}[A-Z]?|AVD\d{4})\b", re.IGNORECASE)
     for line in lines:
         m = model_pattern.search(line)
         if m:

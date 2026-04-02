@@ -12,6 +12,11 @@ from core.abstract_dispatcher import (
     execute_abstract_command,
     load_abstract_definitions,
 )
+from core.device_errors import (
+    CommandNotSupportedError,
+    MCUConsoleNotConnectedError,
+    UnsupportedConnectionError,
+)
 
 # Optional (GUI): live tail view in-app instead of spawning an external terminal.
 _tail_live_view_start: Callable[[str, str], None] | None = None
@@ -43,6 +48,23 @@ _COMMAND_PARSER_DIR = Path(__file__).resolve().parent
 ABSTRACT_DEFINITIONS: list[dict] = load_abstract_definitions(
     str(_COMMAND_PARSER_DIR / "abstract_command_definitions.json")
 )
+
+
+def _check_command_catalog_restrictions(c: dict, model: dict[str, Any] | None) -> None:
+    """Raise CommandNotSupportedError if only_codenames does not match model codename."""
+    only = c.get("only_codenames")
+    if not only or not isinstance(only, list):
+        return
+    cn = ((model or {}).get("codename") or "").strip().lower()
+    if not cn:
+        return
+    allowed = {str(x).lower() for x in only}
+    if cn not in allowed:
+        dn = (model or {}).get("display_name") or (model or {}).get("name") or "Device"
+        plat = (model or {}).get("platform") or "unknown"
+        raise CommandNotSupportedError(
+            f"Command '{c.get('name')}' is not supported on {dn} ({plat})"
+        )
 
 
 def get_visible_commands(device_commands: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -501,6 +523,7 @@ def parse_and_execute(
     connection_get_tail_logs_command: Callable[[], str | None] | None = None,
     connection_handle: Any = None,
     command_profile: str = "none",
+    mcu_connection_execute: Callable[[str, list[str]], tuple[bool, str]] | None = None,
 ) -> tuple[str, str | None]:
     """
     Parse user input and execute. Returns (action, message).
@@ -759,6 +782,10 @@ def parse_and_execute(
                 return False, "Not connected."
             return connection_execute(shell_line, [])
 
+        def _mcu_fn(shell_line: str) -> Any:
+            assert mcu_connection_execute is not None
+            return mcu_connection_execute(shell_line, [])
+
         try:
             abstract_out = execute_abstract_command(
                 abstract_name,
@@ -769,7 +796,17 @@ def parse_and_execute(
                 connection_type,
                 connection_execute=connection_execute,
                 model=model,
+                mcu_execute_fn=_mcu_fn if mcu_connection_execute else None,
             )
+        except CommandNotSupportedError as e:
+            show_error(str(e))
+            return "continue", None
+        except MCUConsoleNotConnectedError as e:
+            show_error(str(e))
+            return "continue", None
+        except UnsupportedConnectionError as e:
+            show_error(str(e))
+            return "continue", None
         except ValueError as e:
             show_error(str(e))
             return "continue", None
@@ -880,6 +917,11 @@ def parse_and_execute(
     # Device command: use "shell" for E3 Wired (full cli command), else command name + args
     for c in device_commands:
         if c["name"].lower() == cmd:
+            try:
+                _check_command_catalog_restrictions(c, model)
+            except CommandNotSupportedError as e:
+                show_error(str(e))
+                return "continue", None
             # pull_logs: download log archive from camera to PC (no shell command)
             if cmd == "pull_logs":
                 if connection_type.upper() == "UART":
@@ -901,7 +943,19 @@ def parse_and_execute(
                 return "continue", None
             if connection_execute:
                 base_cmd = c.get("shell") or cmd
-                success, output = connection_execute(base_cmd, args)
+                run_exec = connection_execute
+                if (c.get("console") or "").strip().lower() == "mcu":
+                    if not mcu_connection_execute:
+                        show_error(
+                            str(
+                                MCUConsoleNotConnectedError(
+                                    "MCU CLI is not connected. Connect the MCU UART (Gen5) and retry."
+                                )
+                            )
+                        )
+                        return "continue", None
+                    run_exec = mcu_connection_execute
+                success, output = run_exec(base_cmd, args)
                 if success:
                     return "continue", output or f"Command '{cmd}' executed successfully."
                 # Camera disconnected from PC (USB unplugged or network lost)

@@ -6,6 +6,8 @@ firmware search uses both model names when applicable.
 """
 from typing import Any
 
+from core.device_registry import DEVICE_REGISTRY, registry_entry_to_camera_group
+
 # Shared connection defaults for E3 Wired
 _DEFAULT_SETTINGS = {
     "adb": {"port": 5555},
@@ -48,6 +50,11 @@ CAMERA_MODEL_GROUPS = [
         "default_settings": _DEFAULT_SETTINGS,
         "command_profile": "e3_wired",
     },
+]
+
+# Finch, Robin, Swallow, Pro 5, Pro 6, Lory — from device_registry (platform + UART defaults).
+CAMERA_MODEL_GROUPS = CAMERA_MODEL_GROUPS + [
+    registry_entry_to_camera_group(e) for e in DEVICE_REGISTRY
 ]
 
 

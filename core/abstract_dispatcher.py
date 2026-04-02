@@ -7,6 +7,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from core.device_errors import CommandNotSupportedError
+
 
 def load_abstract_definitions(path: str) -> list[dict]:
     """Load and return the list from a JSON file of abstract command definitions."""
@@ -32,30 +34,43 @@ def find_abstract(name: str, definitions: list[dict]) -> dict | None:
     return None
 
 
-def resolve_step(raw_name: str, step_args: list[str], device_commands: list[dict]) -> str:
+def resolve_step(raw_name: str, step_args: list[str], device_commands: list[dict]) -> tuple[str, str]:
     """
-    Look up the raw command by name in device_commands; return shell + args as one string.
-    Raises ValueError if the raw command is not in the catalog.
+    Look up the raw command by name in device_commands; return (shell + args, console).
+    console is 'isp' (default) or 'mcu' for Gen5 MCU UART routing.
+    Raises ValueError if missing; CommandNotSupportedError if entry is marked unsupported.
     """
     want = (raw_name or "").strip().lower()
     shell = ""
+    console = "isp"
+    entry: dict | None = None
     for c in device_commands:
         if not isinstance(c, dict):
             continue
         if (c.get("name") or "").strip().lower() == want:
+            entry = c
             shell = c.get("shell")
             if shell is None:
                 shell = ""
             else:
                 shell = str(shell)
+            console = str(c.get("console") or "isp").strip().lower() or "isp"
             break
     else:
         raise ValueError(
             f"Raw command '{raw_name}' is not defined in the device command catalog."
         )
+    assert entry is not None
+    if entry.get("unsupported"):
+        dn = (entry.get("unsupported_message") or "This command is not available on this device.").strip()
+        raise CommandNotSupportedError(dn)
+    if entry.get("inject_itool_wpa2") and len(step_args) >= 2:
+        return f"itool connect {step_args[0]} wpa2 {step_args[1]}", console
     if step_args:
-        return shell + " " + " ".join(step_args)
-    return shell
+        if shell.rstrip().endswith("="):
+            return shell + "".join(step_args), console
+        return shell + " " + " ".join(step_args), console
+    return shell, console
 
 
 def _norm_connection(connection_type: str) -> str:
@@ -153,6 +168,7 @@ def execute_abstract_command(
     connection_type: str,
     connection_execute: Callable[[str, list[str]], tuple[bool, str]] | None = None,
     model: dict[str, Any] | None = None,
+    mcu_execute_fn: Callable[[str], Any] | None = None,
 ) -> list[str] | None:
     """
     Run the abstract command's sequence via execute_fn(full_shell_string).
@@ -202,14 +218,33 @@ def execute_abstract_command(
                 raise RuntimeError(f"fw_wizard failed: {err}")
             outputs.append("")
             continue
-        shell_line = resolve_step(raw_name, step_args, device_commands)
         try:
-            result = execute_fn(shell_line)
-        except Exception as e:
-            raise RuntimeError(
-                f"Abstract command {abstract_name!r} failed at step {i + 1}/{len(sequence)} "
-                f"(raw={raw_name!r}): command {shell_line!r} raised {type(e).__name__}: {e}"
-            ) from e
+            shell_line, console = resolve_step(raw_name, step_args, device_commands)
+        except CommandNotSupportedError:
+            raise
+        if console == "mcu":
+            if not mcu_execute_fn:
+                from core.device_errors import MCUConsoleNotConnectedError
+
+                raise MCUConsoleNotConnectedError(
+                    "MCU CLI is not connected. Connect the MCU UART (Gen5) and retry, "
+                    "or run this command from the MCU console session."
+                )
+            try:
+                result = mcu_execute_fn(shell_line)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Abstract command {abstract_name!r} failed at step {i + 1}/{len(sequence)} "
+                    f"(raw={raw_name!r}, mcu): command {shell_line!r} raised {type(e).__name__}: {e}"
+                ) from e
+        else:
+            try:
+                result = execute_fn(shell_line)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Abstract command {abstract_name!r} failed at step {i + 1}/{len(sequence)} "
+                    f"(raw={raw_name!r}): command {shell_line!r} raised {type(e).__name__}: {e}"
+                ) from e
         ok, text = _interpret_execute_result(result)
         if not ok:
             raise RuntimeError(

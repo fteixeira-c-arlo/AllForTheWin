@@ -53,7 +53,10 @@ from PySide6.QtWidgets import (
 
 from rich.console import Console
 
-from core.build_info import detect_device
+from core.device_connection import detect_after_connect, ensure_adb_allowed_for_selection
+from core.device_credentials import get_adb_password_for_model
+from core.device_errors import UnknownDeviceError, UnsupportedConnectionError
+from core.device_registry import lookup_registry_by_model_id
 from core.command_definitions import load_device_commands
 from core.command_parser import (
     ABSTRACT_DEFINITIONS,
@@ -70,7 +73,7 @@ from core.camera_models import (
     get_model_by_name,
     get_models,
 )
-from transports.adb_handler import ADBHandler
+from transports.adb_handler import ADBHandler, AdbPickerDeviceInfo
 from transports.ssh_handler import SSHHandler
 from transports.uart_handler import UARTHandler, list_uart_ports
 from transports.connection_config import ConnectionConfig
@@ -87,6 +90,35 @@ ARLO_ACCENT_COLOR = "#00897B"
 _STATUS_DOT_DISCONNECTED = "#e05555"
 _STATUS_DOT_CONNECTING = "#e0a535"
 _STATUS_DOT_CONNECTED = "#4caf7d"
+
+
+def _safe_set_point_size(font: QFont, size: int, *, context: str = "") -> None:
+    if size > 0:
+        font.setPointSize(size)
+        return
+    print(f"DEBUG: font size was {size}, clamped to minimum ({context})")
+    font.setPointSize(10)
+
+
+def _ensure_explicit_font_size(font: QFont, *, context: str = "") -> None:
+    """Avoid propagating Qt's 'unset' point size (-1), which can trigger QFont::setPointSize warnings."""
+    if font.pointSize() > 0:
+        return
+    if font.pixelSize() > 0:
+        return
+    app = QApplication.instance()
+    if app is not None:
+        af = app.font()
+        if af.pointSize() > 0:
+            font.setPointSize(af.pointSize())
+            print(f"DEBUG: font size was -1, using application point size ({context})")
+            return
+        if af.pixelSize() > 0:
+            font.setPixelSize(af.pixelSize())
+            print(f"DEBUG: font size was -1, using application pixel size ({context})")
+            return
+    font.setPointSize(10)
+    print(f"DEBUG: font size was -1, clamped to 10 ({context})")
 
 
 def _env_stage_badge_qss(env_raw: str) -> str:
@@ -317,6 +349,200 @@ def _tool_subgroup_for_system_name(name: str) -> str | None:
 _TOOL_SUBGROUP_ORDER = ("FIRMWARE", "LOGS", "CONFIG", "SESSION")
 
 
+class _AdbPickerDeviceCard(QFrame):
+    """One selectable device row (model, serial, optional FW) for the ADB picker."""
+
+    def __init__(
+        self,
+        dialog: "_AdbDevicePickerDialog",
+        info: AdbPickerDeviceInfo,
+        parent: QWidget,
+    ) -> None:
+        super().__init__(parent)
+        self._dialog = dialog
+        self._serial = info.serial
+        self._selected = False
+        self._hover = False
+        self.setObjectName("adbDeviceCard")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        mono = QFont("Menlo", 12) if sys.platform == "darwin" else QFont("Consolas", 12)
+        _ensure_explicit_font_size(mono, context="adb picker serial")
+
+        inlay = QVBoxLayout(self)
+        inlay.setContentsMargins(14, 12, 14, 12)
+        inlay.setSpacing(6)
+
+        m = QLabel(info.model)
+        m.setObjectName("adbPickerModel")
+        mf = QFont(m.font())
+        _ensure_explicit_font_size(mf, context="adb picker model")
+        _safe_set_point_size(mf, 14, context="adb picker model")
+        mf.setBold(True)
+        m.setFont(mf)
+        m.setStyleSheet("color: #e8eef4; background: transparent; border: none;")
+        inlay.addWidget(m)
+
+        s = QLabel(info.serial)
+        s.setObjectName("adbPickerSerial")
+        s.setFont(mono)
+        s.setStyleSheet("color: #7a8494; background: transparent; border: none;")
+        s.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        inlay.addWidget(s)
+
+        if info.firmware:
+            fw = QLabel(f"FW: {info.firmware}")
+            fw.setObjectName("adbPickerFw")
+            ff = QFont(fw.font())
+            _ensure_explicit_font_size(ff, context="adb picker fw")
+            _safe_set_point_size(ff, 12, context="adb picker fw")
+            fw.setFont(ff)
+            fw.setStyleSheet("color: #7a8494; background: transparent; border: none;")
+            inlay.addWidget(fw)
+
+        self._apply_frame_style()
+
+    def serial(self) -> str:
+        return self._serial
+
+    def set_card_selected(self, selected: bool) -> None:
+        self._selected = selected
+        self._apply_frame_style()
+
+    def _apply_frame_style(self) -> None:
+        accent = ARLO_ACCENT_COLOR
+        if self._selected:
+            self.setStyleSheet(
+                f"QFrame#adbDeviceCard {{ background-color: rgba(0, 137, 123, 0.22); "
+                f"border: 2px solid {accent}; border-radius: 8px; }}"
+            )
+        elif self._hover:
+            self.setStyleSheet(
+                "QFrame#adbDeviceCard { background-color: #2a3038; border: 1px solid #5a6570; border-radius: 8px; }"
+            )
+        else:
+            self.setStyleSheet(
+                "QFrame#adbDeviceCard { background-color: #181c22; border: 1px solid #3d4650; border-radius: 8px; }"
+            )
+
+    def mousePressEvent(self, event: Any) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dialog._on_card_clicked(self)
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event: Any) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dialog._accept_serial(self._serial)
+        super().mouseDoubleClickEvent(event)
+
+    def enterEvent(self, event: Any) -> None:
+        self._hover = True
+        self._apply_frame_style()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event: Any) -> None:
+        self._hover = False
+        self._apply_frame_style()
+        super().leaveEvent(event)
+
+
+class _AdbDevicePickerDialog(QDialog):
+    """Dark-themed ADB USB device chooser with card rows (info gathered before show)."""
+
+    def __init__(self, parent: QWidget | None, infos: list[AdbPickerDeviceInfo]) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Select device")
+        self._chosen: str | None = None
+        self._cards: list[_AdbPickerDeviceCard] = []
+        self._selected: _AdbPickerDeviceCard | None = None
+        accent = ARLO_ACCENT_COLOR
+        self.setStyleSheet(
+            f"""
+            QDialog {{ background-color: #1a1a1a; color: #e8eef4; }}
+            QLabel {{ color: #b8c0cc; }}
+            QScrollArea {{ border: none; background-color: transparent; }}
+            QPushButton {{
+                background-color: #2d333b;
+                color: #e8eef4;
+                border: 1px solid #3d4650;
+                border-radius: 4px;
+                padding: 6px 16px;
+                min-width: 72px;
+            }}
+            QPushButton:hover {{ background-color: #3a424d; }}
+            QPushButton:default {{
+                background-color: #1a5c54;
+                border-color: {accent};
+            }}
+            QPushButton:default:hover {{ background-color: #156f66; }}
+            """
+        )
+        lay = QVBoxLayout(self)
+        lay.setSpacing(12)
+        hint = QLabel("Multiple devices found. Choose one:")
+        hint.setStyleSheet("color: #b8c0cc; font-size: 12px;")
+        lay.addWidget(hint)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setMinimumWidth(440)
+        scroll.setMinimumHeight(220)
+        inner = QWidget()
+        inner.setStyleSheet("background-color: transparent;")
+        inner_lay = QVBoxLayout(inner)
+        inner_lay.setContentsMargins(2, 2, 2, 2)
+        inner_lay.setSpacing(9)
+
+        for inf in infos:
+            card = _AdbPickerDeviceCard(self, inf, inner)
+            self._cards.append(card)
+            inner_lay.addWidget(card)
+        inner_lay.addStretch(1)
+
+        scroll.setWidget(inner)
+        lay.addWidget(scroll, 1)
+
+        if self._cards:
+            self._select_card(self._cards[0])
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        cancel_b = QPushButton("Cancel")
+        connect_b = QPushButton("Connect")
+        connect_b.setDefault(True)
+        cancel_b.clicked.connect(self.reject)
+        connect_b.clicked.connect(self._on_connect_clicked)
+        btn_row.addWidget(cancel_b)
+        btn_row.addWidget(connect_b)
+        lay.addLayout(btn_row)
+
+    def _on_card_clicked(self, card: _AdbPickerDeviceCard) -> None:
+        self._select_card(card)
+
+    def _select_card(self, card: _AdbPickerDeviceCard) -> None:
+        self._selected = card
+        for c in self._cards:
+            c.set_card_selected(c is card)
+
+    def _accept_serial(self, serial: str) -> None:
+        s = (serial or "").strip()
+        if s:
+            self._chosen = s
+            self.accept()
+
+    def _on_connect_clicked(self) -> None:
+        card = self._selected or (self._cards[0] if self._cards else None)
+        if card is None:
+            return
+        self._accept_serial(card.serial())
+
+    def selected_serial(self) -> str | None:
+        return self._chosen
+
+
 class _CollapsibleCategoryBlock(QWidget):
     """Category header toggles visibility of body; header is not a command."""
 
@@ -478,7 +704,8 @@ class _CommandRowFrame(QFrame):
             fg, fg_dim = "#8a939e", "#6a737e"
             self._hover_bg = "#333a45"
             self._tier = 3
-            f = self.font()
+            f = QFont(self.font())
+            _ensure_explicit_font_size(f, context="_CommandRowFrame tier3 row")
             f.setFamily("Consolas, 'Cascadia Mono', monospace")
             self.setFont(f)
 
@@ -492,7 +719,8 @@ class _CommandRowFrame(QFrame):
             h = QLabel(args_hint)
             h.setStyleSheet(f"color: {fg_dim}; border: none; padding: 0; background: transparent;")
             if tier == 3:
-                hf = h.font()
+                hf = QFont(h.font())
+                _ensure_explicit_font_size(hf, context="_CommandRowFrame tier3 hint")
                 hf.setFamily("Consolas, 'Cascadia Mono', monospace")
                 h.setFont(hf)
             row.addWidget(h, stretch=0)
@@ -601,6 +829,13 @@ def install_gui_console_and_menus(bridge: GuiBridge) -> None:
 _HEARTBEAT_INTERVAL_MS = 4000
 
 
+def _uart_ports_equivalent(port_a: str, port_b: str) -> bool:
+    """True if two serial port names are the same device (e.g. COM3 vs \\\\.\\COM3)."""
+    from transports.uart_handler import _port_key_for_match
+
+    return _port_key_for_match(port_a) == _port_key_for_match(port_b)
+
+
 class SessionWorker(QObject):
     """Owns connection handle; all I/O runs on this object's thread."""
 
@@ -610,9 +845,9 @@ class SessionWorker(QObject):
     command_finished = Signal(str, object)
     connect_failed = Signal(str)
 
-    connect_uart = Signal(str, int)
-    connect_adb = Signal(str)
-    connect_ssh = Signal(str, int, str, str)
+    connect_uart = Signal(str, int, object, str, int)
+    connect_adb = Signal(str, object, str)
+    connect_ssh = Signal(str, int, str, str, object)
     submit_command = Signal(str)
     disconnect_session = Signal()
     fw_shell_request = Signal(str, object)
@@ -623,17 +858,19 @@ class SessionWorker(QObject):
         self._bridge = bridge
         self._cfg: ConnectionConfig | None = None
         self._handle: Any = None
+        self._mcu_handle: Any = None
         self._device_commands: list[dict] = []
         self._detected: dict[str, Any] = {}
+        self._selected_model: dict[str, Any] = {}
         self._command_profile: str = "none"
         self._io_busy = False
         self._heartbeat_timer = QTimer(self)
         self._heartbeat_timer.setInterval(_HEARTBEAT_INTERVAL_MS)
         self._heartbeat_timer.timeout.connect(self._on_heartbeat_tick)
 
-        self.connect_uart.connect(self._on_connect_uart)
-        self.connect_adb.connect(self._on_connect_adb)
-        self.connect_ssh.connect(self._on_connect_ssh)
+        self.connect_uart.connect(self._on_connect_uart)  # type: ignore[arg-type]
+        self.connect_adb.connect(self._on_connect_adb)  # type: ignore[arg-type]
+        self.connect_ssh.connect(self._on_connect_ssh)  # type: ignore[arg-type]
         self.submit_command.connect(self._on_command)
         self.disconnect_session.connect(self._on_disconnect)
         self.fw_shell_request.connect(self._on_fw_shell_request)
@@ -662,16 +899,39 @@ class SessionWorker(QObject):
                     "is_onboarded": self._detected.get("is_onboarded"),
                     "raw_build_info": self._detected.get("raw_build_info") or "",
                     "fw_search_models": fw_search,
+                    "mcu_uart": (
+                        (self._mcu_handle.device_identifier() or "")
+                        if self._mcu_handle and getattr(self._mcu_handle, "is_connected", lambda: False)()
+                        else ""
+                    ),
                 }
             )
         else:
             self.state_changed.emit({"connected": False})
 
-    @Slot(str, int)
-    def _on_connect_uart(self, port: str, baud: int) -> None:
+    @Slot(str, int, object, str, int)
+    def _on_connect_uart(
+        self,
+        port: str,
+        baud: int,
+        selected: object = None,
+        mcu_port: str = "",
+        mcu_baud: int = 0,
+    ) -> None:
+        self._selected_model = selected if isinstance(selected, dict) else {}
         self.append_log.emit("Connecting via UART...\n")
         handler = UARTHandler()
-        ok, msg, settings = handler.connect(port=port, baud_rate=baud)
+        m = self._selected_model
+        plat = (m.get("platform") or "").strip().lower()
+        console_style = "amebapro2" if plat == "amebapro2" else "linux_shell"
+        legacy = m.get("uart_baudrate_legacy")
+        ok, msg, settings = handler.connect(
+            port=port,
+            baud_rate=baud,
+            console_style=console_style,
+            legacy_baud=int(legacy) if legacy is not None else None,
+            device_display_name=str(m.get("display_name") or m.get("name") or "device"),
+        )
         if ok and settings:
             cfg = _make_config(
                 "UART",
@@ -680,21 +940,55 @@ class SessionWorker(QObject):
             )
             self._cfg = cfg
             self._handle = handler
+            self._mcu_handle = None
             self.append_log.emit(f"Connected via UART ({cfg.device_identifier})\n")
+            mcu_p = (mcu_port or "").strip()
+            if mcu_p and int(mcu_baud or 0) > 0:
+                if _uart_ports_equivalent(mcu_p, port):
+                    self._handle.disconnect()
+                    self._handle = None
+                    self._cfg = None
+                    err_m = "MCU UART port cannot be the same as the ISP/main UART port."
+                    self.append_log.emit(f"\n{err_m}\n\n")
+                    self.connect_failed.emit(err_m)
+                    return
+                mcu_h = UARTHandler()
+                m_ok, m_msg, _ = mcu_h.connect(
+                    port=mcu_p,
+                    baud_rate=int(mcu_baud),
+                    console_style="mcu",
+                    device_display_name="MCU",
+                )
+                if not m_ok:
+                    self._handle.disconnect()
+                    self._handle = None
+                    self._cfg = None
+                    em = (m_msg or "MCU UART connection failed.").strip()
+                    self.append_log.emit(f"\n{em}\n\n")
+                    self.connect_failed.emit(em)
+                    return
+                self._mcu_handle = mcu_h
+                self.append_log.emit(
+                    f"MCU UART: {mcu_h.device_identifier() or mcu_p} (Gen5 MCU CLI)\n"
+                )
             self._run_detect_and_load()
             return
         self._cfg = None
         self._handle = None
+        self._mcu_handle = None
         err = (msg or "UART connection failed.").strip()
         self.append_log.emit(f"\nConnection failed: {err}\n\n")
         self.connect_failed.emit(err)
 
-    @Slot(str)
-    def _on_connect_adb(self, password: str) -> None:
+    @Slot(str, object, str)
+    def _on_connect_adb(self, password: str, selected: object = None, adb_serial: str = "") -> None:
+        self._selected_model = selected if isinstance(selected, dict) else {}
         self.append_log.emit("Connecting via ADB...\n")
         handler = ADBHandler()
-        ok, msg, settings = handler.connect(password=password)
+        serial_arg = (adb_serial or "").strip() or None
+        ok, msg, settings = handler.connect(password=password, device_serial=serial_arg)
         if ok and settings:
+            self._mcu_handle = None
             device_id = settings.get("device_serial") or "USB"
             cfg = _make_config("ADB", settings, device_id)
             self._cfg = cfg
@@ -704,12 +998,14 @@ class SessionWorker(QObject):
             return
         self._cfg = None
         self._handle = None
+        self._mcu_handle = None
         err = (msg or "ADB connection failed.").strip()
         self.append_log.emit(f"\nConnection failed: {err}\n\n")
         self.connect_failed.emit(err)
 
-    @Slot(str, int, str, str)
-    def _on_connect_ssh(self, ip: str, port: int, username: str, password: str) -> None:
+    @Slot(str, int, str, str, object)
+    def _on_connect_ssh(self, ip: str, port: int, username: str, password: str, selected: object = None) -> None:
+        self._selected_model = selected if isinstance(selected, dict) else {}
         self.append_log.emit("Connecting via SSH...\n")
         handler = SSHHandler()
         ok, msg, settings = handler.connect(
@@ -719,6 +1015,7 @@ class SessionWorker(QObject):
             password=password,
         )
         if ok and settings:
+            self._mcu_handle = None
             device_id = f"{settings['ip_address']}:{settings['port']}"
             cfg = _make_config("SSH", settings, device_id)
             self._cfg = cfg
@@ -728,6 +1025,7 @@ class SessionWorker(QObject):
             return
         self._cfg = None
         self._handle = None
+        self._mcu_handle = None
         err = (msg or "SSH connection failed.").strip()
         self.append_log.emit(f"\nConnection failed: {err}\n\n")
         self.connect_failed.emit(err)
@@ -735,8 +1033,35 @@ class SessionWorker(QObject):
     def _run_detect_and_load(self) -> None:
         if not self._handle:
             return
-        self.append_log.emit("Detecting device (build_info, kvcmd, device_info)...\n")
-        self._detected = detect_device(self._handle.execute)
+        self.append_log.emit("Detecting device...\n")
+        ct = (self._cfg.type if self._cfg else "") or ""
+        ct_l = ct.strip().lower()
+        if ct_l == "adb":
+            conn = "adb"
+        elif ct_l == "ssh":
+            conn = "ssh"
+        else:
+            conn = "uart"
+        used_legacy = bool((self._cfg.settings or {}).get("used_legacy_uart_baud")) if self._cfg else False
+        try:
+            self._detected, _dc = detect_after_connect(
+                self._handle.execute,
+                conn,
+                selected_model=self._selected_model,
+                used_legacy_uart_baud=used_legacy,
+            )
+        except UnknownDeviceError as e:
+            msg = str(e)
+            self.append_log.emit(f"\n{msg}\n\n")
+            self._do_disconnect(msg)
+            self.connect_failed.emit(msg)
+            return
+        except UnsupportedConnectionError as e:
+            msg = str(e)
+            self.append_log.emit(f"\n{msg}\n\n")
+            self._do_disconnect(msg)
+            self.connect_failed.emit(msg)
+            return
         model_for_commands = self._detected.get("model") or "Device"
         self._command_profile = get_command_profile_for_model_name(self._detected.get("model"))
         self._device_commands = load_device_commands(model_for_commands)
@@ -761,6 +1086,12 @@ class SessionWorker(QObject):
 
     def _do_disconnect(self, log_message: str | None) -> None:
         self._heartbeat_timer.stop()
+        if self._mcu_handle:
+            try:
+                self._mcu_handle.disconnect()
+            except Exception:
+                pass
+        self._mcu_handle = None
         if self._handle:
             try:
                 self._handle.disconnect()
@@ -769,6 +1100,7 @@ class SessionWorker(QObject):
         self._handle = None
         self._cfg = None
         self._detected = {}
+        self._selected_model = {}
         self._device_commands = []
         self._command_profile = "none"
         # Log before state_changed so the UI still routes this line to the session tab.
@@ -789,6 +1121,17 @@ class SessionWorker(QObject):
             alive = getattr(self._handle, "is_connected", lambda: True)()
         if not alive:
             self._do_disconnect("Connection lost — device disconnected. Use Connect to reconnect.")
+            return
+        if self._mcu_handle:
+            mcu_alive_fn = getattr(self._mcu_handle, "transport_heartbeat", None)
+            if callable(mcu_alive_fn) and not mcu_alive_fn():
+                try:
+                    self._mcu_handle.disconnect()
+                except Exception:
+                    pass
+                self._mcu_handle = None
+                self.append_log.emit("MCU UART disconnected (port closed or unplugged).\n")
+                self._emit_state()
 
     @Slot(str)
     def _on_command(self, line: str) -> None:
@@ -804,16 +1147,26 @@ class SessionWorker(QObject):
         try:
             prompt_name = (self._detected.get("model") or "Device").strip() or "Device"
             m_info = get_model_by_name(prompt_name)
+            reg = lookup_registry_by_model_id(prompt_name)
             if m_info:
                 fw_search = list(m_info.get("fw_search_models") or [m_info["name"]])
             else:
                 fw_search = [prompt_name] if self._detected.get("model") else []
-            current_model_dict = {
+            current_model_dict: dict[str, Any] = {
                 "name": prompt_name,
                 "fw_search_models": fw_search,
                 "command_profile": self._command_profile,
                 "is_onboarded": self._detected.get("is_onboarded"),
             }
+            if m_info:
+                current_model_dict.setdefault("display_name", m_info.get("display_name"))
+                current_model_dict.setdefault("codename", m_info.get("codename"))
+                current_model_dict.setdefault("platform", m_info.get("platform"))
+            if reg:
+                current_model_dict["codename"] = reg.get("codename")
+                current_model_dict["platform"] = reg.get("platform")
+                current_model_dict["display_name"] = reg.get("display_name", current_model_dict.get("display_name"))
+            mcu_ex = getattr(self._mcu_handle, "execute", None) if self._mcu_handle else None
             action, message = parse_and_execute(
                 line,
                 current_model_dict,
@@ -827,6 +1180,7 @@ class SessionWorker(QObject):
                 connection_get_tail_logs_command=getattr(self._handle, "get_tail_logs_command", None),
                 connection_handle=self._handle,
                 command_profile=self._command_profile,
+                mcu_connection_execute=mcu_ex if callable(mcu_ex) else None,
             )
             if message:
                 self.append_log.emit(_strip_rich_markup(message) + "\n")
@@ -880,6 +1234,7 @@ class MainWindow(QMainWindow):
         self._status_detail_serial: str = ""
         self._status_update_url_raw: str = ""
         self._device_is_onboarded: bool | None = None
+        self._preferred_adb_serial: str | None = None
 
         self._bridge = GuiBridge()
         self._bridge.set_main_window(self)
@@ -921,7 +1276,7 @@ class MainWindow(QMainWindow):
 
         title = QLabel("ArloShell")
         title_font = QFont()
-        title_font.setPointSize(14)
+        _safe_set_point_size(title_font, 14, context="sidebar title")
         title_font.setBold(True)
         title.setFont(title_font)
         title.setStyleSheet(f"color: {ARLO_ACCENT_COLOR};")
@@ -1070,7 +1425,7 @@ class MainWindow(QMainWindow):
         self._cmd_panel_title = QLabel("Commands")
         title_cmd_font = QFont()
         title_cmd_font.setBold(True)
-        title_cmd_font.setPointSize(11)
+        _safe_set_point_size(title_cmd_font, 11, context="cmd panel title")
         self._cmd_panel_title.setFont(title_cmd_font)
         self._cmd_panel_title.setStyleSheet(
             f"color: {ARLO_ACCENT_COLOR}; border-left: 3px solid {ARLO_ACCENT_COLOR}; "
@@ -1458,7 +1813,7 @@ class MainWindow(QMainWindow):
         title_w = QLabel("ArloShell")
         title_w.setAlignment(Qt.AlignmentFlag.AlignCenter)
         tf = QFont()
-        tf.setPointSize(22)
+        _safe_set_point_size(tf, 22, context="welcome title")
         tf.setBold(True)
         title_w.setFont(tf)
         title_w.setStyleSheet(f"color: {ARLO_ACCENT_COLOR}; border: none; background: transparent;")
@@ -1467,7 +1822,7 @@ class MainWindow(QMainWindow):
         adb_l = QLabel("ADB · SSH · UART")
         adb_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
         adbf = QFont()
-        adbf.setPointSize(9)
+        _safe_set_point_size(adbf, 9, context="welcome adb subtitle")
         adb_l.setFont(adbf)
         adb_l.setStyleSheet("color: #666666; border: none; background: transparent;")
         block_lay.addWidget(adb_l, 0, Qt.AlignmentFlag.AlignHCenter)
@@ -1488,7 +1843,7 @@ class MainWindow(QMainWindow):
         ver_l = QLabel(f"Version {ARLO_SHELL_VERSION}")
         ver_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
         vf = QFont()
-        vf.setPointSize(9)
+        _safe_set_point_size(vf, 9, context="welcome version")
         ver_l.setFont(vf)
         ver_l.setStyleSheet("color: #aeb8c4; border: none; background: transparent;")
         block_lay.addWidget(ver_l, 0, Qt.AlignmentFlag.AlignHCenter)
@@ -1496,7 +1851,7 @@ class MainWindow(QMainWindow):
         connect_l = QLabel("Click Connect to get started")
         connect_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cf = QFont()
-        cf.setPointSize(10)
+        _safe_set_point_size(cf, 10, context="welcome connect hint")
         connect_l.setFont(cf)
         connect_l.setStyleSheet("color: #aeb8c4; border: none; background: transparent;")
         block_lay.addWidget(connect_l, 0, Qt.AlignmentFlag.AlignHCenter)
@@ -1926,7 +2281,7 @@ class MainWindow(QMainWindow):
         el.setContentsMargins(12, 20, 12, 20)
         el.addStretch(1)
         head_font = QFont()
-        head_font.setPointSize(12)
+        _safe_set_point_size(head_font, 12, context="disconnected cmd panel head")
         head_font.setBold(True)
         h1 = QLabel("No device connected")
         h1.setFont(head_font)
@@ -1972,6 +2327,10 @@ class MainWindow(QMainWindow):
             self._device_is_onboarded = raw_ob if isinstance(raw_ob, bool) else None
             self._status_phase = "connected"
             self._prompt_model_name = str(model).strip() or "Device"
+            if str(info.get("conn_type") or "").strip().upper() == "ADB":
+                did = str(info.get("device_id") or "").strip()
+                if did:
+                    self._preferred_adb_serial = did
             self._set_active_session_tab_title(self._prompt_model_name)
             self._sync_status_strip()
             fwp = getattr(self, "_fw_switch_panel", None)
@@ -2244,6 +2603,58 @@ class MainWindow(QMainWindow):
         uart_form.addRow("Port:", w_uart_row)
         uart_form.addRow("Baud:", uart_baud)
 
+        mcu_uart_inner = QWidget()
+        mcu_uart_layout = QVBoxLayout(mcu_uart_inner)
+        mcu_uart_layout.setContentsMargins(0, 0, 0, 0)
+        mcu_hint = QLabel(
+            "Optional: second USB–UART for the Gen5 MCU console (adc, pir, regr, …). "
+            "Must be a different COM port than the ISP UART above."
+        )
+        mcu_hint.setWordWrap(True)
+        mcu_hint.setStyleSheet("color: #aeb8c4; font-size: 11px;")
+        mcu_uart_layout.addWidget(mcu_hint)
+        mcu_form = QFormLayout()
+        mcu_port = QComboBox()
+        mcu_refresh = QPushButton("Refresh")
+        mcu_baud = QSpinBox()
+        mcu_baud.setRange(1200, 921600)
+        mcu_baud.setValue(115200)
+        mcu_row = QHBoxLayout()
+        mcu_row.addWidget(mcu_port)
+        mcu_row.addWidget(mcu_refresh)
+        mcu_w_row = QWidget()
+        mcu_w_row.setLayout(mcu_row)
+        mcu_form.addRow("MCU port:", mcu_w_row)
+        mcu_form.addRow("MCU baud:", mcu_baud)
+        mcu_uart_layout.addLayout(mcu_form)
+
+        def refresh_mcu_ports() -> None:
+            saved = mcu_port.currentData()
+            mcu_port.clear()
+            mcu_port.addItem("(none)", "")
+            for p, desc in list_uart_ports():
+                mcu_port.addItem(f"{desc} ({p})", p)
+            if saved:
+                for i in range(mcu_port.count()):
+                    if mcu_port.itemData(i) == saved:
+                        mcu_port.setCurrentIndex(i)
+                        break
+
+        mcu_refresh.clicked.connect(refresh_mcu_ports)
+        uart_form.addRow(mcu_uart_inner)
+
+        def update_visible(_idx: int) -> None:
+            key = method.currentData()
+            m = device_combo.currentData()
+            is_g5 = isinstance(m, dict) and (
+                str(m.get("command_profile") or "") == "gen5"
+                or str(m.get("platform") or "").lower() == "gen5"
+            )
+            uart_box.setVisible(key == "UART")
+            mcu_uart_inner.setVisible(key == "UART" and is_g5)
+            adb_box.setVisible(key == "ADB")
+            ssh_box.setVisible(key == "SSH")
+
         def refresh_ports() -> None:
             uart_port.clear()
             for p, desc in list_uart_ports():
@@ -2288,9 +2699,23 @@ class MainWindow(QMainWindow):
                 for label, key in opts:
                     method.addItem(label, key)
             ssh_port.setValue(_ssh_default_for_model(m))
+            ap = get_adb_password_for_model(m.get("name"))
+            if ap and not adb_pwd.text().strip():
+                adb_pwd.setText(ap)
 
-        device_combo.currentIndexChanged.connect(lambda _i: _refill_methods())
-        _refill_methods()
+        def _sync_uart_baud_from_model() -> None:
+            m = device_combo.currentData()
+            if isinstance(m, dict) and m.get("default_uart_baud"):
+                uart_baud.setValue(int(m["default_uart_baud"]))
+
+        def _on_device_changed(_i: int) -> None:
+            _refill_methods()
+            _sync_uart_baud_from_model()
+            refresh_mcu_ports()
+            update_visible(method.currentIndex())
+
+        device_combo.currentIndexChanged.connect(_on_device_changed)
+        _on_device_changed(device_combo.currentIndex())
         ssh_user = QLineEdit("root")
         ssh_pwd = QLineEdit()
         ssh_pwd.setEchoMode(QLineEdit.EchoMode.Password)
@@ -2305,12 +2730,6 @@ class MainWindow(QMainWindow):
         stack_layout.addWidget(uart_box)
         stack_layout.addWidget(adb_box)
         stack_layout.addWidget(ssh_box)
-
-        def update_visible(_idx: int) -> None:
-            key = method.currentData()
-            uart_box.setVisible(key == "UART")
-            adb_box.setVisible(key == "ADB")
-            ssh_box.setVisible(key == "SSH")
 
         method.currentIndexChanged.connect(update_visible)
         update_visible(method.currentIndex())
@@ -2332,6 +2751,9 @@ class MainWindow(QMainWindow):
             return
 
         key = method.currentData()
+        m_sel = device_combo.currentData()
+        if not isinstance(m_sel, dict):
+            m_sel = {}
         if key == "UART":
             if uart_port.count() == 0:
                 QMessageBox.warning(self, "UART", "No serial ports found.")
@@ -2339,10 +2761,46 @@ class MainWindow(QMainWindow):
             self._begin_connection_log_tab()
             port = uart_port.currentData()
             baud = uart_baud.value()
-            self._worker.connect_uart.emit(port, baud)
+            mcu_raw = mcu_port.currentData()
+            mcu_p = str(mcu_raw).strip() if mcu_raw else ""
+            mcu_br = int(mcu_baud.value()) if mcu_p else 0
+            if mcu_p and _uart_ports_equivalent(mcu_p, str(port)):
+                QMessageBox.warning(
+                    self,
+                    "UART",
+                    "MCU UART cannot use the same COM port as the ISP/main UART.",
+                )
+                return
+            self._worker.connect_uart.emit(port, baud, m_sel, mcu_p, mcu_br)
         elif key == "ADB":
+            try:
+                ensure_adb_allowed_for_selection(m_sel)
+            except UnsupportedConnectionError as e:
+                QMessageBox.critical(self, "ADB not supported", str(e))
+                return
+            serials = ADBHandler.list_attached_usb_serials()
+            if not serials:
+                QMessageBox.warning(
+                    self,
+                    "ADB",
+                    "No ADB device found. Connect the camera via USB and ensure USB debugging is enabled.",
+                )
+                return
+            adb_serial = ""
+            if len(serials) > 1:
+                pref = (self._preferred_adb_serial or "").strip()
+                if pref and pref in serials:
+                    adb_serial = pref
+                else:
+                    infos = ADBHandler.gather_picker_device_infos(serials, per_serial_timeout=2.0)
+                    pick = _AdbDevicePickerDialog(self, infos)
+                    if pick.exec() != QDialog.DialogCode.Accepted:
+                        return
+                    adb_serial = (pick.selected_serial() or "").strip()
+                    if not adb_serial:
+                        return
             self._begin_connection_log_tab()
-            self._worker.connect_adb.emit(adb_pwd.text())
+            self._worker.connect_adb.emit(adb_pwd.text(), m_sel, adb_serial)
         elif key == "SSH":
             ip = ssh_ip.text().strip()
             if not ip:
@@ -2354,6 +2812,7 @@ class MainWindow(QMainWindow):
                 ssh_port.value(),
                 ssh_user.text().strip() or "root",
                 ssh_pwd.text(),
+                m_sel,
             )
         else:
             QMessageBox.warning(self, "Connect", "Select a connection method.")
