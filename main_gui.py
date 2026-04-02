@@ -1,6 +1,7 @@
 """ArloShell — graphical UI (PySide6)."""
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -23,11 +24,34 @@ def main() -> None:
         except Exception:
             pass
 
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import QEvent, QObject, Qt
+    from PySide6.QtWidgets import QApplication, QPushButton
 
+    from interface.app_styles import global_application_stylesheet, install_stylesheet_debug
     from interface.gui_window import MainWindow, _load_icon
 
-    app = QApplication(sys.argv)
+    if os.environ.get("ARLO_SHELL_DEBUG_STYLESHEET", "").strip() in ("1", "true", "yes"):
+        install_stylesheet_debug()
+
+    class ArloShellApplication(QApplication):
+        """Apply pointing-hand cursor to all QPushButtons (Qt QSS has no reliable cursor: pointer)."""
+
+        def notify(self, receiver: QObject, event: QEvent) -> bool:  # type: ignore[override]
+            if isinstance(receiver, QPushButton):
+                et = event.type()
+                if et in (
+                    QEvent.Type.Show,
+                    QEvent.Type.EnabledChange,
+                    QEvent.Type.Hide,
+                ):
+                    if receiver.isEnabled():
+                        receiver.setCursor(Qt.CursorShape.PointingHandCursor)
+                    else:
+                        receiver.setCursor(Qt.CursorShape.ForbiddenCursor)
+            return super().notify(receiver, event)
+
+    app = ArloShellApplication(sys.argv)
+    app.setStyleSheet(global_application_stylesheet())
     app.setApplicationName("ArloShell")
     app.setOrganizationName("Arlo")
     icon_path = _app_icon_path()

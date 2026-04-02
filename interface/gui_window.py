@@ -104,7 +104,7 @@ def _env_stage_badge_qss(env_raw: str) -> str:
         bg, fg = "#455a64", "#eceff1"
     return (
         f"QLabel {{ background-color: {bg}; color: {fg}; border-radius: 10px; "
-        "padding: 4px 12px; font-size: 12px; font-weight: 700; }}"
+        "padding: 4px 12px; font-size: 12px; font-weight: 700; }"
     )
 
 
@@ -316,31 +316,6 @@ def _tool_subgroup_for_system_name(name: str) -> str | None:
 
 _TOOL_SUBGROUP_ORDER = ("FIRMWARE", "LOGS", "CONFIG", "SESSION")
 
-def _header_bar_pushbutton_qss() -> str:
-    a = ARLO_ACCENT_COLOR
-    return f"""
-    QPushButton {{
-        background: transparent;
-        border: 1px solid #2a2a2a;
-        border-radius: 4px;
-        color: #cccccc;
-        padding: 4px 14px;
-    }}
-    QPushButton:hover {{
-        background: #1e1e1e;
-        border-color: {a};
-        color: #ffffff;
-    }}
-    QPushButton:pressed {{
-        background: {a};
-        color: #ffffff;
-    }}
-    QPushButton:disabled {{
-        color: #444444;
-        border-color: #1a1a1a;
-    }}
-    """
-
 
 class _CollapsibleCategoryBlock(QWidget):
     """Category header toggles visibility of body; header is not a command."""
@@ -360,7 +335,6 @@ class _CollapsibleCategoryBlock(QWidget):
                 padding: 10px 4px 4px 8px;
                 color: #7a8494;
                 font-size: 10px;
-                letter-spacing: 0.14em;
                 font-weight: 600;
             }
             QPushButton:hover { color: #9aa3b2; }
@@ -422,7 +396,6 @@ class _AdvancedTierBlock(QWidget):
                 padding: 12px 4px 6px 8px;
                 color: #6d7685;
                 font-size: 10px;
-                letter-spacing: 0.14em;
                 font-weight: 600;
             }
             QPushButton:hover { color: #8b95a5; }
@@ -668,6 +641,12 @@ class SessionWorker(QObject):
     def _emit_state(self) -> None:
         if self._cfg and self._handle:
             name = (self._detected.get("model") or "Device").strip() or "Device"
+            m_info = get_model_by_name(name)
+            fw_search = (
+                list(m_info.get("fw_search_models") or [m_info["name"]])
+                if m_info
+                else [name]
+            )
             self.state_changed.emit(
                 {
                     "connected": True,
@@ -682,6 +661,7 @@ class SessionWorker(QObject):
                     "command_profile": self._command_profile,
                     "is_onboarded": self._detected.get("is_onboarded"),
                     "raw_build_info": self._detected.get("raw_build_info") or "",
+                    "fw_search_models": fw_search,
                 }
             )
         else:
@@ -920,7 +900,6 @@ class MainWindow(QMainWindow):
 
         self._fw_shell_pending: Callable[[bool, str], None] | None = None
         self._fw_wizard = None
-        self._stress_test_session_active = False
 
         self._command_profile: str = "none"
         self._conn_type: str = ""
@@ -1038,17 +1017,13 @@ class MainWindow(QMainWindow):
 
         btn_row = QHBoxLayout()
         self._btn_connect = QPushButton("Connect…")
-        self._btn_connect.setStyleSheet(_header_bar_pushbutton_qss())
         self._btn_connect.clicked.connect(self._open_connect_dialog)
         self._btn_disconnect = QPushButton("Disconnect")
-        self._btn_disconnect.setStyleSheet(_header_bar_pushbutton_qss())
         self._btn_disconnect.clicked.connect(self._disconnect)
         self._btn_disconnect.setEnabled(False)
         self._btn_help = QPushButton("Help")
-        self._btn_help.setStyleSheet(_header_bar_pushbutton_qss())
         self._btn_help.clicked.connect(self._run_help)
         self._btn_clear = QPushButton("Clear log")
-        self._btn_clear.setStyleSheet(_header_bar_pushbutton_qss())
         self._btn_clear.clicked.connect(self._clear_log)
         btn_row.addWidget(self._btn_connect)
         btn_row.addWidget(self._btn_disconnect)
@@ -1227,7 +1202,7 @@ class MainWindow(QMainWindow):
 
         self._setup_menu_bar()
         self._init_fw_folder_switcher_dock()
-        self._init_stress_test_dock()
+        self._init_local_server_dock()
 
         self._set_command_list_disconnected()
         self._prompt_model_name = "Device"
@@ -1243,6 +1218,7 @@ class MainWindow(QMainWindow):
         menu_view.addAction(act_session_log)
 
         menu_tools = menubar.addMenu("&Tools")
+        self._menu_tools = menu_tools
         self._action_fw_wizard = QAction("FW &Wizard…", self)
         self._action_fw_wizard.setStatusTip(
             "Open the FW Wizard (Artifactory, local server, update URL). "
@@ -1251,14 +1227,6 @@ class MainWindow(QMainWindow):
         self._action_fw_wizard.triggered.connect(self._menu_fw_wizard)
         self._action_fw_wizard.setEnabled(False)
         menu_tools.addAction(self._action_fw_wizard)
-        self._action_stress_test_panel = QAction("Stress &test panel", self)
-        self._action_stress_test_panel.setEnabled(False)
-        self._action_stress_test_panel.setCheckable(True)
-        self._action_stress_test_panel.setStatusTip(
-            "Show the FW stress-test panel (after starting a stress session from the FW Wizard)."
-        )
-        self._action_stress_test_panel.toggled.connect(self._on_stress_test_panel_toggled)
-        menu_tools.addAction(self._action_stress_test_panel)
 
         menu_help = menubar.addMenu("&Help")
         act_ref = QAction("Command &reference", self)
@@ -1298,93 +1266,56 @@ class MainWindow(QMainWindow):
             mv.addSeparator()
             mv.addAction(act)
 
-    def _init_stress_test_dock(self) -> None:
-        from interface.stress_test_panel import StressTestPanel
+    def _init_local_server_dock(self) -> None:
+        from interface.local_server_tool import LocalServerTool
 
-        self._stress_test_dock = QDockWidget("Stress test", self)
-        self._stress_test_dock.setObjectName("StressTestDock")
-        self._stress_test_panel = StressTestPanel(self)
-        self._stress_test_panel.set_shell_async(self._fw_shell_async)
-        self._stress_test_dock.setWidget(self._stress_test_panel)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._stress_test_dock)
-        self._stress_test_dock.hide()
-        self._stress_test_dock.visibilityChanged.connect(self._on_stress_test_dock_visibility)
-        self._stress_test_panel.test_ended.connect(self._on_stress_test_panel_ended)
+        self._local_server_dock = QDockWidget("Local Server", self)
+        self._local_server_dock.setObjectName("LocalServerDock")
+        self._local_server_panel = LocalServerTool(self)
+        self._local_server_panel.set_shell_async(self._fw_shell_async)
+        self._local_server_dock.setWidget(self._local_server_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._local_server_dock)
+        self._local_server_dock.hide()
+        self._local_server_dock.visibilityChanged.connect(self._on_local_server_dock_visibility)
+
+        self._action_local_server = QAction("Local &Server", self)
+        self._action_local_server.setCheckable(True)
+        self._action_local_server.setStatusTip(
+            "Firmware HTTP server status, folders, and switching update_url on the camera."
+        )
+        self._action_local_server.toggled.connect(self._local_server_dock.setVisible)
+        mt = getattr(self, "_menu_tools", None)
+        if mt is not None:
+            mt.addAction(self._action_local_server)
 
     @Slot(bool)
-    def _on_stress_test_dock_visibility(self, visible: bool) -> None:
-        act = getattr(self, "_action_stress_test_panel", None)
+    def _on_local_server_dock_visibility(self, visible: bool) -> None:
+        act = getattr(self, "_action_local_server", None)
         if act is not None and act.isCheckable():
             act.blockSignals(True)
             act.setChecked(visible)
             act.blockSignals(False)
-
-    @Slot(bool)
-    def _on_stress_test_panel_toggled(self, checked: bool) -> None:
-        if not self._stress_test_session_active:
-            act = getattr(self, "_action_stress_test_panel", None)
-            if act is not None:
-                act.blockSignals(True)
-                act.setChecked(False)
-                act.blockSignals(False)
-            QMessageBox.information(
-                self,
-                "Stress test",
-                "No active stress test. In the FW Wizard, on Choose mode pick Stress test (two firmwares), finish the flow, "
-                "then click “Open stress test panel”.",
-            )
-            return
-        self._stress_test_dock.setVisible(checked)
+        if visible:
+            panel = getattr(self, "_local_server_panel", None)
+            if panel is not None:
+                panel.refresh_if_visible()
 
     @Slot()
-    def _on_stress_test_panel_ended(self) -> None:
-        self._stress_test_session_active = False
-        act = getattr(self, "_action_stress_test_panel", None)
-        if act is not None:
-            act.setEnabled(False)
-            act.setChecked(False)
-        fwp = getattr(self, "_fw_switch_panel", None)
-        if fwp is not None:
-            fwp.set_stress_test_blocks(False)
-
-    @Slot(dict)
-    def _on_stress_test_ready(self, payload: dict) -> None:
-        from interface.stress_test_panel import StressTestConfig
-
-        cfg = StressTestConfig(
-            fw_root=str(payload.get("fw_root") or ""),
-            folder_a=str(payload.get("folder_a") or ""),
-            folder_b=str(payload.get("folder_b") or ""),
-            version_label_a=str(payload.get("version_a") or "—"),
-            version_label_b=str(payload.get("version_b") or "—"),
-        )
-        self._stress_test_session_active = True
-        try:
-            self._stress_test_panel.begin_test(
-                cfg,
-                from_wizard_initial=True,
-                gui_connected_now=bool(self._device_connected),
-            )
-        except Exception as ex:
-            self._stress_test_session_active = False
-            QMessageBox.warning(
-                self,
-                "Stress test",
-                f"Could not start the stress test session: {ex}",
-            )
+    def _on_open_local_server_tool(self) -> None:
+        dock = getattr(self, "_local_server_dock", None)
+        panel = getattr(self, "_local_server_panel", None)
+        act = getattr(self, "_action_local_server", None)
+        if dock is None:
             return
-        act = getattr(self, "_action_stress_test_panel", None)
         if act is not None:
-            act.setEnabled(True)
             act.blockSignals(True)
             act.setChecked(True)
             act.blockSignals(False)
-        fwp = getattr(self, "_fw_switch_panel", None)
-        if fwp is not None:
-            fwp.set_stress_test_blocks(True)
-        self._stress_test_dock.show()
-        self._stress_test_dock.setVisible(True)
-        self._stress_test_dock.raise_()
+        dock.show()
+        dock.setVisible(True)
+        dock.raise_()
+        if panel is not None:
+            panel.refresh_if_visible()
         self.raise_()
         self.activateWindow()
 
@@ -1424,7 +1355,7 @@ class MainWindow(QMainWindow):
         wiz.server_started.connect(self._on_fw_wizard_server_started)
         wiz.update_sent.connect(self._on_fw_wizard_update_sent)
         wiz.wizard_closed.connect(self._on_fw_wizard_closed)
-        wiz.stress_test_ready.connect(self._on_stress_test_ready)
+        wiz.open_local_server_tool.connect(self._on_open_local_server_tool)
         self._fw_wizard = wiz
         wiz.show()
 
@@ -2046,9 +1977,9 @@ class MainWindow(QMainWindow):
             fwp = getattr(self, "_fw_switch_panel", None)
             if fwp is not None:
                 fwp.apply_state(info)
-            stp = getattr(self, "_stress_test_panel", None)
-            if stp is not None:
-                stp.apply_state(info)
+            lsp = getattr(self, "_local_server_panel", None)
+            if lsp is not None:
+                lsp.apply_state(info)
             wiz = getattr(self, "_fw_wizard", None)
             if wiz is not None:
                 wiz.apply_shell_connection(True)
@@ -2071,9 +2002,9 @@ class MainWindow(QMainWindow):
             fwp = getattr(self, "_fw_switch_panel", None)
             if fwp is not None:
                 fwp.apply_state({"connected": False})
-            stp = getattr(self, "_stress_test_panel", None)
-            if stp is not None:
-                stp.apply_state({"connected": False})
+            lsp = getattr(self, "_local_server_panel", None)
+            if lsp is not None:
+                lsp.apply_state({"connected": False})
             wiz = getattr(self, "_fw_wizard", None)
             if wiz is not None:
                 wiz.apply_shell_connection(False)

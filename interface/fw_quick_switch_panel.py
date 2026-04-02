@@ -1,4 +1,4 @@
-"""Dockable panel: switch camera update_url between local firmware folders (stress testing)."""
+"""Dockable panel: switch camera update_url between local firmware folders."""
 from __future__ import annotations
 
 from functools import partial
@@ -24,11 +24,13 @@ from core.fw_setup_service import (
 )
 from core.local_server import check_server_status, firmware_server_listener_summary, stop_http_server
 
+from interface.app_styles import ARLO_ACCENT, set_arlo_pushbutton_variant
+
 ShellAsyncFn = Callable[[str, list[str], Callable[[bool, str], None]], None]
 
-_ACCENT = "#00897B"
-_MUTED = "#9e9e9e"
+_MUTED = "#8b95a5"
 _OK = "#4caf7d"
+_SECTION = "#7a8494"
 
 
 class FwQuickSwitchPanel(QWidget):
@@ -41,7 +43,6 @@ class FwQuickSwitchPanel(QWidget):
         self._update_url_raw = ""
         self._onboarded: bool | None = None
         self._fw_root = default_fw_server_root()
-        self._stress_blocks_switch = False
         self._rows_host = QWidget()
         self._rows_layout = QVBoxLayout(self._rows_host)
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
@@ -51,8 +52,8 @@ class FwQuickSwitchPanel(QWidget):
         outer.setContentsMargins(10, 10, 10, 10)
         outer.setSpacing(10)
 
-        title = QLabel("Firmware folders")
-        title.setStyleSheet(f"color: {_ACCENT}; font-size: 13px; font-weight: bold;")
+        title = QLabel("FIRMWARE FOLDERS")
+        title.setStyleSheet(f"color: {_SECTION}; font-size: 12px; font-weight: 500;")
         outer.addWidget(title)
 
         hint = QLabel(
@@ -109,10 +110,6 @@ class FwQuickSwitchPanel(QWidget):
     def set_shell_async(self, fn: ShellAsyncFn) -> None:
         self._shell_async = fn
 
-    def set_stress_test_blocks(self, block: bool) -> None:
-        self._stress_blocks_switch = bool(block)
-        self._rebuild_rows()
-
     def apply_state(self, info: dict[str, Any]) -> None:
         self._connected = bool(info.get("connected"))
         self._profile_ok = (info.get("command_profile") or "") == "e3_wired"
@@ -140,17 +137,6 @@ class FwQuickSwitchPanel(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
-        if self._stress_blocks_switch:
-            lab = QLabel(
-                "Folder switching is disabled while a FW stress test is active. "
-                "Use the Stress test panel to change firmware URLs between cycles."
-            )
-            lab.setWordWrap(True)
-            lab.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
-            self._rows_layout.addWidget(lab)
-            self._rows_layout.addStretch(1)
-            return
-
         if not self._connected or not self._profile_ok:
             lab = QLabel("Connect over E3 wired to use folder switching.")
             lab.setWordWrap(True)
@@ -174,20 +160,23 @@ class FwQuickSwitchPanel(QWidget):
         else:
             for name, ver in pairs:
                 row = QFrame()
+                border = f"2px solid {ARLO_ACCENT}" if name == active else "1px solid rgba(255,255,255,0.12)"
                 row.setStyleSheet(
-                    "QFrame { background-color: #161a20; border: 1px solid #2a313a; border-radius: 6px; }"
+                    f"QFrame {{ background-color: #161a20; border: {border}; border-radius: 11px; }}"
                 )
                 rl = QVBoxLayout(row)
-                rl.setContentsMargins(8, 6, 8, 6)
+                rl.setContentsMargins(14, 12, 14, 12)
+                rl.setSpacing(8)
                 top = QHBoxLayout()
                 nm = QLabel(name)
-                bold = "font-weight: bold; color: #e8eef4;" if name == active else "color: #c5ced9;"
-                nm.setStyleSheet(f"font-size: 12px; {bold}")
+                nm.setStyleSheet(
+                    "font-size: 15px; font-weight: 500; color: #e8eef4;"
+                    if name == active
+                    else "font-size: 15px; font-weight: 500; color: #c5ced9;"
+                )
                 top.addWidget(nm, 1)
                 btn = QPushButton("Switch")
-                btn.setStyleSheet(
-                    f"QPushButton {{ background-color: {_ACCENT}; color: white; padding: 4px 12px; font-size: 11px; }}"
-                )
+                set_arlo_pushbutton_variant(btn, variant="primary", compact=True)
                 btn.clicked.connect(partial(self._on_switch_folder, name))
                 top.addWidget(btn)
                 rl.addLayout(top)
@@ -195,8 +184,11 @@ class FwQuickSwitchPanel(QWidget):
                 vl.setStyleSheet(f"color: {_MUTED}; font-size: 11px;")
                 rl.addWidget(vl)
                 if name == active:
-                    al = QLabel("● Active (matches update URL)")
-                    al.setStyleSheet(f"color: {_OK}; font-size: 10px;")
+                    al = QLabel("Active")
+                    al.setStyleSheet(
+                        "QLabel { background-color: rgba(0, 137, 123, 0.28); color: #80cbc4; "
+                        "border-radius: 10px; padding: 4px 10px; font-size: 10px; font-weight: 600; }"
+                    )
                     rl.addWidget(al)
                 self._rows_layout.addWidget(row)
 

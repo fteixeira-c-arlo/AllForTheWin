@@ -127,6 +127,131 @@ def sanitize_server_folder_name(name: str) -> str | None:
     return s
 
 
+_VMC_BIN_SUBDIR_RE = re.compile(r"^VMC\d{4}$", re.I)
+
+
+def dir_has_enc_files(path: str) -> bool:
+    """True if directory tree contains at least one .enc file."""
+    if not os.path.isdir(path):
+        return False
+    try:
+        for _root, _dirs, files in os.walk(path):
+            if any(f.lower().endswith(".enc") for f in files):
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def vmc_binaries_folder_name_for_device(model_name: str) -> str:
+    """Local server binaries/ subfolder name for the connected device (VMC#### when known)."""
+    n = (model_name or "").strip().upper()
+    if re.match(r"^VMC\d{4}$", n):
+        return n
+    return (model_name or "Camera").strip() or "Camera"
+
+
+def should_filter_firmware_folders_by_camera(
+    *,
+    connected: bool,
+    profile_e3_wired: bool,
+    model_name: str,
+) -> bool:
+    """When True, Local Server shows only folders that match this camera's model."""
+    if not connected or not profile_e3_wired:
+        return False
+    n = (model_name or "").strip().upper()
+    return bool(re.match(r"^VMC\d{4}$", n))
+
+
+def _folder_haystack_for_model_detection(folder_abs: str) -> str:
+    """Concatenate updaterules JSON text and archive filenames for substring model checks."""
+    parts: list[str] = []
+    rules = os.path.join(folder_abs, "updaterules")
+    if os.path.isdir(rules):
+        try:
+            for fn in sorted(os.listdir(rules)):
+                if not fn.lower().endswith(".json"):
+                    continue
+                fp = os.path.join(rules, fn)
+                if not os.path.isfile(fp):
+                    continue
+                try:
+                    with open(fp, encoding="utf-8") as f:
+                        parts.append(f.read())
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    arch = os.path.join(folder_abs, "archive")
+    if os.path.isdir(arch):
+        try:
+            parts.extend(os.listdir(arch))
+        except OSError:
+            pass
+    return "\n".join(parts).upper()
+
+
+def _needles_match_haystack(needles: set[str], haystack_upper: str) -> bool:
+    for n in needles:
+        t = (n or "").strip().upper()
+        if len(t) < 4:
+            continue
+        if t in haystack_upper:
+            return True
+    return False
+
+
+def folder_matches_connected_camera(
+    server_folder_abs: str,
+    camera_vmc: str,
+    *,
+    search_aliases: list[str] | None = None,
+) -> bool:
+    """
+    True if this server env folder contains firmware usable for the connected camera.
+
+    Uses binaries/VMC####/.enc first, then other VMC#### trees, then updaterules/archive text
+    (includes codenames from search_aliases, e.g. Octopus for VMC3073 family).
+    """
+    folder_abs = os.path.abspath(server_folder_abs)
+    vmc_u = (camera_vmc or "").strip().upper()
+    if not re.match(r"^VMC\d{4}$", vmc_u):
+        return True
+
+    needles: set[str] = {vmc_u}
+    for a in search_aliases or []:
+        s = (a or "").strip().upper()
+        if s:
+            needles.add(s)
+
+    if not folder_has_firmware_artifacts(folder_abs):
+        return False
+
+    bin_target = os.path.join(folder_abs, "binaries", vmc_u)
+    if os.path.isdir(bin_target) and dir_has_enc_files(bin_target):
+        return True
+
+    bin_root = os.path.join(folder_abs, "binaries")
+    vmc_subdirs_with_enc: set[str] = set()
+    if os.path.isdir(bin_root):
+        try:
+            for name in os.listdir(bin_root):
+                if not _VMC_BIN_SUBDIR_RE.match(name or ""):
+                    continue
+                p = os.path.join(bin_root, name)
+                if os.path.isdir(p) and dir_has_enc_files(p):
+                    vmc_subdirs_with_enc.add(name.upper())
+        except OSError:
+            pass
+
+    if vmc_subdirs_with_enc:
+        return vmc_u in vmc_subdirs_with_enc
+
+    hay = _folder_haystack_for_model_detection(folder_abs)
+    return _needles_match_haystack(needles, hay)
+
+
 def folder_has_firmware_artifacts(server_folder_dir: str) -> bool:
     """True if this server folder already has firmware files (overwrite warning)."""
     if not os.path.isdir(server_folder_dir):
@@ -548,6 +673,29 @@ def firmware_folder_version_label(folder_path: str) -> str:
         if best:
             return best
     return "—"
+
+
+def firmware_folder_model_label(folder_path: str) -> str:
+    """VMC / product folder name under binaries/ that contains .enc files (same logic as Local Server cards)."""
+    bin_root = os.path.join(folder_path, "binaries")
+    if not os.path.isdir(bin_root):
+        return "—"
+    try:
+        subdirs = sorted(
+            (n for n in os.listdir(bin_root) if os.path.isdir(os.path.join(bin_root, n))),
+            key=str.lower,
+        )
+    except OSError:
+        return "—"
+    for name in subdirs:
+        p = os.path.join(bin_root, name)
+        try:
+            for _r, _d, files in os.walk(p):
+                if any(f.lower().endswith(".enc") for f in files):
+                    return name
+        except OSError:
+            continue
+    return subdirs[0] if subdirs else "—"
 
 
 def scan_firmware_folders_with_versions(server_root: str, vmc_model: str) -> list[tuple[str, str]]:
