@@ -1074,7 +1074,7 @@ class MainWindow(QMainWindow):
         self._action_fw_setup = QAction("FW &Setup…", self)
         self._action_fw_setup.setStatusTip(
             "Open the firmware setup wizard (Artifactory, local server, update URL). "
-            "You can still type fw_setup in the command line for the text-based flow."
+            "The fw_setup command runs the same steps as text prompts in the session log."
         )
         self._action_fw_setup.triggered.connect(self._menu_fw_setup)
         self._action_fw_setup.setEnabled(False)
@@ -1168,7 +1168,7 @@ class MainWindow(QMainWindow):
             "Commands are loaded after the device is detected.</p>"
             "<p><b>Tools → FW Setup</b> opens the firmware wizard "
             "(Artifactory, local server, camera <code>update_url</code>). "
-            "The <code>fw_setup</code> command still runs the text-based flow in the session log.</p>",
+            "Typing <code>fw_setup</code> in the command line runs the same flow with text prompts.</p>",
         )
 
     def _build_e3_reference_panel(self) -> QWidget:

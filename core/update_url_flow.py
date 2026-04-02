@@ -1,6 +1,8 @@
 """Automated update_url flow: collect inputs, Artifactory download, local server, send command to camera."""
+from __future__ import annotations
+
 import os
-from typing import Callable
+from typing import Any, Callable, NamedTuple
 
 from core.artifactory_client import ARTIFACTORY_REPO, list_available_firmware
 from core.fw_setup_service import (
@@ -45,22 +47,15 @@ def _progress_callback(name: str, index: int, total: int) -> None:
     console.print(f"  [dim]\u2713[/] [dim]{name}[/] ({index}/{total})")
 
 
-def run_update_url_flow(
-    connection_execute: Callable[[str, list[str]], tuple[bool, str]],
-    model: dict,
-) -> str | None:
-    """
-    Run the full fw_setup flow: prompts, list FW from Artifactory, download, server start, send command.
-    model: dict with "name", optional "fw_search_models" (list of models for Artifactory search, e.g. 2K + FHD).
-    Returns None on success, or an error message string.
-    """
-    model_name = (model or {}).get("name") or "Camera"
-    fw_search_models = (model or {}).get("fw_search_models") or [model_name]
+class _ArtifactoryCreds(NamedTuple):
+    base_url: str
+    token: str
+    username: str | None
 
-    console.print("\n[bold cyan]\u21C4 Firmware Setup (Artifactory + Local Server)[/]")
-    console.print("This will download FW from [bold]camera-fw-generic-release-local[/], set up a local server, and configure the camera.\n")
 
-    # --- Config file: load saved credentials or offer to save ---
+def _cli_step_credentials(model: dict) -> _ArtifactoryCreds | str:
+    """Load or prompt Artifactory credentials. Returns creds or error / cancel token string."""
+    _ = model
     config = None
     try:
         config = load_config_file()
@@ -71,7 +66,6 @@ def run_update_url_flow(
         config = None
 
     if config:
-        # Use saved credentials
         art = config["artifactory"]
         username = (art.get("username") or "").strip() or None
         try:
@@ -98,49 +92,58 @@ def run_update_url_flow(
         if not base_url or "artifactory.example.com" in base_url:
             base_url = DEFAULT_ARTIFACTORY_URL
         console.print(f"[dim]Artifactory: {base_url}[/]\n")
-    else:
-        # No config: optionally offer to save after we have credentials
-        console.print("Please provide the following information:\n")
-        save_credentials = prompt_save_credentials_to_config(get_config_path())
-        if save_credentials:
-            console.print("[dim]Credentials will be saved after you enter them.[/]\n")
+        if config and token:
+            try:
+                update_last_used()
+            except Exception:
+                pass
+        return _ArtifactoryCreds(base_url=base_url, token=token, username=username)
 
-        # Artifactory base URL
-        base_url = default_artifactory_url()
-        if not base_url or "artifactory.example.com" in base_url:
-            console.print(f"[dim]Default: {DEFAULT_ARTIFACTORY_URL}. Override with ARTIFACTORY_BASE_URL or enter below.[/]\n")
-            base_url = prompt_artifactory_base_url(base_url or DEFAULT_ARTIFACTORY_URL)
-            if not base_url:
-                return "cancelled"
-        else:
-            console.print(f"[dim]Artifactory: {base_url}[/]")
+    console.print("Please provide the following information:\n")
+    save_credentials = prompt_save_credentials_to_config(get_config_path())
+    if save_credentials:
+        console.print("[dim]Credentials will be saved after you enter them.[/]\n")
 
-        token = prompt_artifactory_token()
-        if not token:
+    base_url = default_artifactory_url()
+    if not base_url or "artifactory.example.com" in base_url:
+        console.print(f"[dim]Default: {DEFAULT_ARTIFACTORY_URL}. Override with ARTIFACTORY_BASE_URL or enter below.[/]\n")
+        base_url = prompt_artifactory_base_url(base_url or DEFAULT_ARTIFACTORY_URL)
+        if not base_url:
             return "cancelled"
-        username = prompt_artifactory_username()
+    else:
+        console.print(f"[dim]Artifactory: {base_url}[/]")
 
-        if save_credentials:
-            save_config_file(username or "", token, base_url, ARTIFACTORY_REPO)
-            console.print(f"\n[bold green]\u2713[/] [green]Configuration saved to {get_config_path()}[/]")
-            console.print("[bold green]\u2713[/] [green]Credentials will be loaded automatically next time.[/]\n")
-        else:
-            console.print("\n[dim]No problem. You'll need to enter credentials manually next time.[/]\n")
+    token = prompt_artifactory_token()
+    if not token:
+        return "cancelled"
+    username = prompt_artifactory_username()
 
-    # Update last_used when using saved config successfully (optional, non-blocking)
-    if config and token:
-        try:
-            update_last_used()
-        except Exception:
-            pass
+    if save_credentials:
+        save_config_file(username or "", token, base_url, ARTIFACTORY_REPO)
+        console.print(f"\n[bold green]\u2713[/] [green]Configuration saved to {get_config_path()}[/]")
+        console.print("[bold green]\u2713[/] [green]Credentials will be loaded automatically next time.[/]\n")
+    else:
+        console.print("\n[dim]No problem. You'll need to enter credentials manually next time.[/]\n")
 
+    return _ArtifactoryCreds(base_url=base_url, token=token, username=username)
+
+
+def _cli_step_pick_version_and_list(
+    creds: _ArtifactoryCreds,
+    fw_search_models: list[str],
+) -> tuple[str, str | None] | str:
+    """
+    Prompt version filter, list Artifactory, prompt firmware selection.
+    Returns (version, selected_filename) or error / cancel string.
+    """
     version_filter = prompt_firmware_version_filter()
     if not version_filter:
         return "cancelled"
 
-    # Search across all models in group (2K + FHD) when fw_search_models has multiple entries
     console.print()
-    ok, available, err = list_available_firmware(base_url, token, version_filter, fw_search_models, username)
+    ok, available, err = list_available_firmware(
+        creds.base_url, creds.token, version_filter, fw_search_models, creds.username
+    )
     if not ok:
         show_error(err or "Failed to list firmware.")
         return err or "Failed to list firmware."
@@ -150,7 +153,9 @@ def run_update_url_flow(
         console.print()
     if not available:
         console.print("[yellow]No firmware found matching your version.[/]")
-        console.print("[dim]Using your input as version for mock download. Configure ARTIFACTORY_BASE_URL for real Artifactory.[/]\n")
+        console.print(
+            "[dim]Using your input as version for mock download. Configure ARTIFACTORY_BASE_URL for real Artifactory.[/]\n"
+        )
         version = version_filter
     else:
         flat_fw = flatten_firmware_archives(available)
@@ -170,33 +175,36 @@ def run_update_url_flow(
                 return "cancelled"
             version, selected_filename = selected
 
-    download_model = compute_download_model(version, selected_filename, model_name)
+    return (version, selected_filename)
 
-    # Select folder for update URL from folders in local_server (e.g. C:\FxTest\fw_server\local_server)
-    root = default_fw_server_root()
-    env = prompt_select_env_folder(root)
-    if not env:
-        if not os.path.isdir(root):
-            show_error(f"FW server root not found: {root}")
-        else:
-            try:
-                subdirs = [d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)) and not d.startswith(".")]
-                if not subdirs:
-                    show_error(f"No folders found in {root}. Create at least one (e.g. qa, dev, prod) and try again.")
-            except OSError:
-                pass
-        return "cancelled"
-    env_lower = env.lower()
 
-    # Summary
+def _cli_step_pick_env_and_confirm(
+    model_name: str,
+    download_model: str,
+    version: str,
+    env_lower: str,
+) -> bool:
     console.print("\n[bold]Configuration Summary:[/]")
-    console.print(f"   Model: [cyan]{model_name}[/]" + (f" (download: {download_model})" if download_model != model_name else ""))
+    console.print(
+        f"   Model: [cyan]{model_name}[/]"
+        + (f" (download: {download_model})" if download_model != model_name else "")
+    )
     console.print(f"   Firmware Version: [cyan]{version}[/]")
     console.print(f"   Repo: [cyan]{ARTIFACTORY_REPO}[/]")
     console.print(f"   Local Server: http://<this_pc>:{DEFAULT_PORT}/{env_lower}\n")
-    if not prompt_confirm_proceed("Proceed with firmware download and server setup? (y/n):"):
-        return "cancelled"
+    return bool(prompt_confirm_proceed("Proceed with firmware download and server setup? (y/n):"))
 
+
+def _cli_step_download_extract(
+    creds: _ArtifactoryCreds,
+    root: str,
+    env: str,
+    model_name: str,
+    fw_search_models: list[str],
+    download_model: str,
+    version: str,
+    selected_filename: str | None,
+) -> str | None:
     ok_setup, msg_or_env_dir, binaries_base, _primary_bin, updaterules_dir, archive_dir = prepare_env_directories(
         root, env, model_name, fw_search_models=fw_search_models
     )
@@ -205,21 +213,24 @@ def run_update_url_flow(
         return msg_or_env_dir
 
     path_or_err = msg_or_env_dir
+    env_lower = env.lower()
     binaries_dir_for_download = os.path.join(path_or_err, "binaries", download_model)
 
     console.print("\n[bold]Setting up local firmware server...[/]")
-    show_success(f"Created {env_lower}/archive/, {env_lower}/binaries/{{{', '.join(fw_search_models)}}}/ and {env_lower}/updaterules/")
+    show_success(
+        f"Created {env_lower}/archive/, {env_lower}/binaries/{{{', '.join(fw_search_models)}}}/ and {env_lower}/updaterules/"
+    )
 
     console.print("\n[bold]Downloading firmware to archive folder...[/]")
     success, err = download_firmware_to_layout(
-        token,
+        creds.token,
         download_model,
         version,
         binaries_dir_for_download,
         updaterules_dir,
         archive_dir,
-        base_url,
-        username,
+        creds.base_url,
+        creds.username,
         selected_filename,
         progress_callback=_progress_callback,
         byte_progress_callback=None,
@@ -250,11 +261,22 @@ def run_update_url_flow(
             show_error(err_extract or "Extraction failed.")
             return err_extract or "Extraction failed."
         if lower.endswith(".zip") or ".tar.gz" in lower:
-            console.print("  [bold green]\u2713[/] [green].enc → " + f"{env_lower}/binaries/{chosen_folder}/" + ", UpdateRules.json → updaterules/[/]\n")
+            console.print(
+                "  [bold green]\u2713[/] [green].enc → "
+                + f"{env_lower}/binaries/{chosen_folder}/"
+                + ", UpdateRules.json → updaterules/[/]\n"
+            )
 
     show_success("Binaries and update rules in place")
     console.print(f"[dim]Path: {root}[/]\n")
+    return None
 
+
+def _cli_step_start_server_and_update_url(
+    connection_execute: Callable[[str, list[str]], tuple[bool, str]],
+    root: str,
+    env_lower: str,
+) -> str | None:
     console.print("[bold]Starting local firmware server...[/]")
     ok, msg = start_http_server(root, DEFAULT_PORT)
     if not ok:
@@ -269,8 +291,7 @@ def run_update_url_flow(
     console.print(f"[dim]Camera URL (use this): {firmware_url}[/]\n")
 
     console.print("[bold]Sending update_url command to camera...[/]")
-    shell_cmd = "arlocmd update_url"
-    success, output = connection_execute(shell_cmd, [firmware_url])
+    success, output = connection_execute("arlocmd update_url", [firmware_url])
     if success:
         show_success("Camera acknowledged update URL")
         console.print("[dim]Camera will check for updates from local server.[/]")
@@ -280,6 +301,98 @@ def run_update_url_flow(
     if output and "Device disconnected" in output:
         return "disconnected"
     return output or "Command failed."
+
+
+def run_update_url_flow(
+    connection_execute: Callable[[str, list[str]], tuple[bool, str]],
+    model: dict,
+) -> str | None:
+    """
+    Run the full fw_setup flow: prompts, list FW from Artifactory, download, server start, send command.
+    model: dict with "name", optional "fw_search_models" (list of models for Artifactory search, e.g. 2K + FHD).
+    Returns None on success, or an error message string.
+    """
+    model_name = (model or {}).get("name") or "Camera"
+    fw_search_models = (model or {}).get("fw_search_models") or [model_name]
+
+    console.print("\n[bold cyan]\u21C4 Firmware Setup (Artifactory + Local Server)[/]")
+    console.print(
+        "This will download FW from [bold]camera-fw-generic-release-local[/], set up a local server, and configure the camera.\n"
+    )
+
+    creds_out = _cli_step_credentials(model)
+    if isinstance(creds_out, str):
+        return creds_out
+    creds = creds_out
+
+    pick_out = _cli_step_pick_version_and_list(creds, fw_search_models)
+    if isinstance(pick_out, str):
+        return pick_out
+    version, selected_filename = pick_out
+
+    download_model = compute_download_model(version, selected_filename, model_name)
+
+    root = default_fw_server_root()
+    env = prompt_select_env_folder(root)
+    if not env:
+        if not os.path.isdir(root):
+            show_error(f"FW server root not found: {root}")
+        else:
+            try:
+                subdirs = [
+                    d
+                    for d in os.listdir(root)
+                    if os.path.isdir(os.path.join(root, d)) and not d.startswith(".")
+                ]
+                if not subdirs:
+                    show_error(
+                        f"No folders found in {root}. Create at least one (e.g. qa, dev, prod) and try again."
+                    )
+            except OSError:
+                pass
+        return "cancelled"
+    env_lower = env.lower()
+
+    if not _cli_step_pick_env_and_confirm(model_name, download_model, version, env_lower):
+        return "cancelled"
+
+    err_dl = _cli_step_download_extract(
+        creds, root, env, model_name, fw_search_models, download_model, version, selected_filename
+    )
+    if err_dl is not None:
+        return err_dl
+
+    return _cli_step_start_server_and_update_url(connection_execute, root, env_lower)
+
+
+def try_handle_fw_setup_command(
+    cmd: str,
+    connection_execute: Callable[[str, list[str]], tuple[bool, str]] | None,
+    model: dict[str, Any],
+) -> tuple[str, str | None] | None:
+    """
+    If cmd is fw_setup, run the text-based flow and return parse_and_execute-style (action, message).
+    Otherwise return None so the caller can continue dispatch.
+    """
+    if cmd != "fw_setup":
+        return None
+    if not connection_execute:
+        show_error("Connect to the camera first to run fw_setup.")
+        return ("continue", None)
+    try:
+        err = run_update_url_flow(connection_execute, model)
+    except (KeyboardInterrupt, EOFError):
+        return ("continue", None)
+    except Exception as e:
+        show_error("fw_setup failed.", str(e))
+        return ("continue", None)
+    if err is None:
+        return ("continue", None)
+    if err == "disconnected":
+        return ("disconnected", None)
+    if err == "cancelled":
+        return ("continue", None)
+    return ("continue", None)
 
 
 def run_use_local_fw_server(

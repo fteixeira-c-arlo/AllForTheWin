@@ -28,6 +28,7 @@ def set_tail_live_view_handlers(
     _tail_live_view_stop = stop
 
 from core.log_parser import parse_line, write_html
+from core.update_url_flow import try_handle_fw_setup_command
 from interface.menus import (
     show_abstract_commands_section,
     show_commands_table,
@@ -76,7 +77,7 @@ SYSTEM_COMMANDS = [
     {"name": "fw local", "description": "Start local firmware server and set camera update URL to it", "command_profiles": ["e3_wired"]},
     {
         "name": "fw_setup",
-        "description": "Firmware setup wizard (CLI): Artifactory download, local server, set camera update URL. In the GUI use Tools → FW Setup.",
+        "description": "Firmware setup (CLI prompts): Artifactory download, local server, set camera update URL. In the GUI prefer Tools → FW Setup.",
         "command_profiles": ["e3_wired"],
     },
     {"name": "config_show", "description": "Show saved Artifactory credentials (no token)", "command_profiles": None},
@@ -835,26 +836,9 @@ def parse_and_execute(
         run_config_delete()
         return "continue", None
 
-    if cmd == "fw_setup":
-        if not connection_execute:
-            show_error("Connect to the camera first to run fw_setup.")
-            return "continue", None
-        try:
-            from core.update_url_flow import run_update_url_flow
-
-            err = run_update_url_flow(connection_execute, model)
-        except (KeyboardInterrupt, EOFError):
-            return "continue", None
-        except Exception as e:
-            show_error("fw_setup failed.", str(e))
-            return "continue", None
-        if err is None:
-            return "continue", None
-        if err == "disconnected":
-            return "disconnected", None
-        if err == "cancelled":
-            return "continue", None
-        return "continue", None
+    _fw_setup_result = try_handle_fw_setup_command(cmd, connection_execute, model)
+    if _fw_setup_result is not None:
+        return _fw_setup_result
 
     if cmd == "parse_log_file":
         log_dir = os.path.join(os.getcwd(), "arlo_logs")

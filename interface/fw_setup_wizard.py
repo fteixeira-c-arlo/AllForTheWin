@@ -26,6 +26,12 @@ from PySide6.QtWidgets import (
 )
 
 from core.artifactory_client import ARTIFACTORY_REPO, test_artifactory_access
+from core.local_server import (
+    DEFAULT_PORT,
+    check_server_status,
+    get_running_server_url,
+    stop_http_server,
+)
 from core.fw_setup_service import (
     compute_download_model,
     default_artifactory_url,
@@ -56,6 +62,13 @@ _BORDER = "#1e1e1e"
 
 
 ShellAsyncFn = Callable[[str, list[str], Callable[[bool, str], None]], None]
+
+
+def _port_from_running_server_url(ok: bool, url: str) -> str:
+    if ok and url:
+        part = url.replace("http://", "").replace("https://", "").strip("/")
+        return part.split(":")[-1] if ":" in part else str(DEFAULT_PORT)
+    return str(DEFAULT_PORT)
 
 
 class _SearchThread(QThread):
@@ -181,8 +194,8 @@ class FwSetupWizard(QDialog):
         self._base_url = default_artifactory_url()
         self._username: str | None = None
         self._token = ""
-        self._credentials_ok = False
-        self._save_creds_after_test = False
+        self._search_busy = False
+        self._skip_server_close_dialog = False
 
         self._fw_root = default_fw_server_root()
         self._search_results: list[tuple[str, str]] = []
@@ -209,10 +222,34 @@ class FwSetupWizard(QDialog):
         self._load_config_into_step1()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if not self._skip_server_close_dialog:
+            running, _ = check_server_status()
+            if running:
+                ok_u, url = get_running_server_url()
+                port = _port_from_running_server_url(ok_u, url)
+                mb = QMessageBox(self)
+                mb.setWindowTitle("Firmware setup")
+                mb.setIcon(QMessageBox.Icon.Question)
+                mb.setText(
+                    f"Local firmware server is still running on port {port}. "
+                    "Stop it or keep it running?"
+                )
+                keep_btn = mb.addButton("Keep running", QMessageBox.ButtonRole.AcceptRole)
+                stop_btn = mb.addButton("Stop and close", QMessageBox.ButtonRole.DestructiveRole)
+                cancel_btn = mb.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+                mb.setDefaultButton(cancel_btn)
+                mb.exec()
+                clicked = mb.clickedButton()
+                if clicked == cancel_btn:
+                    event.ignore()
+                    return
+                if clicked == stop_btn:
+                    stop_http_server()
         self.wizard_closed.emit()
         super().closeEvent(event)
 
     def _build_ui(self) -> None:
+        self._current_step = 0
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -246,10 +283,21 @@ class FwSetupWizard(QDialog):
             row.addWidget(lab, 1)
             side_lay.addLayout(row)
             if i < len(titles) - 1:
-                line = QFrame()
-                line.setFixedHeight(14)
-                line.setFrameShape(QFrame.Shape.NoFrame)
-                side_lay.addWidget(line)
+                conn_row = QHBoxLayout()
+                conn_row.setContentsMargins(0, 2, 0, 2)
+                indent = QWidget()
+                indent.setFixedWidth(10)
+                vline = QFrame()
+                vline.setFixedWidth(1)
+                vline.setMinimumHeight(12)
+                vline.setMaximumWidth(1)
+                vline.setStyleSheet(f"background-color: {_BORDER}; border: none;")
+                conn_row.addWidget(indent)
+                conn_row.addWidget(vline)
+                conn_row.addStretch(1)
+                conn_wrap = QWidget()
+                conn_wrap.setLayout(conn_row)
+                side_lay.addWidget(conn_wrap)
 
         side_lay.addStretch(1)
 
@@ -287,14 +335,26 @@ class FwSetupWizard(QDialog):
             f"QPushButton {{ background-color: {_ACCENT}; color: white; padding: 6px 18px; }}"
             "QPushButton:disabled { background-color: #333; color: #777; }"
         )
+        self._btn_done = QPushButton("Done")
+        self._btn_done.clicked.connect(self._on_done_keep_server)
+        self._btn_done.setStyleSheet(
+            f"QPushButton {{ background-color: {_ACCENT}; color: white; padding: 6px 18px; }}"
+        )
+        self._btn_stop_close = QPushButton("Stop server and close")
+        self._btn_stop_close.setStyleSheet(
+            "QPushButton { padding: 6px 16px; color: #e57373; border: 1px solid #5c3333; }"
+        )
+        self._btn_stop_close.clicked.connect(self._on_stop_server_and_close)
+
         nav.addStretch(1)
         nav.addWidget(self._btn_back)
         nav.addWidget(self._btn_next)
+        nav.addWidget(self._btn_done)
+        nav.addWidget(self._btn_stop_close)
         main_lay.addLayout(nav)
 
         outer.addWidget(main, 1)
 
-        self._current_step = 0
         self._update_sidebar()
         self._sync_nav()
 
@@ -320,6 +380,9 @@ class FwSetupWizard(QDialog):
         self._fld_token = QLineEdit()
         self._fld_token.setEchoMode(QLineEdit.EchoMode.Password)
         self._fld_token.setPlaceholderText("API token / identity token")
+        self._fld_url.textChanged.connect(self._on_step0_fields_changed)
+        self._fld_user.textChanged.connect(self._on_step0_fields_changed)
+        self._fld_token.textChanged.connect(self._on_step0_fields_changed)
 
         form = QVBoxLayout()
         form.addWidget(QLabel("Artifactory URL"))
@@ -330,7 +393,7 @@ class FwSetupWizard(QDialog):
         form.addWidget(self._fld_token)
         lay.addLayout(form)
 
-        self._chk_save_creds = QCheckBox(f"Save credentials to {get_config_path()} after successful test")
+        self._chk_save_creds = QCheckBox(f"Save credentials to config ({get_config_path()}) when leaving this step")
         lay.addWidget(self._chk_save_creds)
 
         row = QHBoxLayout()
@@ -373,11 +436,15 @@ class FwSetupWizard(QDialog):
 
         self._fld_version_filter = QLineEdit()
         self._fld_version_filter.setPlaceholderText("Version filter (leave empty to match broadly)")
+        self._fld_version_filter.textChanged.connect(self._on_search_fields_changed)
         lay.addWidget(QLabel("Version filter"))
         lay.addWidget(self._fld_version_filter)
 
         self._combo_env = QComboBox()
-        lay.addWidget(QLabel("Local server environment folder"))
+        self._combo_env.currentIndexChanged.connect(self._on_search_fields_changed)
+        lay.addWidget(
+            QLabel("Environment (qa / dev / prod — folder under your local FW server root)")
+        )
         lay.addWidget(self._combo_env)
 
         self._combo_binary = QComboBox()
@@ -387,13 +454,7 @@ class FwSetupWizard(QDialog):
         self._search_status = QLabel("")
         self._search_status.setWordWrap(True)
         self._search_status.setStyleSheet(f"color: {_MUTED};")
-
-        btn_row = QHBoxLayout()
-        self._btn_search = QPushButton("Search Artifactory")
-        self._btn_search.clicked.connect(self._run_search)
-        btn_row.addWidget(self._btn_search)
-        btn_row.addWidget(self._search_status, 1)
-        lay.addLayout(btn_row)
+        lay.addWidget(self._search_status)
         lay.addStretch(1)
 
         self._sync_model_combo_default()
@@ -411,11 +472,15 @@ class FwSetupWizard(QDialog):
         hint.setWordWrap(True)
         lay.addWidget(hint)
 
-        self._table = QTableWidget(0, 3)
-        self._table.setHorizontalHeaderLabels(["Version (path)", "Archive", "Variant"])
+        self._table = QTableWidget(0, 5)
+        self._table.setHorizontalHeaderLabels(
+            ["Version (path)", "Archive", "Size", "Date", "Variant"]
+        )
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self._table.setSortingEnabled(True)
@@ -582,6 +647,9 @@ class FwSetupWizard(QDialog):
         for tag in self._fw_search_models:
             self._combo_binary.addItem(tag)
 
+        if self._current_step == 1:
+            self._sync_nav()
+
     def _populate_env_combo(self) -> None:
         self._combo_env.clear()
         for name in list_environment_folders(self._fw_root):
@@ -604,26 +672,65 @@ class FwSetupWizard(QDialog):
                 lab.setText(str(i + 1))
                 lab.setStyleSheet(f"color: {_MUTED}; font-weight: normal;")
 
+    def _step0_fields_valid(self) -> bool:
+        url = (self._fld_url.text() or "").strip()
+        tok = (self._fld_token.text() or "").strip()
+        if not tok:
+            return False
+        u = url.lower()
+        return bool(url and (u.startswith("http://") or u.startswith("https://")))
+
+    def _step1_env_valid(self) -> bool:
+        env_txt = (self._combo_env.currentText() or "").strip()
+        return bool(env_txt and not env_txt.startswith("("))
+
+    def _apply_credentials_from_step0(self) -> None:
+        raw_url = (self._fld_url.text() or "").strip() or default_artifactory_url()
+        self._base_url = raw_url.rstrip("/")
+        self._token = (self._fld_token.text() or "").strip()
+        u = (self._fld_user.text() or "").strip()
+        self._username = u or None
+        if self._chk_save_creds.isChecked():
+            try:
+                save_config_file(u, self._token, self._base_url, ARTIFACTORY_REPO)
+                update_last_used()
+            except OSError as e:
+                QMessageBox.warning(self, "Firmware setup", f"Could not save credentials: {e}")
+
     def _sync_nav(self) -> None:
-        self._btn_back.setVisible(self._current_step > 0)
+        self._btn_back.setVisible(self._current_step > 0 and self._current_step < 4)
         step = self._current_step
+        self._btn_next.setVisible(step < 4)
+        self._btn_done.setVisible(step == 4)
+        self._btn_stop_close.setVisible(step == 4)
+
         if step == 0:
-            self._btn_next.setEnabled(self._credentials_ok)
+            self._btn_next.setEnabled(self._step0_fields_valid())
+            self._btn_next.setText("Next")
         elif step == 1:
-            self._btn_next.setEnabled(len(self._search_results) > 0)
+            self._btn_next.setEnabled(not self._search_busy and self._step1_env_valid())
+            self._btn_next.setText("Searching…" if self._search_busy else "Next")
         elif step == 2:
             self._btn_next.setEnabled(self._selected_filename is not None)
+            self._btn_next.setText("Next")
         elif step == 3:
             self._btn_next.setEnabled(False)
-        elif step == 4:
-            self._btn_next.setEnabled(False)
-        self._btn_next.setVisible(step < 4)
+            self._btn_next.setText("Next")
 
     def _go_back(self) -> None:
         if self._current_step <= 0:
             return
+        if self._current_step >= 4:
+            return
         if self._current_step == 3 and self._download_thread and self._download_thread.isRunning():
             return
+        if self._current_step == 2:
+            self._search_results = []
+            self._fill_results_table()
+            self._selected_filename = None
+            self._selected_folder = None
+            self._search_status.setText("")
+            self._search_status.setStyleSheet(f"color: {_MUTED};")
         self._current_step -= 1
         self._stack.setCurrentIndex(self._current_step)
         self._update_sidebar()
@@ -631,6 +738,18 @@ class FwSetupWizard(QDialog):
 
     def _go_next(self) -> None:
         if self._current_step >= 4:
+            return
+        if self._current_step == 0:
+            if not self._step0_fields_valid():
+                return
+            self._apply_credentials_from_step0()
+            self._current_step = 1
+            self._stack.setCurrentIndex(1)
+            self._update_sidebar()
+            self._sync_nav()
+            return
+        if self._current_step == 1:
+            self._start_search_from_next()
             return
         if self._current_step == 2:
             if not self._selected_filename:
@@ -643,12 +762,24 @@ class FwSetupWizard(QDialog):
             self._sync_nav()
             self._start_download()
             return
-        if self._current_step == 1 and not self._search_results:
-            return
-        self._current_step += 1
-        self._stack.setCurrentIndex(self._current_step)
-        self._update_sidebar()
-        self._sync_nav()
+
+    def _on_step0_fields_changed(self, *_args: object) -> None:
+        if self._current_step == 0:
+            self._sync_nav()
+
+    def _on_search_fields_changed(self, *_args: object) -> None:
+        if self._current_step == 1:
+            self._sync_nav()
+
+    def _on_done_keep_server(self) -> None:
+        self._skip_server_close_dialog = True
+        self.close()
+
+    def _on_stop_server_and_close(self) -> None:
+        stop_http_server()
+        self._refresh_server_footer()
+        self._skip_server_close_dialog = True
+        self.close()
 
     def _test_credentials(self) -> None:
         url = (self._fld_url.text() or "").strip() or default_artifactory_url()
@@ -661,11 +792,7 @@ class FwSetupWizard(QDialog):
         ok, err = test_artifactory_access(url, token, user)
         self._btn_test.setEnabled(True)
         if ok:
-            self._base_url = url
-            self._token = token
-            self._username = user
-            self._credentials_ok = True
-            self._cred_status.setText("Connection OK. You can continue.")
+            self._cred_status.setText("Connection OK (optional — Next does not require this).")
             self._cred_status.setStyleSheet(f"color: {_OK};")
             if self._chk_save_creds.isChecked():
                 try:
@@ -675,26 +802,26 @@ class FwSetupWizard(QDialog):
                 except OSError as e:
                     self._cred_status.setText(f"Connection OK (could not save config: {e})")
         else:
-            self._credentials_ok = False
             self._cred_status.setText(err or "Connection failed.")
             self._cred_status.setStyleSheet(f"color: {_ERR};")
         self._sync_nav()
 
-    def _run_search(self) -> None:
-        if not self._credentials_ok:
-            QMessageBox.warning(self, "FW Setup", "Test Artifactory connection first.")
+    def _start_search_from_next(self) -> None:
+        if self._search_thread and self._search_thread.isRunning():
             return
         env_txt = self._combo_env.currentText()
         if not env_txt or env_txt.startswith("("):
             QMessageBox.warning(
                 self,
-                "FW Setup",
+                "Firmware setup",
                 f"No environment folders under:\n{self._fw_root}\n\nCreate e.g. qa, dev, prod and retry.",
             )
             return
         self._env_name = env_txt
-        self._btn_search.setEnabled(False)
-        self._search_status.setText("Searching…")
+        self._search_busy = True
+        self._sync_nav()
+        self._search_status.setText("Searching Artifactory…")
+        self._search_status.setStyleSheet(f"color: {_MUTED};")
         vf = (self._fld_version_filter.text() or "").strip()
         self._search_thread = _SearchThread(
             self._base_url, self._token, self._username, vf, self._fw_search_models
@@ -703,7 +830,7 @@ class FwSetupWizard(QDialog):
         self._search_thread.start()
 
     def _on_search_done(self, ok: bool, flat: object, err: str) -> None:
-        self._btn_search.setEnabled(True)
+        self._search_busy = False
         rows = flat if isinstance(flat, list) else []
         if not ok:
             self._search_results = []
@@ -712,9 +839,20 @@ class FwSetupWizard(QDialog):
             self._sync_nav()
             return
         self._search_results = [(str(a), str(b)) for a, b in rows]
+        if not self._search_results:
+            self._search_status.setText(
+                "No matching firmware archives (.zip or env .tar.gz). "
+                "Adjust the version filter and press Next again."
+            )
+            self._search_status.setStyleSheet(f"color: {_ERR};")
+            self._sync_nav()
+            return
         self._search_status.setText(f"{len(self._search_results)} match(es).")
         self._search_status.setStyleSheet(f"color: {_OK};")
         self._fill_results_table()
+        self._current_step = 2
+        self._stack.setCurrentIndex(2)
+        self._update_sidebar()
         self._sync_nav()
 
     def _fill_results_table(self) -> None:
@@ -725,8 +863,10 @@ class FwSetupWizard(QDialog):
             self._table.insertRow(r)
             self._table.setItem(r, 0, QTableWidgetItem(folder))
             self._table.setItem(r, 1, QTableWidgetItem(fn))
+            self._table.setItem(r, 2, QTableWidgetItem("—"))
+            self._table.setItem(r, 3, QTableWidgetItem("—"))
             ext = fn.lower().split(".")[-1] if "." in fn else fn
-            self._table.setItem(r, 2, QTableWidgetItem(ext))
+            self._table.setItem(r, 4, QTableWidgetItem(ext))
         self._table.setSortingEnabled(True)
         self._selected_filename = None
         self._selected_folder = None
@@ -930,8 +1070,6 @@ class FwSetupWizard(QDialog):
         self._shell_async("arlocmd reboot", [], done)
 
     def _refresh_server_footer(self) -> None:
-        from core.local_server import DEFAULT_PORT, check_server_status, get_running_server_url
-
         running, msg = check_server_status()
         if running:
             ok, url = get_running_server_url()
