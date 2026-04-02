@@ -522,7 +522,7 @@ class FwSetupWizard(QDialog):
     def _page_serve(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
-        h = QLabel("Serve & push to camera")
+        h = QLabel("Serve & set update URL")
         h.setStyleSheet("font-size: 15px; font-weight: bold;")
         lay.addWidget(h)
 
@@ -544,7 +544,7 @@ class FwSetupWizard(QDialog):
         self._push_status.setWordWrap(True)
         lay.addWidget(self._push_status)
 
-        self._btn_push = QPushButton("Push to camera")
+        self._btn_push = QPushButton("Set update URL")
         self._btn_push.setStyleSheet(
             f"QPushButton {{ background-color: {_ACCENT}; color: white; padding: 8px 20px; }}"
         )
@@ -556,18 +556,12 @@ class FwSetupWizard(QDialog):
         fl.setContentsMargins(0, 8, 0, 0)
         fl.setSpacing(8)
         self._lbl_factory_hint = QLabel(
-            "This camera is not onboarded. Reboot it so it picks up the staged firmware on boot."
+            "This camera is not onboarded. After the update URL is set, ArloShell sends a reboot "
+            "automatically so the device picks up firmware from the new URL on boot."
         )
         self._lbl_factory_hint.setWordWrap(True)
         self._lbl_factory_hint.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
         fl.addWidget(self._lbl_factory_hint)
-        self._btn_reboot = QPushButton("Reboot camera")
-        self._btn_reboot.setStyleSheet("QPushButton { padding: 8px 16px; }")
-        self._btn_reboot.clicked.connect(self._on_reboot_camera)
-        fl.addWidget(self._btn_reboot)
-        self._reboot_status = QLabel("")
-        self._reboot_status.setWordWrap(True)
-        fl.addWidget(self._reboot_status)
         lay.addWidget(self._panel_factory)
         self._panel_factory.hide()
 
@@ -982,8 +976,7 @@ class FwSetupWizard(QDialog):
     def _enter_serve_step(self) -> None:
         self._panel_factory.hide()
         self._panel_onboarded.hide()
-        self._reboot_status.clear()
-        self._refresh_result.clear()
+        self._refresh_result.setText("")
         env_lower = self._env_name.lower()
         ok, err, cam_url = ensure_server_and_camera_url(self._fw_root, env_lower)
         if not ok:
@@ -1010,11 +1003,11 @@ class FwSetupWizard(QDialog):
         def done(ok: bool, msg: str) -> None:
             self._btn_push.setEnabled(True)
             if ok:
-                self._push_status.setText("Camera acknowledged update URL.")
+                self._push_status.setText("arlocmd update_url: OK")
                 self._push_status.setStyleSheet(f"color: {_OK};")
                 self.update_sent.emit(True)
                 self._btn_push.setEnabled(False)
-                self._show_step5_after_update_url_success()
+                self._finish_step5_after_update_url_success()
             else:
                 self._push_status.setText(msg or "Command failed.")
                 self._push_status.setStyleSheet(f"color: {_ERR};")
@@ -1022,16 +1015,29 @@ class FwSetupWizard(QDialog):
 
         self._shell_async("arlocmd update_url", [self._camera_url], done)
 
-    def _show_step5_after_update_url_success(self) -> None:
-        """Branch step 5: reboot path (factory / unknown) vs onboarded + update_refresh."""
+    def _finish_step5_after_update_url_success(self) -> None:
+        """Onboarded: app/update_refresh UI. Not onboarded: auto-reboot and show both results."""
         self._panel_factory.hide()
         self._panel_onboarded.hide()
-        self._reboot_status.clear()
-        self._refresh_result.clear()
+        self._refresh_result.setText("")
         if self._is_onboarded is True:
             self._panel_onboarded.show()
-        else:
-            self._panel_factory.show()
+            return
+        self._panel_factory.show()
+        self._push_status.setText("arlocmd update_url: OK\nSending arlocmd reboot…")
+        self._push_status.setStyleSheet(f"color: {_MUTED};")
+
+        def reboot_done(ok_r: bool, msg_r: str) -> None:
+            if ok_r:
+                self._push_status.setText("arlocmd update_url: OK\narlocmd reboot: OK")
+                self._push_status.setStyleSheet(f"color: {_OK};")
+            else:
+                self._push_status.setText(
+                    "arlocmd update_url: OK\narlocmd reboot failed: " + (msg_r or "error")
+                )
+                self._push_status.setStyleSheet(f"color: {_ERR};")
+
+        self._shell_async("arlocmd reboot", [], reboot_done)
 
     def _on_trigger_update_refresh(self) -> None:
         self._btn_trigger_refresh.setEnabled(False)
@@ -1050,24 +1056,6 @@ class FwSetupWizard(QDialog):
                 self._refresh_result.setStyleSheet(f"color: {_ERR};")
 
         self._shell_async("arlocmd update_refresh", ["1"], done)
-
-    def _on_reboot_camera(self) -> None:
-        self._btn_reboot.setEnabled(False)
-        self._reboot_status.setText("Sending arlocmd reboot…")
-        self._reboot_status.setStyleSheet(f"color: {_MUTED};")
-
-        def done(ok: bool, msg: str) -> None:
-            self._btn_reboot.setEnabled(True)
-            if ok:
-                self._reboot_status.setText(
-                    (msg or "Reboot command sent.").strip() or "Reboot command sent."
-                )
-                self._reboot_status.setStyleSheet(f"color: {_OK};")
-            else:
-                self._reboot_status.setText(msg or "Reboot failed.")
-                self._reboot_status.setStyleSheet(f"color: {_ERR};")
-
-        self._shell_async("arlocmd reboot", [], done)
 
     def _refresh_server_footer(self) -> None:
         running, msg = check_server_status()
