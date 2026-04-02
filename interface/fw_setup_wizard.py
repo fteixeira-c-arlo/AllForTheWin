@@ -643,6 +643,26 @@ class FwSetupWizard(QDialog):
         self._btn_push.clicked.connect(self._push_update_url)
         lay.addWidget(self._btn_push)
 
+        self._panel_onboarded = QWidget()
+        ol = QVBoxLayout(self._panel_onboarded)
+        ol.setContentsMargins(0, 8, 0, 0)
+        ol.setSpacing(8)
+        self._lbl_onboarded_hint = QLabel(
+            "Camera is onboarded — firmware is staged on the local server. "
+            "Use the Arlo app to trigger an update check, or press the button below."
+        )
+        self._lbl_onboarded_hint.setWordWrap(True)
+        self._lbl_onboarded_hint.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
+        ol.addWidget(self._lbl_onboarded_hint)
+        self._btn_trigger_refresh = QPushButton("Trigger update check")
+        self._btn_trigger_refresh.setStyleSheet(
+            f"QPushButton {{ background-color: #3949ab; color: #e8eaf6; padding: 8px 16px; }}"
+        )
+        self._btn_trigger_refresh.clicked.connect(self._on_trigger_update_refresh)
+        ol.addWidget(self._btn_trigger_refresh)
+        lay.addWidget(self._panel_onboarded)
+        self._panel_onboarded.hide()
+
         lay.addStretch(1)
         return w
 
@@ -1172,6 +1192,8 @@ class FwSetupWizard(QDialog):
 
     def _enter_serve_step(self) -> None:
         self._clear_step5_log()
+        self._panel_onboarded.hide()
+        self._btn_trigger_refresh.setEnabled(True)
         folder = self._server_folder_name.strip()
         ok, err, cam_url = ensure_server_and_camera_url(self._fw_root, folder)
         if not ok:
@@ -1211,8 +1233,9 @@ class FwSetupWizard(QDialog):
         self._shell_async("arlocmd update_url", [self._camera_url], done)
 
     def _finish_step5_after_update_url_success(self) -> None:
-        """Not onboarded: auto-reboot so the device picks up firmware from the new URL on boot."""
+        """Onboarded: show update_refresh UI. Not onboarded: auto-reboot for new URL on boot."""
         if self._is_onboarded is True:
+            self._panel_onboarded.show()
             return
         self._append_step5_log("Sending arlocmd reboot…")
 
@@ -1223,6 +1246,19 @@ class FwSetupWizard(QDialog):
                 self._append_step5_log("arlocmd reboot failed: " + (msg_r or "error"))
 
         self._shell_async("arlocmd reboot", [], reboot_done)
+
+    def _on_trigger_update_refresh(self) -> None:
+        self._btn_trigger_refresh.setEnabled(False)
+        self._append_step5_log("Running arlocmd update_refresh 1…")
+
+        def done(ok: bool, msg: str) -> None:
+            self._btn_trigger_refresh.setEnabled(True)
+            if ok:
+                self._append_step5_log((msg or "OK").strip() or "update_refresh completed.")
+            else:
+                self._append_step5_log(msg or "update_refresh failed.")
+
+        self._shell_async("arlocmd update_refresh", ["1"], done)
 
     def _refresh_server_footer(self) -> None:
         hint, line, tooltip = firmware_server_listener_summary()
