@@ -32,9 +32,12 @@ from core.artifactory_client import ARTIFACTORY_REPO, test_artifactory_access
 from core.local_server import (
     DEFAULT_PORT,
     check_server_status,
+    firmware_folder_rename_blocked_reason,
     firmware_rename_access_denied_user_hint,
     firmware_server_listener_summary,
     get_running_server_url,
+    is_firmware_port_accepting_connections,
+    read_fw_server_state,
     stop_http_server,
 )
 from core.fw_setup_service import (
@@ -49,6 +52,7 @@ from core.fw_setup_service import (
     prepare_env_directories,
     rename_server_folder,
     sanitize_server_folder_name,
+    scan_firmware_folders_with_versions,
     search_firmware_archives,
 )
 from core.camera_models import get_models
@@ -243,9 +247,9 @@ class FwSetupWizard(QDialog):
                 mb.setIcon(QMessageBox.Icon.Question)
                 mb.setText(
                     f"Local firmware server is still running on port {port}. "
-                    "Stop it or keep it running?"
+                    "Keep it running, stop it, or cancel?"
                 )
-                keep_btn = mb.addButton("Keep running", QMessageBox.ButtonRole.AcceptRole)
+                mb.addButton("Keep running", QMessageBox.ButtonRole.AcceptRole)
                 stop_btn = mb.addButton("Stop and close", QMessageBox.ButtonRole.DestructiveRole)
                 cancel_btn = mb.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
                 mb.setDefaultButton(cancel_btn)
@@ -256,6 +260,36 @@ class FwSetupWizard(QDialog):
                     return
                 if clicked == stop_btn:
                     stop_http_server()
+            else:
+                st = read_fw_server_state()
+                busy_port: int | None = None
+                foreign = False
+                if st and is_firmware_port_accepting_connections(int(st["port"])):
+                    busy_port = int(st["port"])
+                    foreign = int(st["pid"]) != os.getpid()
+                elif is_firmware_port_accepting_connections(DEFAULT_PORT):
+                    busy_port = DEFAULT_PORT
+                if busy_port is not None:
+                    mb = QMessageBox(self)
+                    mb.setWindowTitle("Firmware setup")
+                    mb.setIcon(QMessageBox.Icon.Question)
+                    if foreign and st:
+                        mb.setText(
+                            f"A firmware server is still listening on port {busy_port} "
+                            f"(another ArloShell, PID {int(st['pid'])}). "
+                            "This window cannot stop it. Close the wizard anyway?"
+                        )
+                    else:
+                        mb.setText(
+                            f"Port {busy_port} is still in use (unknown listener). Close the wizard anyway?"
+                        )
+                    mb.addButton("Close anyway", QMessageBox.ButtonRole.AcceptRole)
+                    cancel_btn = mb.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+                    mb.setDefaultButton(cancel_btn)
+                    mb.exec()
+                    if mb.clickedButton() == cancel_btn:
+                        event.ignore()
+                        return
         self.wizard_closed.emit()
         super().closeEvent(event)
 
@@ -445,6 +479,20 @@ class FwSetupWizard(QDialog):
         lay.addWidget(QLabel("Search includes these Artifactory model names:"))
         lay.addWidget(self._pills_host)
 
+        self._lbl_bin_target = QLabel("Artifactory download target (2K / FHD)")
+        self._lbl_bin_target.setStyleSheet(f"color: {_MUTED}; font-size: 12px;")
+        lay.addWidget(self._lbl_bin_target)
+        self._combo_bin_target = QComboBox()
+        self._combo_bin_target.currentIndexChanged.connect(self._on_search_fields_changed)
+        lay.addWidget(self._combo_bin_target)
+        bin_hint = QLabel(
+            "Chooses which Artifactory product folder to download from. Extracted firmware still "
+            "goes under binaries/<connected VMC> on the local server."
+        )
+        bin_hint.setStyleSheet(f"color: {_MUTED}; font-size: 11px;")
+        bin_hint.setWordWrap(True)
+        lay.addWidget(bin_hint)
+
         self._fld_version_filter = QLineEdit()
         self._fld_version_filter.setPlaceholderText("Version filter (leave empty to match broadly)")
         self._fld_version_filter.textChanged.connect(self._on_search_fields_changed)
@@ -570,6 +618,17 @@ class FwSetupWizard(QDialog):
         sub.setWordWrap(True)
         lay.addWidget(sub)
 
+        sum_l = QLabel("All firmware folders on this server")
+        sum_l.setStyleSheet(f"color: {_MUTED}; font-size: 11px;")
+        lay.addWidget(sum_l)
+        self._serve_folder_summary = QPlainTextEdit()
+        self._serve_folder_summary.setReadOnly(True)
+        self._serve_folder_summary.setMaximumHeight(96)
+        self._serve_folder_summary.setPlaceholderText("Scanning folders…")
+        sum_mono = QFont("Menlo", 9) if os.name != "nt" else QFont("Consolas", 9)
+        self._serve_folder_summary.setFont(sum_mono)
+        lay.addWidget(self._serve_folder_summary)
+
         self._step5_log = QPlainTextEdit()
         self._step5_log.setReadOnly(True)
         self._step5_log.setMinimumHeight(120)
@@ -669,6 +728,31 @@ class FwSetupWizard(QDialog):
             self._pills_layout.addWidget(pill)
         self._pills_layout.addStretch(1)
 
+        self._combo_bin_target.blockSignals(True)
+        self._combo_bin_target.clear()
+        for tag in self._fw_search_models:
+            tu = tag.upper()
+            if re.match(r"^VMC3\d{3}$", tu):
+                disp = f"{tag} (2K)"
+            elif re.match(r"^VMC2\d{3}$", tu):
+                disp = f"{tag} (FHD)"
+            else:
+                disp = tag
+            self._combo_bin_target.addItem(disp, tag)
+        self._combo_bin_target.blockSignals(False)
+        multi = self._combo_bin_target.count() > 1
+        self._lbl_bin_target.setVisible(multi)
+        self._combo_bin_target.setVisible(multi)
+        if self._combo_bin_target.count() > 0:
+            name_u = self._vmc_binaries_folder_name().upper()
+            idx = 0
+            for i in range(self._combo_bin_target.count()):
+                d = self._combo_bin_target.itemData(i)
+                if isinstance(d, str) and d.upper() == name_u:
+                    idx = i
+                    break
+            self._combo_bin_target.setCurrentIndex(idx)
+
         if self._current_step == 1:
             self._sync_nav()
         self._refresh_vmc_binaries_label()
@@ -735,32 +819,33 @@ class FwSetupWizard(QDialog):
         if not ok:
             return
 
-        running, _ = check_server_status()
+        blocked = firmware_folder_rename_blocked_reason(old_path)
         stopped_for_rename = False
-        if running:
-            r = QMessageBox.question(
-                self,
-                "Rename folder",
-                "This ArloShell window has the firmware HTTP server running. On Windows, renaming a "
-                "folder under the server root usually fails with “Access is denied” while that server "
-                "is active.\n\n"
-                "Stop the server in this window now so the folder can be renamed? You can start it "
-                "again later from this wizard or from fw local.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes,
-            )
-            if r != QMessageBox.StandardButton.Yes:
-                return
-            stop_ok, stop_msg = stop_http_server()
-            if not stop_ok:
-                QMessageBox.warning(
+        if blocked:
+            if "this window" in blocked.lower():
+                r = QMessageBox.question(
                     self,
                     "Rename folder",
-                    f"Could not stop the server: {stop_msg}\n\nStop it manually (e.g. server stop), then try rename again.",
+                    blocked
+                    + "\n\nStop the firmware server in this window now so the folder can be renamed?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes,
                 )
+                if r != QMessageBox.StandardButton.Yes:
+                    return
+                stop_ok, stop_msg = stop_http_server()
+                if not stop_ok:
+                    QMessageBox.warning(
+                        self,
+                        "Rename folder",
+                        f"Could not stop the server: {stop_msg}\n\nStop it manually (e.g. server stop), then try rename again.",
+                    )
+                    return
+                stopped_for_rename = True
+                self._refresh_server_footer()
+            else:
+                QMessageBox.warning(self, "Rename folder", blocked)
                 return
-            stopped_for_rename = True
-            self._refresh_server_footer()
 
         ok_r, err = rename_server_folder(self._fw_root, old_name, new_name)
         if not ok_r:
@@ -1071,8 +1156,11 @@ class FwSetupWizard(QDialog):
             self._btn_retry_dl.show()
             return
 
+        art_target = self._combo_bin_target.currentData()
+        if not isinstance(art_target, str) or not art_target.strip():
+            art_target = self._primary_model_name
         download_model = compute_download_model(
-            self._version_path, self._selected_filename, self._primary_model_name
+            self._version_path, self._selected_filename, art_target.strip()
         )
         binaries_dir_for_download = os.path.join(msg_or_env, "binaries", vmc)
         chosen_binaries_dir = os.path.abspath(os.path.join(binaries_base, vmc))
@@ -1145,6 +1233,12 @@ class FwSetupWizard(QDialog):
         self._url_banner.setText(cam_url)
         self._btn_push.setEnabled(True)
         self._btn_push.setVisible(True)
+        vmc = self._vmc_binaries_folder_name()
+        rows = scan_firmware_folders_with_versions(self._fw_root, vmc)
+        lines = "\n".join(f"  • {n}  —  {v}" for n, v in rows)
+        self._serve_folder_summary.setPlainText(
+            f"Server root: {self._fw_root}\nFolders for {vmc}:\n{lines if lines else '  (none found)'}"
+        )
         self.server_started.emit(cam_url)
         self._refresh_server_footer()
 

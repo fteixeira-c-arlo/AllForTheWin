@@ -69,7 +69,7 @@ def parse_build_info(raw_output: str) -> dict[str, Any]:
       - fw_version: str | None  (e.g. 1.2.3 or AGW version)
       - raw: str  (original output for fallback display)
     """
-    result: dict[str, Any] = {"model": None, "fw_version": None, "raw": raw_output or ""}
+    result: dict[str, Any] = {"model": None, "fw_version": None, "serial": None, "raw": raw_output or ""}
     if not raw_output or not raw_output.strip():
         return result
 
@@ -110,6 +110,20 @@ def parse_build_info(raw_output: str) -> dict[str, Any]:
         m = re.search(r"(\d+\.\d+\.\d+(?:\.\d+)?)", text)
         if m:
             result["fw_version"] = m.group(1)
+
+    serial_patterns = [
+        re.compile(r"(?i)serial(?:\s*(?:number|#|num))?\s*[=:]\s*([^\s,;|]+)"),
+        re.compile(r"(?i)ssn\s*[=:]\s*([^\s,;|]+)"),
+        re.compile(r"(?i)\bsn\s*[=:]\s*([^\s,;|]+)"),
+    ]
+    for line in lines:
+        for pat in serial_patterns:
+            m2 = pat.search(line)
+            if m2:
+                result["serial"] = m2.group(1).strip().strip("'\"")
+                break
+        if result.get("serial"):
+            break
 
     return result
 
@@ -194,12 +208,14 @@ def detect_device(execute: Callable[[str, list[str]], tuple[bool, str]]) -> dict
     """
     Run build_info, kvcmd, device_info/bs_info, and optional KV_BS_CLAIMED on the device.
     execute(cmd, args) -> (success, output).
-    Returns dict with: model, fw_version, env, raw_build_info, is_onboarded (bool | None).
+    Returns dict with: model, fw_version, serial, env, update_url_raw, raw_build_info, is_onboarded (bool | None).
     """
     result: dict[str, Any] = {
         "model": None,
         "fw_version": None,
+        "serial": None,
         "env": None,
+        "update_url_raw": "",
         "raw_build_info": "",
         "is_onboarded": None,
     }
@@ -210,6 +226,7 @@ def detect_device(execute: Callable[[str, list[str]], tuple[bool, str]]) -> dict
         parsed = parse_build_info(out)
         result["model"] = parsed.get("model")
         result["fw_version"] = parsed.get("fw_version")
+        result["serial"] = parsed.get("serial")
     # 2) Env: try KV_BS_STAGE — use "kvcmd read" first (some FW use "read"), then "kvcmd get"
     for cmd in ("kvcmd read KV_BS_STAGE", "kvcmd get KV_BS_STAGE"):
         ok, out = execute(cmd, [])
@@ -218,14 +235,7 @@ def detect_device(execute: Callable[[str, list[str]], tuple[bool, str]]) -> dict
             if env:
                 result["env"] = env
                 break
-    # 3) update_url as fallback for env
-    if not result.get("env"):
-        ok, out = execute(UPDATE_URL_SHELL, [])
-        if ok and out:
-            env = parse_env_from_update_url(out)
-            if env:
-                result["env"] = env
-    # 4) Other kv keys as fallback (KV_UPDATE_URL, KV_MIGRATE_STAGE)
+    # 3) Other kv keys as fallback (KV_UPDATE_URL, KV_MIGRATE_STAGE)
     for key in KV_KEYS_FOR_ENV:
         if key == "KV_BS_STAGE":
             continue  # already tried above
@@ -239,6 +249,16 @@ def detect_device(execute: Callable[[str, list[str]], tuple[bool, str]]) -> dict
         )
         if env:
             result["env"] = env
+
+    # update_url: stage/env fallback and camera URL line for UI
+    ok_u, out_u = execute(UPDATE_URL_SHELL, [])
+    if ok_u and out_u:
+        u = (out_u or "").strip()
+        result["update_url_raw"] = u[:500]
+        if not result.get("env"):
+            env = parse_env_from_update_url(u)
+            if env:
+                result["env"] = env
 
     # Onboarded / claimed: device_info + bs_info (same sources as abstract "info"), then KV_BS_CLAIMED fallback
     info_blob_parts: list[str] = []

@@ -1,11 +1,13 @@
 """Shared firmware-setup logic for CLI flow and GUI wizard (no UI)."""
 from __future__ import annotations
 
+import json
 import os
+import re
 import socket
 import sys
 from typing import Callable
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlparse
 
 from core.artifactory_client import ARTIFACTORY_REPO, download_firmware, list_available_firmware
 from core.local_server import (
@@ -14,6 +16,8 @@ from core.local_server import (
     check_server_status,
     extract_firmware_tar_gz,
     extract_firmware_zip,
+    get_base_url_if_serving_root,
+    get_in_process_server_root_abs,
     get_running_server_url,
     setup_directory_structure,
     start_http_server,
@@ -222,23 +226,140 @@ def ensure_server_and_camera_url(root: str, server_folder: str) -> tuple[bool, s
     Start the local HTTP server if needed. Returns (ok, error_or_empty, camera_fota_url).
     camera_fota_url is http://<lan-ip>:<port>/<encoded-folder>; folder name preserves case.
     """
-    running, _ = check_server_status()
-    if running:
-        ok_u, url = get_running_server_url()
-        if not ok_u or not url:
-            return False, "Could not read running server URL.", ""
-        base_url = url.rstrip("/")
+    root_abs = os.path.abspath(root)
+    base_url = get_base_url_if_serving_root(root_abs)
+    if base_url:
+        base_url = base_url.rstrip("/")
     else:
-        ok, msg = start_http_server(root, DEFAULT_PORT)
-        if not ok:
-            return False, msg or "Failed to start server.", ""
-        base_url = msg.rstrip("/")
+        running, _ = check_server_status()
+        if running:
+            if get_in_process_server_root_abs() != root_abs:
+                return (
+                    False,
+                    "This window already has a firmware server running from a different root. "
+                    "Stop it (server stop) before serving another root.",
+                    "",
+                )
+            ok_u, url = get_running_server_url()
+            if not ok_u or not url:
+                return False, "Could not read running server URL.", ""
+            base_url = url.rstrip("/")
+        else:
+            ok, msg = start_http_server(root_abs, DEFAULT_PORT)
+            if not ok:
+                return False, msg or "Failed to start server.", ""
+            base_url = msg.rstrip("/")
     local_ip = get_local_ipv4()
     host_part = base_url.replace("http://", "").replace("https://", "").strip("/")
     port = host_part.split(":")[1] if ":" in host_part else str(DEFAULT_PORT)
     seg = quote((server_folder or "").strip(), safe="")
     firmware_url = f"http://{local_ip}:{port}/{seg}"
     return True, "", firmware_url
+
+
+def firmware_folder_version_label(folder_path: str) -> str:
+    """Best-effort version string from UpdateRules JSON or archive filenames."""
+    rules_dir = os.path.join(folder_path, "updaterules")
+    if os.path.isdir(rules_dir):
+        for name in sorted(os.listdir(rules_dir)):
+            low = name.lower()
+            if not low.endswith(".json") or "update" not in low or "rule" not in low:
+                continue
+            jpath = os.path.join(rules_dir, name)
+            try:
+                with open(jpath, encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    for key in (
+                        "version",
+                        "Version",
+                        "firmwareVersion",
+                        "FirmwareVersion",
+                        "fw_version",
+                    ):
+                        v = data.get(key)
+                        if v is not None and str(v).strip():
+                            return str(v).strip()
+            except (OSError, json.JSONDecodeError, TypeError):
+                continue
+    arch = os.path.join(folder_path, "archive")
+    if os.path.isdir(arch):
+        best = ""
+        for name in os.listdir(arch):
+            low = name.lower()
+            if not (low.endswith(".zip") or ".tar.gz" in low):
+                continue
+            m = re.search(r"(\d+\.\d+\.\d+(?:\.\d+)?)", name)
+            if m:
+                return m.group(1)
+            if len(name) > len(best):
+                best = name
+        if best:
+            return best
+    return "—"
+
+
+def scan_firmware_folders_with_versions(server_root: str, vmc_model: str) -> list[tuple[str, str]]:
+    """
+    (folder_name, version_label) for subdirs that look like firmware trees for this device.
+    """
+    root = os.path.abspath(server_root)
+    if not os.path.isdir(root):
+        return []
+    vmc = (vmc_model or "").strip().upper()
+    try:
+        names = sorted(
+            (d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)) and not d.startswith(".")),
+            key=str.lower,
+        )
+    except OSError:
+        return []
+    out: list[tuple[str, str]] = []
+    for name in names:
+        p = os.path.join(root, name)
+        bin_vm = os.path.join(p, "binaries", vmc)
+        if os.path.isdir(bin_vm) or folder_has_firmware_artifacts(p):
+            out.append((name, firmware_folder_version_label(p)))
+    return out
+
+
+def active_folder_from_camera_update_url(raw_update_url: str, folder_names: list[str]) -> str | None:
+    """Match camera update_url output to a server folder name (last path segment)."""
+    raw = (raw_update_url or "").strip()
+    if not raw:
+        return None
+    try:
+        path = urlparse(raw).path or ""
+    except Exception:
+        path = ""
+    parts = [p for p in path.split("/") if p]
+    seg = parts[-1] if parts else ""
+    if not seg:
+        return None
+    seg_decoded = unquote(seg)
+    for f in folder_names:
+        if f.lower() == seg_decoded.lower():
+            return f
+    return None
+
+
+def build_camera_fota_url_for_folder(server_root: str, folder_name: str) -> tuple[bool, str, str]:
+    """(ok, err, url) when a server is already running for server_root."""
+    root_abs = os.path.abspath(server_root)
+    base = get_base_url_if_serving_root(root_abs)
+    if not base:
+        running, _ = check_server_status()
+        if running and get_in_process_server_root_abs() == root_abs:
+            ok_u, url = get_running_server_url()
+            if ok_u and url:
+                base = url.rstrip("/")
+    if not base:
+        return False, "No firmware server is running for this server root.", ""
+    local_ip = get_local_ipv4()
+    host_part = base.replace("http://", "").replace("https://", "").strip("/")
+    port = host_part.split(":")[1] if ":" in host_part else str(DEFAULT_PORT)
+    seg = quote((folder_name or "").strip(), safe="")
+    return True, "", f"http://{local_ip}:{port}/{seg}"
 
 
 def prepare_env_directories(

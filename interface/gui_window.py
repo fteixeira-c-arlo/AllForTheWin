@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDockWidget,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -588,7 +589,9 @@ class SessionWorker(QObject):
                     "connected": True,
                     "model": name,
                     "fw": self._detected.get("fw_version") or "—",
+                    "serial": self._detected.get("serial") or "",
                     "env": (self._detected.get("env") or "—"),
+                    "update_url_raw": (self._detected.get("update_url_raw") or "").strip(),
                     "conn_type": self._cfg.type,
                     "device_id": self._cfg.device_identifier or "",
                     "commands_count": len(self._device_commands),
@@ -1061,6 +1064,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self._setup_menu_bar()
+        self._init_fw_folder_switcher_dock()
 
         self._set_command_list_disconnected()
         self._prompt_model_name = "Device"
@@ -1068,6 +1072,7 @@ class MainWindow(QMainWindow):
     def _setup_menu_bar(self) -> None:
         menubar = self.menuBar()
         menu_view = menubar.addMenu("&View")
+        self._menu_view: object = menu_view
         act_session_log = QAction("&Session log", self)
         act_session_log.setShortcut(QKeySequence("Ctrl+Shift+L"))
         act_session_log.setStatusTip("Show the live connection and command output tab")
@@ -1098,6 +1103,29 @@ class MainWindow(QMainWindow):
         act_about = QAction("&About", self)
         act_about.triggered.connect(self._menu_about)
         menu_help.addAction(act_about)
+
+    def _init_fw_folder_switcher_dock(self) -> None:
+        from interface.fw_quick_switch_panel import FwQuickSwitchPanel
+
+        self._fw_switch_dock = QDockWidget("Firmware folders", self)
+        self._fw_switch_dock.setObjectName("FwFolderSwitcherDock")
+        self._fw_switch_panel = FwQuickSwitchPanel(self)
+        self._fw_switch_panel.set_shell_async(self._fw_shell_async)
+        self._fw_switch_dock.setWidget(self._fw_switch_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._fw_switch_dock)
+        self._fw_switch_dock.hide()
+
+        act = QAction("FW &folder switcher", self)
+        act.setCheckable(True)
+        act.setStatusTip(
+            "Show folders on the local firmware server and switch the camera update_url in one click."
+        )
+        act.toggled.connect(self._fw_switch_dock.setVisible)
+        self._fw_switch_dock.visibilityChanged.connect(act.setChecked)
+        mv = getattr(self, "_menu_view", None)
+        if mv is not None:
+            mv.addSeparator()
+            mv.addAction(act)
 
     def _menu_fw_setup(self) -> None:
         if not self._device_connected:
@@ -1704,13 +1732,13 @@ class MainWindow(QMainWindow):
         outer.setSpacing(10)
 
         head = QHBoxLayout()
-        self._dip_model = QLabel("—")
-        mf = QFont()
-        mf.setPointSize(15)
-        mf.setBold(True)
-        self._dip_model.setFont(mf)
-        self._dip_model.setStyleSheet("color: #e8eef4; border: none; background: transparent;")
-        head.addWidget(self._dip_model, 0, Qt.AlignmentFlag.AlignVCenter)
+        head_l = QLabel("Device")
+        hf = QFont()
+        hf.setPointSize(12)
+        hf.setBold(True)
+        head_l.setFont(hf)
+        head_l.setStyleSheet("color: #8b95a5; border: none; background: transparent;")
+        head.addWidget(head_l, 0, Qt.AlignmentFlag.AlignVCenter)
         self._dip_badge = QLabel("Onboarded")
         self._dip_badge.setVisible(False)
         self._dip_badge.setStyleSheet(
@@ -1723,8 +1751,9 @@ class MainWindow(QMainWindow):
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(16)
-        grid.setVerticalSpacing(6)
+        grid.setVerticalSpacing(8)
         grid.setColumnStretch(1, 1)
+        mono = QFont("Menlo", 10) if sys.platform == "darwin" else QFont("Consolas", 10)
 
         def _mk_lbl(txt: str) -> QLabel:
             z = QLabel(txt)
@@ -1732,58 +1761,39 @@ class MainWindow(QMainWindow):
             return z
 
         r = 0
-        grid.addWidget(_mk_lbl("Firmware"), r, 0, Qt.AlignmentFlag.AlignTop)
+        grid.addWidget(_mk_lbl("Firmware version"), r, 0, Qt.AlignmentFlag.AlignTop)
         self._dip_fw = QLabel("—")
-        self._dip_fw.setStyleSheet("color: #c5ced9; font-size: 13px; border: none; background: transparent;")
+        self._dip_fw.setStyleSheet(
+            "color: #e8eef4; font-size: 15px; font-weight: 600; border: none; background: transparent;"
+        )
         self._dip_fw.setWordWrap(True)
         grid.addWidget(self._dip_fw, r, 1)
         r += 1
 
-        grid.addWidget(_mk_lbl("Connection"), r, 0, Qt.AlignmentFlag.AlignTop)
-        self._dip_conn = QLabel("—")
-        self._dip_conn.setStyleSheet("color: #c5ced9; font-size: 13px; border: none; background: transparent;")
-        self._dip_conn.setWordWrap(True)
-        grid.addWidget(self._dip_conn, r, 1)
-        r += 1
-
-        grid.addWidget(_mk_lbl("Device ID"), r, 0, Qt.AlignmentFlag.AlignTop)
-        self._dip_did = QLabel("—")
-        mono = QFont("Menlo", 10) if sys.platform == "darwin" else QFont("Consolas", 10)
-        self._dip_did.setFont(mono)
-        self._dip_did.setStyleSheet(
+        grid.addWidget(_mk_lbl("Serial number"), r, 0, Qt.AlignmentFlag.AlignTop)
+        self._dip_serial = QLabel("—")
+        self._dip_serial.setFont(mono)
+        self._dip_serial.setStyleSheet(
             "color: #aeb8c4; font-size: 12px; border: none; background: transparent; "
             "font-family: Consolas, Menlo, monospace;"
         )
-        self._dip_did.setWordWrap(True)
-        self._dip_did.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        grid.addWidget(self._dip_did, r, 1)
+        self._dip_serial.setWordWrap(True)
+        self._dip_serial.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        grid.addWidget(self._dip_serial, r, 1)
         r += 1
 
-        grid.addWidget(_mk_lbl("Stage / URL env"), r, 0, Qt.AlignmentFlag.AlignTop)
-        self._dip_env = QLabel("—")
-        self._dip_env.setStyleSheet("color: #c5ced9; font-size: 13px; border: none; background: transparent;")
-        self._dip_env.setWordWrap(True)
-        grid.addWidget(self._dip_env, r, 1)
-        r += 1
-
-        grid.addWidget(_mk_lbl("Command profile"), r, 0, Qt.AlignmentFlag.AlignTop)
-        self._dip_profile = QLabel("—")
-        self._dip_profile.setStyleSheet("color: #7a8494; font-size: 12px; border: none; background: transparent;")
-        grid.addWidget(self._dip_profile, r, 1)
+        grid.addWidget(_mk_lbl("Stage / env / URL"), r, 0, Qt.AlignmentFlag.AlignTop)
+        self._dip_env_url = QLabel("—")
+        self._dip_env_url.setStyleSheet("color: #c5ced9; font-size: 12px; border: none; background: transparent;")
+        self._dip_env_url.setWordWrap(True)
+        self._dip_env_url.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        grid.addWidget(self._dip_env_url, r, 1)
         outer.addLayout(grid)
 
-        raw_l = QLabel("Build info (raw)")
-        raw_l.setStyleSheet("color: #8b95a5; font-size: 11px; border: none; background: transparent;")
-        outer.addWidget(raw_l)
-        self._dip_raw = QTextEdit()
-        self._dip_raw.setReadOnly(True)
-        self._dip_raw.setMaximumHeight(140)
-        self._dip_raw.setFont(mono)
-        self._dip_raw.setStyleSheet(
-            "QTextEdit { background-color: #0d1117; color: #aeb8c4; border: 1px solid #2a313a; "
-            "border-radius: 4px; padding: 6px; }"
-        )
-        outer.addWidget(self._dip_raw)
+        hint = QLabel("Full device output is still available via the info command in the shell.")
+        hint.setStyleSheet("color: #5c6570; font-size: 10px; border: none; background: transparent;")
+        hint.setWordWrap(True)
+        outer.addWidget(hint)
 
         panel.hide()
         return panel
@@ -1793,20 +1803,17 @@ class MainWindow(QMainWindow):
             self._device_info_panel.hide()
             return
         self._device_info_panel.show()
-        model = str(info.get("model") or "—")
-        self._dip_model.setText(model)
         self._dip_fw.setText(str(info.get("fw") or "—"))
-        ct = str(info.get("conn_type") or "—")
-        did = (info.get("device_id") or "").strip()
-        self._dip_conn.setText(ct)
-        self._dip_did.setText(did if did else "—")
-        self._dip_env.setText(str(info.get("env") or "—"))
-        self._dip_profile.setText(str(info.get("command_profile") or "none"))
+        ser = (info.get("serial") or "").strip()
+        self._dip_serial.setText(ser if ser else "—")
+        env = str(info.get("env") or "").strip() or "—"
+        url_raw = (info.get("update_url_raw") or "").strip()
+        if url_raw:
+            self._dip_env_url.setText(f"Stage / env: {env}\nUpdate URL: {url_raw}")
+        else:
+            self._dip_env_url.setText(f"Stage / env: {env}")
         ob = info.get("is_onboarded")
         self._dip_badge.setVisible(ob is True)
-        raw = (info.get("raw_build_info") or "").strip()
-        self._dip_raw.setPlainText(raw if raw else "(no build_info captured)")
-        self._dip_raw.verticalScrollBar().setValue(0)
 
     @Slot(dict)
     def _on_state_changed(self, info: dict) -> None:
@@ -1833,6 +1840,9 @@ class MainWindow(QMainWindow):
             self._set_active_session_tab_title(self._prompt_model_name)
             self._sync_status_strip()
             self._refresh_device_info_panel(info)
+            fwp = getattr(self, "_fw_switch_panel", None)
+            if fwp is not None:
+                fwp.apply_state(info)
             self._update_tab_close_buttons()
         else:
             self._device_connected = False
@@ -1848,6 +1858,9 @@ class MainWindow(QMainWindow):
             self._active_session_log = None
             self._sync_status_strip()
             self._refresh_device_info_panel(info)
+            fwp = getattr(self, "_fw_switch_panel", None)
+            if fwp is not None:
+                fwp.apply_state({"connected": False})
             self._set_command_list_disconnected()
             self._update_tab_close_buttons()
 

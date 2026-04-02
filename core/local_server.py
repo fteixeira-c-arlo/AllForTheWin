@@ -1,7 +1,9 @@
 """Local firmware HTTP server for update_url flow."""
+import json
 import os
 import shutil
 import socket
+import sys
 import tempfile
 import threading
 import tarfile
@@ -9,12 +11,155 @@ import zipfile
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from typing import Any
 
+try:
+    import ctypes
+except ImportError:
+    ctypes = None  # type: ignore[misc, assignment]
+
 # Default port and root; server state for stop/status
 DEFAULT_PORT = 8000
 _server: HTTPServer | None = None
 _server_thread: threading.Thread | None = None
 _server_root: str = ""
 _served_directory: str = ""
+
+
+def _fw_server_state_path() -> str:
+    """Persisted {pid, port, root} so a new window can detect another ArloShell's server."""
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+    else:
+        base = os.path.join(os.path.expanduser("~"), ".cache")
+    d = os.path.join(base, "ArloShell")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        d = tempfile.gettempdir()
+    return os.path.join(d, "fw_server_state.json")
+
+
+def clear_fw_server_state_file() -> None:
+    try:
+        os.remove(_fw_server_state_path())
+    except OSError:
+        pass
+
+
+def _write_fw_server_state(port: int, root: str) -> None:
+    path = _fw_server_state_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except OSError:
+        return
+    try:
+        payload = {
+            "pid": os.getpid(),
+            "port": int(port),
+            "root": os.path.abspath(root),
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+    except OSError:
+        pass
+
+
+def _pid_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt" and ctypes is not None:
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        h = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not h:
+            return False
+        ctypes.windll.kernel32.CloseHandle(h)
+        return True
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def read_fw_server_state() -> dict[str, Any] | None:
+    """
+    Last known firmware HTTP server: {pid, port, root}.
+    Removes the file if the PID is gone (stale).
+    """
+    path = _fw_server_state_path()
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    pid = int(data.get("pid") or 0)
+    port = int(data.get("port") or 0)
+    root = str(data.get("root") or "")
+    if pid <= 0 or port <= 0 or not root:
+        clear_fw_server_state_file()
+        return None
+    if not _pid_exists(pid):
+        clear_fw_server_state_file()
+        return None
+    return {"pid": pid, "port": port, "root": os.path.abspath(root)}
+
+
+def get_in_process_server_root_abs() -> str:
+    """Directory served by this process's firmware HTTP server, or empty if none."""
+    if _server is None:
+        return ""
+    return os.path.abspath(_server_root)
+
+
+def get_base_url_if_serving_root(desired_root: str) -> str | None:
+    """
+    If something is already serving desired_root on localhost, return http://localhost:<port>.
+    Uses in-process server first, then persisted cross-session state + TCP check.
+    """
+    want = os.path.abspath(desired_root)
+    if _server is not None and _server_root:
+        if os.path.abspath(_server_root) == want:
+            ok, url = get_running_server_url()
+            if ok and url:
+                return url.rstrip("/")
+        return None
+    st = read_fw_server_state()
+    if st and os.path.abspath(str(st["root"])) == want and is_firmware_port_accepting_connections(
+        int(st["port"])
+    ):
+        return f"http://localhost:{int(st['port'])}"
+    return None
+
+
+def firmware_folder_rename_blocked_reason(folder_abs: str) -> str | None:
+    """
+    If renaming folder_abs would conflict with an active firmware HTTP server, return a user message.
+    """
+    folder_abs = os.path.abspath(folder_abs)
+    if _server is not None and _server_root:
+        try:
+            sr = os.path.abspath(_server_root)
+            if os.path.commonpath([sr, folder_abs]) == sr:
+                return (
+                    "Can't rename this folder: the firmware HTTP server in this window is serving "
+                    "this directory tree. Stop the server first (e.g. server stop or Stop server & close in the wizard)."
+                )
+        except ValueError:
+            pass
+    st = read_fw_server_state()
+    if st and is_firmware_port_accepting_connections(int(st["port"])):
+        try:
+            sr = os.path.abspath(str(st["root"]))
+            if os.path.commonpath([sr, folder_abs]) == sr:
+                return (
+                    f"Can't rename: a firmware server is still active on port {int(st['port'])} "
+                    f"(PID {int(st['pid'])}), serving this tree. Stop it in the ArloShell window that "
+                    "started the server, then retry."
+                )
+        except ValueError:
+            pass
+    return None
 
 
 def _make_handler(directory: str) -> type[SimpleHTTPRequestHandler]:
@@ -242,6 +387,7 @@ def start_http_server(directory: str, port: int | None = None) -> tuple[bool, st
 
     _server_thread = threading.Thread(target=serve, daemon=True)
     _server_thread.start()
+    _write_fw_server_state(actual_port, abs_dir)
     return True, f"http://localhost:{actual_port}"
 
 
@@ -249,6 +395,9 @@ def stop_http_server() -> tuple[bool, str]:
     """Stop the local firmware server if running. Returns (success, message)."""
     global _server, _server_thread
     if _server is None:
+        st = read_fw_server_state()
+        if st and int(st["pid"]) == os.getpid():
+            clear_fw_server_state_file()
         return True, "No server was running."
     try:
         _server.shutdown()
@@ -256,6 +405,7 @@ def stop_http_server() -> tuple[bool, str]:
         if _server_thread:
             _server_thread.join(timeout=2.0)
         _server_thread = None
+        clear_fw_server_state_file()
         return True, "Firmware server stopped."
     except Exception as e:
         return False, str(e)
@@ -294,17 +444,36 @@ def firmware_server_listener_summary() -> tuple[str, str, str]:
             f"This session · serving on :{prt}",
             "The firmware HTTP server was started from this ArloShell window.",
         )
+    st = read_fw_server_state()
+    if st and is_firmware_port_accepting_connections(int(st["port"])):
+        prt = int(st["port"])
+        root_disp = str(st["root"])
+        if len(root_disp) > 52:
+            root_disp = "…" + root_disp[-49:]
+        if int(st["pid"]) == os.getpid():
+            return (
+                "amber",
+                f"State · :{prt} (same process, no server thread)",
+                "Stale firmware server state was cleared or the server thread stopped unexpectedly. "
+                "Try starting the server again.",
+            )
+        return (
+            "amber",
+            f"Other session · serving on :{prt} (PID {int(st['pid'])})",
+            f"Another ArloShell process is serving {str(st['root'])}. Stop that window's server before "
+            "renaming folders under that root, or manage the server from that window.",
+        )
     if is_firmware_port_accepting_connections():
         return (
             "amber",
-            f"Port {DEFAULT_PORT} in use (not this session)",
-            "This window is not running the server, but something is listening on the usual firmware "
-            f"port ({DEFAULT_PORT})—often another ArloShell. That can still lock folders under the server root.",
+            f"Port {DEFAULT_PORT} in use (unknown process)",
+            "Something is listening on the usual firmware port but there is no matching ArloShell state file. "
+            "It may be another tool or an older ArloShell build. Folder renames under the FW root can still fail.",
         )
     return (
         "gray",
-        "This session · server off",
-        "No firmware server is running in this window and the default port is not accepting connections.",
+        "Firmware server off",
+        "No firmware server in this window and no known listener on the default firmware port.",
     )
 
 
@@ -314,6 +483,13 @@ def firmware_rename_access_denied_user_hint() -> str:
         return (
             "This window still has the firmware server running. Stop it first (e.g. command "
             f"server stop), then rename."
+        )
+    st = read_fw_server_state()
+    if st and is_firmware_port_accepting_connections(int(st["port"])):
+        return (
+            f"A firmware server is still active on port {int(st['port'])} (PID {int(st['pid'])}). "
+            "Stop it in the ArloShell window that started it, then retry. If it still fails, close "
+            "File Explorer on this folder."
         )
     if is_firmware_port_accepting_connections():
         return (
