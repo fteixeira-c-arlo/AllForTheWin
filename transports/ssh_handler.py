@@ -7,6 +7,7 @@ import paramiko
 from paramiko import SSHException
 
 from utils.logger import get_logger
+from utils.subprocess_helpers import win_subprocess_kwargs
 
 logger = get_logger()
 
@@ -84,7 +85,13 @@ class SSHHandler:
         self._device_id = None
         self._connected = False
 
-    def execute(self, command: str, args: list[str] | None = None) -> tuple[bool, str]:
+    def execute(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        *,
+        timeout_sec: float | None = None,
+    ) -> tuple[bool, str]:
         """
         Run command over SSH. Returns (success, output_or_error).
         Returns (False, "Device disconnected.") when the connection was lost.
@@ -95,7 +102,8 @@ class SSHHandler:
             full_cmd = command
             if args:
                 full_cmd = f"{command} {' '.join(args)}"
-            _, stdout, stderr = self._client.exec_command(full_cmd, timeout=30)
+            tmo = 30.0 if timeout_sec is None else max(1.0, float(timeout_sec))
+            _, stdout, stderr = self._client.exec_command(full_cmd, timeout=int(tmo))
             out = (stdout.read().decode() or stderr.read().decode() or "").strip()
             return True, out or "OK"
         except Exception as e:
@@ -166,14 +174,24 @@ class SSHHandler:
         try:
             f = open(log_path, "ab")
             if line_callback is None:
-                proc = subprocess.Popen(cmd, shell=True, stdout=f, stderr=subprocess.DEVNULL)
+                proc = subprocess.Popen(
+                    cmd,
+                    shell=True,
+                    stdout=f,
+                    stderr=subprocess.DEVNULL,
+                    **win_subprocess_kwargs(),
+                )
                 setattr(self, "_tail_process", proc)
                 setattr(self, "_tail_file", f)
                 setattr(self, "_tail_reader_thread", None)
                 return True, ""
 
             proc = subprocess.Popen(
-                cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+                cmd,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                **win_subprocess_kwargs(),
             )
 
             def reader() -> None:

@@ -408,6 +408,79 @@ def prompt_fw_server_root(default: str = "") -> str | None:
     return (path or "").strip().rstrip("/") or None
 
 
+def prompt_ensure_fw_server_root(current: str) -> str | None:
+    """
+    If ``current`` is an existing directory, return its absolute path.
+    Otherwise prompt to create the recommended folder or enter a custom path.
+    When FW_SERVER_ROOT is set, preferences are not saved; the created path must match env intent.
+    """
+    from core.fw_server_prefs import (
+        create_fw_server_root_directory,
+        recommended_user_fw_server_root,
+        save_fw_server_root,
+        uses_env_fw_server_root,
+    )
+    from interface.menus import show_error
+
+    cur = (current or "").strip()
+    if cur and os.path.isdir(cur):
+        return os.path.abspath(cur)
+
+    env_on = uses_env_fw_server_root()
+    rec = recommended_user_fw_server_root()
+
+    def _create_and_maybe_save(path: str) -> str | None:
+        p = os.path.abspath(os.path.expandvars(os.path.expanduser(path.strip())))
+        if not p:
+            return None
+        ok, err = create_fw_server_root_directory(p)
+        if not ok:
+            show_error(err or "Could not create folder.")
+            return None
+        if not env_on:
+            save_fw_server_root(p)
+        return p
+
+    if env_on:
+        target = cur or rec
+        msg = (
+            "FW_SERVER_ROOT points to a folder that does not exist yet:\n"
+            f"{target}\n\nCreate this folder now?"
+        )
+    else:
+        shown = cur or "(no path configured)"
+        msg = (
+            "Firmware server root does not exist yet:\n"
+            f"{shown}\n\n"
+            f"Create the recommended first-time folder?\n{rec}"
+        )
+
+    b = _gb()
+    if b is not None:
+        if b.ask_confirm(msg, default=True):
+            primary = (cur or rec) if env_on else rec
+            return _create_and_maybe_save(primary)
+        alt = b.ask_text(
+            "Enter absolute path for firmware server root (created if missing):",
+            default=(cur or rec) if env_on else rec,
+        )
+        if not alt or not str(alt).strip():
+            return None
+        return _create_and_maybe_save(str(alt).strip())
+
+    if questionary.confirm(msg, default=True, style=custom_style).ask():
+        primary = (cur or rec) if env_on else rec
+        return _create_and_maybe_save(primary)
+    t = questionary.text(
+        "Absolute path for firmware server root (created if missing):",
+        default=(cur or rec) if env_on else rec,
+        style=custom_style,
+    ).ask()
+    if not t or not str(t).strip():
+        return None
+    return _create_and_maybe_save(str(t).strip())
+
+
 def prompt_select_env_folder(base_path: str) -> str | None:
     """
     List subdirectories of base_path (e.g. C:\\FxTest\\fw_server\\local_server) and let user pick one.

@@ -1,24 +1,24 @@
 ; Inno Setup 6 — single-file installer for testers.
-; Output (commit / zip for testers): ..\release\ArloShell-Windows\Install-ArloShell.exe
+; Output (commit / zip for testers): ..\release\ArloHub-Windows\Install-ArloHub.exe
 ; Build: from repo root run  powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
 
-#define MyAppName "ArloShell"
+#define MyAppName "ArloHub"
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "Arlo"
-#define MyAppExeName "ArloShell.exe"
+#define MyAppExeName "ArloHub.exe"
 ; Relative to this .iss file (installer\)
-#define SourceDir "..\dist\ArloShell"
+#define SourceDir "..\dist\ArloHub"
 #define SetupIcon "..\assets\ArloShell_icon.ico"
 
 [Setup]
-AppId={{E8B4A1C2-9F3D-4E5B-8A7C-1D2E3F4A5B6C}
+AppId={{7E5A9C12-3F8B-4D21-A6E4-9B1C0D7F52A8}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
-OutputDir=..\release\ArloShell-Windows
-OutputBaseFilename=Install-ArloShell
+OutputDir=..\release\ArloHub-Windows
+OutputBaseFilename=Install-ArloHub
 SetupIconFile={#SetupIcon}
 Compression=lzma2/max
 SolidCompression=yes

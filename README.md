@@ -1,8 +1,8 @@
-# ArloShell
+# ArloHub
 
 **One tool. Any Arlo camera. One syntax.**
 
-ArloShell is a developer tool for communicating with Arlo cameras over ADB, SSH, and UART. Every camera model has its own command syntax — ArloShell abstracts that away with a single, consistent command vocabulary that works regardless of which device is connected. You type the same command every time. ArloShell handles the translation.
+ArloHub is a developer tool for communicating with Arlo cameras over ADB, SSH, and UART. Every camera model has its own command syntax — ArloHub abstracts that away with a single, consistent command vocabulary that works regardless of which device is connected. You type the same command every time. ArloHub handles the translation.
 
 ---
 
@@ -52,7 +52,7 @@ python main_gui.py
 
 ## Command Vocabulary
 
-ArloShell uses a universal `noun verb` syntax. The same command works on every supported device — ArloShell translates it to the correct shell string at runtime.
+ArloHub uses a universal `noun verb` syntax. The same command works on every supported device — ArloHub translates it to the correct shell string at runtime.
 
 ### Firmware
 | Command | Description |
@@ -133,7 +133,7 @@ pip install -r requirements.txt
 .\build_installer.ps1
 ```
 
-Output: `dist/ArloShell/ArloShell.exe`
+Output: `dist/ArloHub/ArloHub.exe`
 
 ---
 

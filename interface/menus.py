@@ -10,6 +10,8 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
+from core.app_metadata import APP_NAME, APP_VERSION
+
 console = Console()
 
 if TYPE_CHECKING:
@@ -122,7 +124,7 @@ def _commands_to_plain_text(commands: list[dict], include_system: bool = True) -
 
 
 # Introduction: what this terminal does (single space after bullets for even alignment)
-WELCOME_INTRO = """[bold]ArloShell Terminal[/]
+WELCOME_INTRO = f"""[bold]{APP_NAME} Terminal[/]
 
 [bold]Connect[/] — Pick a [bold]device[/] (see supported connections), then [bold]UART[/], [bold]ADB[/] (USB), or [bold]SSH[/]. Model, FW, and env are auto-detected from [bold]build_info[/] and [bold]kvcmd[/].
 
@@ -139,7 +141,7 @@ WELCOME_INTRO = """[bold]ArloShell Terminal[/]
 
 def show_welcome() -> None:
     """Display welcome banner with intro to the right of ASCII art. Connection is triggered by 's' (or 'connect')."""
-    title = Text.from_markup("[bold #26D0CE]ArloShell Terminal[/] [dim]v1.0.0[/]")
+    title = Text.from_markup(f"[bold #26D0CE]{APP_NAME} Terminal[/] [dim]v{APP_VERSION}[/]")
     subtitle = Text.from_markup("[dim]Hackathon Demo - Phase 1[/]")
     intro = Text.from_markup(WELCOME_INTRO.strip())
     camera_art = Text(ASCII_WELCOME_CAMERA, style=ASCII_ART_COLOR)

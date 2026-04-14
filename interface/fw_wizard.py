@@ -55,14 +55,17 @@ from core.fw_setup_service import (
     download_firmware_to_layout,
     ensure_server_and_camera_url,
     extract_firmware_archive,
+    extract_vmc_model_ids_from_text,
     firmware_folder_version_label,
     list_environment_folders,
     prepare_env_directories,
     rename_server_folder,
     sanitize_server_folder_name,
     is_firmware_archive,
+    normalize_firmware_search_row,
     scan_local_firmware_archives,
     search_firmware_archives,
+    version_filter_matches_local_folder,
 )
 from core.camera_models import get_models
 from utils.config_manager import (
@@ -75,7 +78,36 @@ from utils.config_manager import (
 
 from interface.app_styles import qcombobox_dark_stylesheet, set_arlo_pushbutton_variant
 
-_FW_GATE_LOG = logging.getLogger("arlo_shell.fw_local_detect")
+_FW_GATE_LOG = logging.getLogger("arlohub.fw_local_detect")
+
+_FwSearchRow = tuple[str, str, int | None, str | None]
+
+
+def _format_fw_bytes(n: int | None) -> str:
+    if n is None or n < 0:
+        return "—"
+    for label, div in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
+        if n >= div:
+            return f"{n / div:.1f} {label}"
+    return f"{n} B"
+
+
+def _format_artifactory_ts(raw: str | None) -> str:
+    if not raw:
+        return "—"
+    s = str(raw).strip()
+    if s.isdigit():
+        try:
+            from datetime import datetime, timezone
+
+            ms = int(s)
+            return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        except (ValueError, OSError):
+            return s[:19]
+    if "T" in s:
+        return s.replace("T", " ")[:16]
+    return s[:24]
+
 
 # Match main window accents (see gui_window.py)
 _ACCENT = "#00897B"
@@ -268,7 +300,7 @@ class FwWizard(QDialog):
         self._skip_server_close_dialog = False
 
         self._fw_root = default_fw_server_root()
-        self._search_results: list[tuple[str, str]] = []
+        self._search_results: list[_FwSearchRow] = []
         self._selected_folder: str | None = None
         self._selected_filename: str | None = None
         self._version_path: str = ""
@@ -284,8 +316,8 @@ class FwWizard(QDialog):
         self._is_onboarded: bool | None = raw_ob if isinstance(raw_ob, bool) else None
 
         self._stress_mode = False
-        self._stress_results_a: list[tuple[str, str]] = []
-        self._stress_results_b: list[tuple[str, str]] = []
+        self._stress_results_a: list[_FwSearchRow] = []
+        self._stress_results_b: list[_FwSearchRow] = []
         self._stress_sel_a_folder: str | None = None
         self._stress_sel_a_file: str | None = None
         self._stress_sel_b_folder: str | None = None
@@ -372,7 +404,7 @@ class FwWizard(QDialog):
                     if foreign and st:
                         mb.setText(
                             f"A firmware server is still listening on port {busy_port} "
-                            f"(another ArloShell, PID {int(st['pid'])}). "
+                            f"(another ArloHub, PID {int(st['pid'])}). "
                             "This window cannot stop it. Close the wizard anyway?"
                         )
                     else:
@@ -1605,9 +1637,15 @@ class FwWizard(QDialog):
         self._stress_skip_download_b = False
         self._start_download()
 
-    def _pick_local_row_for_skip(self, folder: str, vf: str) -> tuple[str, str] | None:
+    def _pick_local_row_for_skip(self, folder: str, vf: str) -> _FwSearchRow | None:
         """First (version_path, filename) under archive/ for this folder, preferring vf substring match."""
         rows = scan_local_firmware_archives(self._fw_root, folder, vf)
+        primary = str(self._model_dict.get("name") or "").strip().upper()
+        if rows and primary:
+            pid = frozenset([primary])
+            pref = [r for r in rows if extract_vmc_model_ids_from_text(r[1] or "") & pid]
+            if pref:
+                rows = pref
         if rows:
             return rows[0]
         arch = os.path.join(self._fw_root, folder, "archive")
@@ -1616,7 +1654,7 @@ class FwWizard(QDialog):
         try:
             for name in sorted(os.listdir(arch), key=str.lower):
                 if is_firmware_archive(name):
-                    return (f"local/{folder}/{name}", name)
+                    return (f"local/{folder}/{name}", name, None, None)
         except OSError:
             pass
         return None
@@ -1630,16 +1668,18 @@ class FwWizard(QDialog):
             return False
         env_dir = os.path.abspath(os.path.join(self._fw_root, folder))
         try:
-            if classify_local_firmware_vs_selection(env_dir, vf, None) != "exact_match":
+            primary = str(self._model_dict.get("name") or "").strip()
+            ok_skip, loc = version_filter_matches_local_folder(
+                env_dir, vf, primary_model_id=primary or None
+            )
+            if not ok_skip:
                 return False
         except Exception:
             _FW_GATE_LOG.exception("pre-search local classify (single)")
             return False
-        loc = firmware_folder_version_label(env_dir)
         pair = self._pick_local_row_for_skip(folder, vf)
-        if not pair:
-            pair = (f"local/{folder}/", "")
-        vp, fn = pair
+        row = normalize_firmware_search_row(pair) if pair else (f"local/{folder}/", "", None, None)
+        vp, fn = row[0], row[1]
         QMessageBox.information(
             self,
             "FW Wizard",
@@ -1653,7 +1693,7 @@ class FwWizard(QDialog):
         )
         return True
 
-    def _stress_local_rows_if_skip_artifactory(self, folder: str, vf: str) -> list[tuple[str, str]] | None:
+    def _stress_local_rows_if_skip_artifactory(self, folder: str, vf: str) -> list[_FwSearchRow] | None:
         """
         If version filter is non-empty and the folder already matches that build, return local-only
         result rows and skip Artifactory for this firmware. Otherwise None (run search).
@@ -1663,16 +1703,26 @@ class FwWizard(QDialog):
             return None
         env_dir = os.path.abspath(os.path.join(self._fw_root, folder))
         try:
-            if classify_local_firmware_vs_selection(env_dir, vf_st, None) != "exact_match":
+            primary = str(self._model_dict.get("name") or "").strip()
+            ok_skip, _loc = version_filter_matches_local_folder(
+                env_dir, vf_st, primary_model_id=primary or None
+            )
+            if not ok_skip:
                 return None
         except Exception:
             _FW_GATE_LOG.exception("pre-search local classify (stress)")
             return None
         merged = list(scan_local_firmware_archives(self._fw_root, folder, vf_st))
+        primary_st = str(self._model_dict.get("name") or "").strip().upper()
+        if merged and primary_st:
+            pid = frozenset([primary_st])
+            pref = [r for r in merged if extract_vmc_model_ids_from_text(r[1] or "") & pid]
+            if pref:
+                merged = pref
         if not merged:
             pair = self._pick_local_row_for_skip(folder, vf_st)
             if pair:
-                merged = [pair]
+                merged = [normalize_firmware_search_row(pair)]
         if not merged:
             return None
         return merged
@@ -2020,7 +2070,7 @@ class FwWizard(QDialog):
             if self._stress_search_seq == "a":
                 pref_a = list(self._stress_prefetch_local_a or [])
                 self._stress_prefetch_local_a = []
-                art_a = [(str(a), str(b)) for a, b in rows] if ok else []
+                art_a = [normalize_firmware_search_row(r) for r in rows] if ok else []
                 merged_a = pref_a + art_a
                 if not merged_a:
                     self._search_busy = False
@@ -2085,7 +2135,7 @@ class FwWizard(QDialog):
             self._stress_search_seq = None
             pref_b = list(self._stress_prefetch_local_b or [])
             self._stress_prefetch_local_b = []
-            art_b = [(str(a), str(b)) for a, b in rows] if ok else []
+            art_b = [normalize_firmware_search_row(r) for r in rows] if ok else []
             merged_b = pref_b + art_b
             if not merged_b:
                 self._stress_results_b = []
@@ -2116,7 +2166,7 @@ class FwWizard(QDialog):
         self._search_busy = False
         pref = list(self._prefetched_local_rows or [])
         self._prefetched_local_rows = []
-        art = [(str(a), str(b)) for a, b in rows] if ok else []
+        art = [normalize_firmware_search_row(r) for r in rows] if ok else []
         merged = pref + art
         if not merged:
             self._search_results = []
@@ -2168,29 +2218,29 @@ class FwWizard(QDialog):
     def _fill_results_table(self) -> None:
         self._table.setSortingEnabled(False)
         self._table.setRowCount(0)
-        for folder, fn in self._search_results:
+        for folder, fn, sz, md in self._search_results:
             r = self._table.rowCount()
             self._table.insertRow(r)
             self._table.setItem(r, 0, QTableWidgetItem(folder))
             self._table.setItem(r, 1, QTableWidgetItem(fn))
-            self._table.setItem(r, 2, QTableWidgetItem("—"))
-            self._table.setItem(r, 3, QTableWidgetItem("—"))
+            self._table.setItem(r, 2, QTableWidgetItem(_format_fw_bytes(sz)))
+            self._table.setItem(r, 3, QTableWidgetItem(_format_artifactory_ts(md)))
             ext = fn.lower().split(".")[-1] if "." in fn else fn
             self._table.setItem(r, 4, QTableWidgetItem(ext))
         self._table.setSortingEnabled(True)
         self._selected_filename = None
         self._selected_folder = None
 
-    def _fill_one_table(self, table: QTableWidget, data: list[tuple[str, str]]) -> None:
+    def _fill_one_table(self, table: QTableWidget, data: list[_FwSearchRow]) -> None:
         table.setSortingEnabled(False)
         table.setRowCount(0)
-        for folder, fn in data:
+        for folder, fn, sz, md in data:
             r = table.rowCount()
             table.insertRow(r)
             table.setItem(r, 0, QTableWidgetItem(folder))
             table.setItem(r, 1, QTableWidgetItem(fn))
-            table.setItem(r, 2, QTableWidgetItem("—"))
-            table.setItem(r, 3, QTableWidgetItem("—"))
+            table.setItem(r, 2, QTableWidgetItem(_format_fw_bytes(sz)))
+            table.setItem(r, 3, QTableWidgetItem(_format_artifactory_ts(md)))
             ext = fn.lower().split(".")[-1] if "." in fn else fn
             table.setItem(r, 4, QTableWidgetItem(ext))
         table.setSortingEnabled(True)

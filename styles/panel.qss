@@ -1,0 +1,283 @@
+/* Command panel — tokens mirror styles/tokens.py */
+
+#cmdSidebar {
+    background-color: #12131a;
+    border-right: 1px solid #2a2d3a;
+    color: #c8ccde;
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 12px;
+}
+
+#filterSearchIcon {
+    color: #444760;
+    font-size: 13px;
+    background: transparent;
+    border: none;
+    padding: 0 4px 0 2px;
+}
+
+QLineEdit#filterInput {
+    background: #1a1c27;
+    border: 1px solid #2a2d3a;
+    border-radius: 8px;
+    padding: 6px 10px;
+    color: #b0b4c8;
+    font-size: 12px;
+}
+
+QLineEdit#filterInput:focus {
+    border-color: #5DCAA5;
+}
+
+#cmdScroll {
+    background-color: transparent;
+    border: none;
+}
+
+#cmdScroll > QWidget > QWidget {
+    background-color: transparent;
+}
+
+#cmdScroll QScrollBar:vertical {
+    width: 4px;
+    background: transparent;
+    margin: 0;
+}
+
+#cmdScroll QScrollBar::handle:vertical {
+    background: #2a2d3a;
+    border-radius: 2px;
+    min-height: 20px;
+}
+
+#cmdScroll QScrollBar::add-line:vertical,
+#cmdScroll QScrollBar::sub-line:vertical {
+    height: 0;
+}
+
+#cmdScrollContent {
+    background-color: transparent;
+}
+
+/* --- Section headers --- */
+
+QLabel#sectionHeaderIcon {
+    min-width: 18px;
+    max-width: 18px;
+    min-height: 18px;
+    max-height: 18px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 0;
+    margin-left: 8px;
+    border: none;
+}
+
+QWidget[section="firmware"] QLabel#sectionHeaderIcon {
+    background-color: #1D3A2D;
+    color: #5DCAA5;
+}
+
+QWidget[section="device"] QLabel#sectionHeaderIcon {
+    background-color: #1a2a3d;
+    color: #5ba3e0;
+}
+
+QWidget[section="logs"] QLabel#sectionHeaderIcon {
+    background-color: #2e2418;
+    color: #EF9F27;
+}
+
+QWidget[section="network"] QLabel#sectionHeaderIcon {
+    background-color: #2a1c2e;
+    color: #AFA9EC;
+}
+
+QWidget[section="neutral"] QLabel#sectionHeaderIcon {
+    background-color: #252736;
+    color: #8b90a8;
+}
+
+QWidget#sectionHeaderRow {
+    background-color: transparent;
+    border: none;
+}
+
+QPushButton#sectionHeaderBtn {
+    text-align: left;
+    border: none;
+    padding: 8px 6px 4px 4px;
+    color: #8b90a8;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    background: transparent;
+}
+
+QPushButton#sectionHeaderBtn:hover {
+    color: #c8ccde;
+}
+
+QFrame#sectionHeaderDivider {
+    background-color: #1e2030;
+    border: none;
+    max-height: 1px;
+    min-height: 1px;
+}
+
+QFrame#cmdPanelSeparator {
+    background-color: #1e2030;
+    border: none;
+    max-height: 1px;
+    min-height: 1px;
+}
+
+/* --- Command rows --- */
+
+QFrame#cmdRow {
+    background-color: transparent;
+    border: none;
+    border-radius: 6px;
+    min-height: 30px;
+    max-height: 30px;
+}
+
+QFrame#cmdRow:hover {
+    background-color: #1e2030;
+}
+
+QFrame#cmdRow QLabel#cmdRowLabel {
+    color: #c8ccde;
+    background: transparent;
+    border: none;
+    padding: 0;
+    font-size: 12px;
+}
+
+QFrame#cmdRow[tier="3"] QLabel#cmdRowLabel {
+    color: #8b90a8;
+}
+
+QFrame#cmdRow QLabel#cmdRowArgHint {
+    color: #444760;
+    background: transparent;
+    border: none;
+    padding: 0 6px 0 0;
+    font-size: 11px;
+}
+
+QFrame#cmdRow[tier="3"] QLabel#cmdRowArgHint {
+    color: #444760;
+}
+
+QFrame#cmdRow[section="firmware"] QLabel#cmdRowSectionIcon {
+    background-color: #1D3A2D;
+    color: #5DCAA5;
+}
+
+QFrame#cmdRow[section="device"] QLabel#cmdRowSectionIcon {
+    background-color: #1a2a3d;
+    color: #5ba3e0;
+}
+
+QFrame#cmdRow[section="logs"] QLabel#cmdRowSectionIcon {
+    background-color: #2e2418;
+    color: #EF9F27;
+}
+
+QFrame#cmdRow[section="network"] QLabel#cmdRowSectionIcon {
+    background-color: #2a1c2e;
+    color: #AFA9EC;
+}
+
+QFrame#cmdRow[section="neutral"] QLabel#cmdRowSectionIcon {
+    background-color: #252736;
+    color: #8b90a8;
+}
+
+QLabel#badgeWarn {
+    background-color: #2e2418;
+    color: #EF9F27;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 9px;
+    font-weight: 600;
+    border: none;
+}
+
+QLabel#badgeDanger {
+    background-color: #2a1010;
+    color: #F09595;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 9px;
+    font-weight: 600;
+    border: none;
+}
+
+/* Advanced tier header */
+QWidget#advancedBlock QPushButton#advancedHeaderBtn {
+    text-align: left;
+    border: none;
+    padding: 10px 6px 6px 8px;
+    color: #8b90a8;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    background: transparent;
+}
+
+QWidget#advancedBlock QPushButton#advancedHeaderBtn:hover {
+    color: #c8ccde;
+}
+
+/* --- Footer --- */
+
+#cmdFooter {
+    background-color: #12131a;
+    border-top: 1px solid #1e2030;
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
+}
+
+QLabel#cmdPromptGlyph {
+    color: #5DCAA5;
+    font-size: 11px;
+    font-family: "Consolas", "Courier New", monospace;
+    background: transparent;
+    border: none;
+    padding: 0 6px 0 0;
+}
+
+QLineEdit#cmdFooterInput {
+    background-color: #1a1c27;
+    border: 1px solid #2a2d3a;
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: #c8ccde;
+    font-size: 12px;
+    font-family: "Consolas", "Courier New", monospace;
+}
+
+QLineEdit#cmdFooterInput:focus {
+    border-color: #5DCAA5;
+}
+
+QLineEdit#cmdFooterInput:disabled {
+    border: 1px solid #2a2d3a;
+    color: #444760;
+    background-color: #16171e;
+}
+
+QLabel#cmdToolsBanner,
+QLabel#cmdDeviceCatalogBanner {
+    color: #8b90a8;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    padding: 10px 10px 6px 10px;
+    background: transparent;
+    border: none;
+}

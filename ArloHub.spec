@@ -1,6 +1,6 @@
 # PyInstaller spec — GUI (PySide6)
-# Build: pyinstaller --clean --noconfirm ArloShell.spec
-# Output: dist/ArloShell/ArloShell.exe
+# Build: pyinstaller --clean --noconfirm ArloHub.spec
+# Output: dist/ArloHub/ArloHub.exe
 #
 # Do NOT use collect_all("PySide6"): that bundles every Qt module (WebEngine, QML, 3D, …)
 # and inflates the folder to ~700MB+. This app only needs QtCore / QtGui / QtWidgets.
@@ -16,9 +16,13 @@ _project_root = Path(SPEC).resolve().parent
 datas = [
     (str(_project_root / "core" / "abstract_command_definitions.json"), "core"),
     (str(_project_root / "core" / "e3_wired_commands.json"), "core"),
+    (str(_project_root / "core" / "amebapro2_commands.json"), "core"),
+    (str(_project_root / "core" / "gen5_commands.json"), "core"),
+    (str(_project_root / "core" / "linux_kealory_commands.json"), "core"),
     (str(_project_root / "core" / "command_profiles.json"), "core"),
     (str(_project_root / "docs" / "e3_wired_cli_reference.md"), "docs"),
     (str(_project_root / "assets" / "ArloShell_icon.png"), "assets"),
+    (str(_project_root / "styles" / "panel.qss"), "styles"),
 ]
 binaries = []
 hiddenimports = []
@@ -89,7 +93,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="ArloShell",
+    name="ArloHub",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -111,5 +115,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="ArloShell",
+    name="ArloHub",
 )

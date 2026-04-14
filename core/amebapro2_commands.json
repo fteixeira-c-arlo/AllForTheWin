@@ -34,11 +34,58 @@
     {"name": "get_foxconn_fw_version", "abstract": "get_foxconn_fw_version", "description": "sys=ver", "syntax": "sys=ver", "category": "isp", "shell": "sys=ver"},
     {"name": "get_mcu_fw_version", "abstract": "get_mcu_fw_version", "description": "MCU FW version", "syntax": "uart=mcuver", "category": "isp", "shell": "uart=mcuver"},
     {"name": "start_battery_charging", "abstract": "start_battery_charging", "description": "Start charging (Robin)", "syntax": "uart=chg_charge_start", "category": "isp", "shell": "uart=chg_charge_start", "only_codenames": ["robin"]},
+    {"name": "cli_agw_enable_hibernate", "description": "ISP hibernate (0=stay awake, 1=default); Robin auto-disables on connect", "syntax": "cli_agw_enable_hibernate 0|1", "category": "isp", "shell": "cli_agw_enable_hibernate", "only_codenames": ["robin"]},
     {"name": "play_siren", "abstract": "play_siren", "description": "Siren on (Finch)", "syntax": "arlo=media,siren,1,0", "category": "isp", "shell": "arlo=media,siren,1,0", "only_codenames": ["finch"]},
     {"name": "stop_siren", "abstract": "stop_siren", "description": "Siren off (Finch)", "syntax": "arlo=media,siren,0,0", "category": "isp", "shell": "arlo=media,siren,0,0", "only_codenames": ["finch"]},
     {"name": "atw0", "description": "Set WiFi SSID (then ATW1 and ATWC)", "syntax": "ATW0=<ssid>", "category": "isp", "shell": "ATW0="},
     {"name": "atw1", "description": "Set WiFi PSK", "syntax": "ATW1=<pass>", "category": "isp", "shell": "ATW1="},
     {"name": "atwc", "description": "Connect WiFi after ATW0/ATW1", "syntax": "ATWC", "category": "isp", "shell": "ATWC"},
-    {"name": "connect_wifi", "abstract": "connect_wifi_ip", "description": "Use atw0, atw1, atwc as separate raw commands", "syntax": "(n/a)", "category": "isp", "shell": "", "unsupported": true, "unsupported_message": "On AmebaPro2 run raw atw0, atw1, then atwc (ISP lines)."}
+    {"name": "connect_wifi", "abstract": "connect_wifi_ip", "description": "Use atw0, atw1, atwc as separate raw commands", "syntax": "(n/a)", "category": "isp", "shell": "", "unsupported": true, "unsupported_message": "On AmebaPro2 run raw atw0, atw1, then atwc (ISP lines)."},
+
+    {"name": "fwupgrade", "description": "Firmware upgrade from URL", "syntax": "fwupgrade <url>", "category": "firmware", "shell": "fwupgrade"},
+    {"name": "update_image", "description": "Update image by model, version, URL", "syntax": "update_image <model_id> <version> <url>", "category": "firmware", "shell": "update_image"},
+    {"name": "manual_upgrade", "description": "Manual upgrade from folder", "syntax": "manual_upgrade <folder>", "category": "firmware", "shell": "manual_upgrade"},
+    {"name": "update_refresh_noapply", "description": "Refresh update rules without applying (-o)", "syntax": "update_refresh -o", "category": "firmware", "shell": "update_refresh"},
+
+    {"name": "log_level", "description": "Set log level per module", "syntax": "log_level <module=level>", "category": "logs", "shell": "log_level"},
+    {"name": "log_msg", "description": "Inject log message", "syntax": "log_msg <level> \"message\"", "category": "logs", "shell": "log_msg"},
+    {"name": "curl_test", "description": "HTTP stress test", "syntax": "curl_test <count> <delay> <parallel_run_count>", "category": "network", "shell": "curl_test"},
+    {"name": "dns_test", "description": "DNS test", "syntax": "dns_test random|<urls> <time_sec> <interval_ms>", "category": "network", "shell": "dns_test"},
+    {"name": "wifi_ble_command", "description": "WiFi/BLE bridge command", "syntax": "wifi_ble_command <command>", "category": "network", "shell": "wifi_ble_command"},
+    {"name": "wifi_wps_creds", "description": "Set WPS / WiFi credentials", "syntax": "wifi_wps_creds <SSID> <pass>", "category": "network", "shell": "wifi_wps_creds"},
+    {"name": "event_bus", "description": "Drive event bus", "syntax": "event_bus <event> [1/0]", "category": "device", "shell": "event_bus"},
+    {"name": "wifi_roam", "description": "Trigger WiFi roam", "syntax": "wifi_roam", "category": "network", "shell": "wifi_roam"},
+    {"name": "doorbell_button", "description": "Emulate doorbell button", "syntax": "doorbell_button [1/0/on/off]", "category": "device", "shell": "doorbell_button"},
+    {"name": "get_bad_block_count", "description": "Flash bad block count", "syntax": "get_bad_block_count", "category": "device", "shell": "get_bad_block_count"},
+
+    {"name": "kvread", "description": "KV read (use flags -d|-u|-x|-s|-j|-b and keys)", "syntax": "kvread [-d|-u|-x|-s|-j|-b] <item...>", "category": "kv", "shell": "kvread"},
+    {"name": "kvremove", "description": "Remove KV item", "syntax": "kvremove <item>", "category": "kv", "shell": "kvremove"},
+    {"name": "kvenable", "description": "KV enable or disable", "syntax": "kvenable enable|disable", "category": "kv", "shell": "kvenable"},
+    {"name": "kvreset", "description": "Reset KV store", "syntax": "kvreset", "category": "kv", "shell": "kvreset"},
+    {"name": "kvdump", "description": "Dump KV", "syntax": "kvdump", "category": "kv", "shell": "kvdump"},
+    {"name": "kv_exp_cert", "description": "KV export certificate", "syntax": "kv_exp_cert", "category": "kv", "shell": "kv_exp_cert"},
+
+    {"name": "ls", "description": "List directory", "syntax": "ls [<folder>]", "category": "filesystem", "shell": "ls"},
+    {"name": "pwd", "description": "Print working directory", "syntax": "pwd", "category": "filesystem", "shell": "pwd"},
+    {"name": "mkdir", "description": "Create folder", "syntax": "mkdir <folder>", "category": "filesystem", "shell": "mkdir"},
+    {"name": "rmdir", "description": "Remove folder", "syntax": "rmdir <folder>", "category": "filesystem", "shell": "rmdir"},
+    {"name": "cd", "description": "Change directory (lfs:/ ram:/ …)", "syntax": "cd [path]", "category": "filesystem", "shell": "cd"},
+    {"name": "rm", "description": "Remove file or folder", "syntax": "rm <file|folder>", "category": "filesystem", "shell": "rm"},
+    {"name": "erase", "description": "Erase (ISP)", "syntax": "erase", "category": "filesystem", "shell": "erase"},
+
+    {"name": "arlogw", "description": "Arlo gateway CLI (migrate, msg, threads, update_url, getmtu, getsn, reboot, dump_entitlement, sb_press, netstat, ifstat, ping, net, pirs, bs, …)", "syntax": "arlogw <subcommand> [args]", "category": "arlogw", "shell": "arlogw"},
+
+    {"name": "ble_onboarding_start", "description": "Start BLE onboarding", "syntax": "ble_onboarding_start", "category": "ble", "shell": "ble_onboarding_start"},
+    {"name": "ble_onboarding_claimed", "description": "Stop BLE onboarding with claimed status", "syntax": "ble_onboarding_claimed <true/false>", "category": "ble", "shell": "ble_onboarding_claimed"},
+
+    {"name": "fb_add", "description": "Add feedback event", "syntax": "fb_add <event>", "category": "feedback", "shell": "fb_add"},
+    {"name": "fb_remove", "description": "Remove feedback event", "syntax": "fb_remove <event>", "category": "feedback", "shell": "fb_remove"},
+    {"name": "led_activity", "description": "LED activity", "syntax": "led_activity <event> <on/off>", "category": "feedback", "shell": "led_activity"},
+
+    {"name": "show_stats", "description": "Show statistics", "syntax": "show_stats", "category": "debug", "shell": "show_stats"},
+
+    {"name": "profile_get", "description": "Read one profile setting", "syntax": "profile_get <setting_name>", "category": "profile", "shell": "profile get"},
+    {"name": "profile_set", "description": "Set profile setting", "syntax": "profile_set <setting_name> <setting_value>", "category": "profile", "shell": "profile set"},
+    {"name": "profile_get_all", "description": "List all profile settings", "syntax": "profile_get_all", "category": "profile", "shell": "profile get all"}
   ]
 }

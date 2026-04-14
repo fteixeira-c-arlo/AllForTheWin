@@ -17,7 +17,6 @@ class DeviceRegistryEntry(TypedDict, total=False):
     connection_types: list[str]  # uart, ssh, adb — priority order
     adb_supported: bool
     uart_baudrate: int
-    uart_baudrate_legacy: int
     enable_debug_method: str
     adb_auth_password: str
     notes: str
@@ -33,7 +32,6 @@ DEVICE_REGISTRY: list[DeviceRegistryEntry] = [
         "connection_types": ["uart"],
         "adb_supported": False,
         "uart_baudrate": 921600,
-        "uart_baudrate_legacy": 115200,
         "enable_debug_method": "sync_button_6x",
         "command_profile": "amebapro2",
     },
@@ -45,7 +43,6 @@ DEVICE_REGISTRY: list[DeviceRegistryEntry] = [
         "connection_types": ["uart"],
         "adb_supported": False,
         "uart_baudrate": 921600,
-        "uart_baudrate_legacy": 115200,
         "enable_debug_method": "sync_button_6x",
         "command_profile": "amebapro2",
     },
@@ -59,6 +56,17 @@ DEVICE_REGISTRY: list[DeviceRegistryEntry] = [
         "uart_baudrate": 921600,
         "enable_debug_method": "sync_button_6x",
         "command_profile": "amebapro2",
+    },
+    {
+        "model_ids": ["VMC4041P"],
+        "codename": "caracara",
+        "display_name": "Arlo Pro 4 (Caracara)",
+        "platform": "gen5",
+        "connection_types": ["uart", "ssh"],
+        "adb_supported": False,
+        "uart_baudrate": 115200,
+        "enable_debug_method": "sync_button_6x",
+        "command_profile": "gen5",
     },
     {
         "model_ids": ["VMC4060", "VMC4060P", "VMC4061"],
@@ -131,7 +139,6 @@ def registry_entry_to_camera_group(entry: DeviceRegistryEntry) -> dict[str, Any]
     conns = entry.get("connection_types") or []
     supported = [c.upper() for c in conns]
     baud = int(entry.get("uart_baudrate") or 115200)
-    legacy = entry.get("uart_baudrate_legacy")
     ds: dict[str, Any] = {
         "ssh": {"port": 22, "username": "root"},
     }
@@ -142,13 +149,13 @@ def registry_entry_to_camera_group(entry: DeviceRegistryEntry) -> dict[str, Any]
         "display_name": entry.get("display_name") or primary,
         "fw_search_models": [str(m).upper() for m in mids],
         "supported_connections": supported,
+        "connection_types": [str(c).lower() for c in conns],
         "default_settings": ds,
         "command_profile": entry.get("command_profile") or "none",
         "platform": entry.get("platform"),
         "codename": entry.get("codename"),
         "adb_supported": bool(entry.get("adb_supported")),
         "default_uart_baud": baud,
-        "uart_baudrate_legacy": int(legacy) if legacy is not None else None,
         "enable_debug_method": entry.get("enable_debug_method"),
         "registry_entry": dict(entry),
     }

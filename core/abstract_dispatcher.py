@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -169,9 +170,15 @@ def execute_abstract_command(
     connection_execute: Callable[[str, list[str]], tuple[bool, str]] | None = None,
     model: dict[str, Any] | None = None,
     mcu_execute_fn: Callable[[str], Any] | None = None,
+    connection_pull_file: Callable[[str, str], tuple[bool, str]] | None = None,
+    pull_logs_local_dir: str | None = None,
 ) -> list[str] | None:
     """
     Run the abstract command's sequence via execute_fn(full_shell_string).
+
+    Steps whose catalog ``shell`` is empty (e.g. ``pull_logs`` on E3 wired) use
+    ``connection_pull_file`` to copy the log archive from the device instead of
+    running ``adb shell``.
 
     Returns None if the abstract is unknown (caller may fall through) or if the
     sequence is empty (caller handles, e.g. push arlod).
@@ -222,6 +229,38 @@ def execute_abstract_command(
             shell_line, console = resolve_step(raw_name, step_args, device_commands)
         except CommandNotSupportedError:
             raise
+        if raw_name.lower() == "pull_logs" and not (shell_line or "").strip():
+            if _norm_connection(connection_type) == "UART":
+                raise ValueError(
+                    "pull_logs is not supported over UART. Connect via ADB to download the log archive."
+                )
+            if not connection_pull_file:
+                raise RuntimeError(
+                    f"Abstract command {abstract_name!r} failed at step {i + 1}/{len(sequence)} "
+                    f"(raw={raw_name!r}): file pull is not available for this connection (use ADB or SSH)."
+                )
+            from core.command_parser import PULL_LOGS_REMOTE_PATH
+            from core.user_paths import get_arlo_logs_dir
+
+            local_dir = pull_logs_local_dir or get_arlo_logs_dir()
+            local_path = os.path.join(local_dir, "allsystem.logs.tar")
+            if step_args:
+                local_path = step_args[0]
+            try:
+                result = connection_pull_file(PULL_LOGS_REMOTE_PATH, local_path)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Abstract command {abstract_name!r} failed at step {i + 1}/{len(sequence)} "
+                    f"(raw={raw_name!r}): pull_logs raised {type(e).__name__}: {e}"
+                ) from e
+            ok, text = _interpret_execute_result(result)
+            if not ok:
+                raise RuntimeError(
+                    f"Abstract command {abstract_name!r} failed at step {i + 1}/{len(sequence)} "
+                    f"(raw={raw_name!r}): pull_logs — {text or 'Command failed.'}"
+                )
+            outputs.append(text)
+            continue
         if console == "mcu":
             if not mcu_execute_fn:
                 from core.device_errors import MCUConsoleNotConnectedError

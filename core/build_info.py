@@ -204,6 +204,20 @@ def parse_env_from_update_url(raw_output: str) -> str | None:
     return _parse_env_from_url(text)
 
 
+def parse_env_from_isp_or_kv_text(text: str | None) -> str | None:
+    """
+    Env/stage from AmebaPro2 ISP output: update URL path, KV_BS_STAGE-style lines,
+    or other text where qa/dev/prod appears (e.g. kvread / arlogw migrate).
+    """
+    if not text or not str(text).strip():
+        return None
+    t = str(text).strip()
+    env = parse_env_from_update_url(t)
+    if env:
+        return env
+    return _parse_env_from_kv_bs_stage(t)
+
+
 def detect_device(execute: Callable[[str, list[str]], tuple[bool, str]]) -> dict[str, Any]:
     """
     Run build_info, kvcmd, device_info/bs_info, and optional KV_BS_CLAIMED on the device.

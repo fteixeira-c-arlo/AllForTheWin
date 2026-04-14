@@ -5,15 +5,23 @@ Routes by platform (amebapro2, gen5, linux) and integrates E3 Wired `detect_devi
 """
 from __future__ import annotations
 
+import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
-from core.build_info import detect_device as detect_device_e3_wired
+from core.build_info import detect_device as detect_device_e3_wired, parse_env_from_isp_or_kv_text
 from core.device_errors import UnknownDeviceError, UnsupportedConnectionError
 from core.device_registry import lookup_registry_by_model_id
 
 ExecuteFn = Callable[[str, list[str]], tuple[bool, str]]
+
+logger = logging.getLogger(__name__)
+
+# Essential II Outdoor (Robin): default ISP hibernate drops the session after ~30 min idle.
+ROBIN_CODENAME = "robin"
+_ROBIN_HIBERNATE_CMD = "cli_agw_enable_hibernate"
+_ROBIN_HIBERNATE_OFF_ARGS = ["0"]
 
 
 @dataclass
@@ -25,7 +33,6 @@ class DeviceConnection:
     model_id: str | None
     firmware_version: str | None
     platform: str | None  # amebapro2 | gen5 | linux | e3_wired
-    used_legacy_uart_baud: bool = False
     raw_detection: str = ""
 
 
@@ -46,15 +53,27 @@ def _parse_amebapro2_build_info(text: str) -> tuple[str | None, str | None]:
         if m:
             model = m.group(1).upper()
     fw = None
-    for pat in (
-        r"(?:AGW\s+)?version\s*[=:]\s*(\S+)",
-        r"fw(?:\s*_?version)?\s*[=:]\s*(\S+)",
+    # Prefer dotted numeric builds first so we don't grab symbol names like agw_get_hardware_version
+    # from help text or mixed ISP output.
+    m_sem = re.search(
         r"(\d+\.\d+\.\d+(?:\.\d+)?(?:_\d+)?(?:_[a-fA-F0-9]+)?)",
-    ):
-        m2 = re.search(pat, text, re.IGNORECASE)
-        if m2:
-            fw = m2.group(1).strip()
-            break
+        text,
+        re.IGNORECASE,
+    )
+    if m_sem:
+        fw = m_sem.group(1).strip()
+    if not fw:
+        for pat in (
+            r"(?:AGW\s+)?version\s*[=:]\s*(\S+)",
+            r"fw(?:\s*_?version)?\s*[=:]\s*(\S+)",
+        ):
+            m2 = re.search(pat, text, re.IGNORECASE)
+            if not m2:
+                continue
+            cand = m2.group(1).strip()
+            if re.search(r"\d", cand):
+                fw = cand
+                break
     return model, fw
 
 
@@ -100,6 +119,51 @@ def _parse_linux_model(text: str) -> tuple[str | None, str | None]:
     return model, fw
 
 
+def _robin_hibernate_disable_applies(
+    dc: DeviceConnection, selected_model: dict[str, Any] | None
+) -> bool:
+    """
+    Send hibernate off only for Robin. Prefer registry from detected model_id; if the device
+    did not report a model, fall back to the user's Connect selection (UART without build_info).
+    """
+    dev_cod = (dc.device.get("codename") or "").strip().lower()
+    if dev_cod:
+        return dev_cod == ROBIN_CODENAME
+    sel = selected_model or {}
+    return (sel.get("codename") or "").strip().lower() == ROBIN_CODENAME
+
+
+def _maybe_disable_robin_hibernate(
+    execute: ExecuteFn,
+    dc: DeviceConnection,
+    selected_model: dict[str, Any] | None,
+    result: dict[str, Any],
+) -> None:
+    if not _robin_hibernate_disable_applies(dc, selected_model):
+        return
+    ok, out = execute(_ROBIN_HIBERNATE_CMD, _ROBIN_HIBERNATE_OFF_ARGS)
+    preview = (out or "").replace("\r", "")[:800]
+    logger.info(
+        "Robin: %s %s → ok=%s output=%r",
+        _ROBIN_HIBERNATE_CMD,
+        " ".join(_ROBIN_HIBERNATE_OFF_ARGS),
+        ok,
+        preview,
+    )
+    msgs: list[str] = []
+    if ok:
+        msgs.append("Robin detected — hibernate disabled to keep camera awake")
+    else:
+        logger.warning(
+            "Robin: hibernate disable failed (continuing session). output=%r", preview
+        )
+        msgs.append(
+            "Robin detected — could not disable hibernate (session continues); "
+            "see application log for device output."
+        )
+    result["post_connect_messages"] = msgs
+
+
 def _parse_device_tree_model(text: str) -> str | None:
     t = (text or "").strip().strip("\x00")
     if not t:
@@ -115,7 +179,6 @@ def detect_after_connect(
     connection_type: str,
     *,
     selected_model: dict[str, Any] | None = None,
-    used_legacy_uart_baud: bool = False,
 ) -> tuple[dict[str, Any], DeviceConnection]:
     """
     Run platform-appropriate detection. Returns (detect_dict_for_ui, DeviceConnection).
@@ -134,7 +197,6 @@ def detect_after_connect(
         model_id=None,
         firmware_version=None,
         platform=plat_hint,
-        used_legacy_uart_baud=used_legacy_uart_baud,
     )
 
     result: dict[str, Any] = {
@@ -164,6 +226,34 @@ def detect_after_connect(
             raise UnknownDeviceError(
                 f"Unknown model ID from device: {mid!r}. Check registry or cable/baud rate."
             )
+        # Env: ISP `update_url`, then KV keys, then `arlogw migrate` (no args shows stage on some FW).
+        ok_u, out_u = execute("update_url", [])
+        if out_u and str(out_u).strip():
+            u = str(out_u).strip()
+            result["update_url_raw"] = u[:500]
+            env = parse_env_from_isp_or_kv_text(u)
+            if env:
+                result["env"] = env
+        if not result.get("env"):
+            for kv_cmd in (
+                "kvread -s KV_BS_STAGE",
+                "kvread -s KV_UPDATE_URL",
+                "kvread -s KV_MIGRATE_STAGE",
+            ):
+                ok_kv, out_kv = execute(kv_cmd, [])
+                if not ok_kv or not (out_kv or "").strip():
+                    continue
+                env = parse_env_from_isp_or_kv_text(out_kv)
+                if env:
+                    result["env"] = env
+                    break
+        if not result.get("env"):
+            ok_m, out_m = execute("arlogw migrate", [])
+            if ok_m and (out_m or "").strip():
+                env = parse_env_from_isp_or_kv_text(out_m)
+                if env:
+                    result["env"] = env
+        _maybe_disable_robin_hibernate(execute, dc, selected_model, result)
         return result, dc
 
     if plat_hint == "gen5":
@@ -277,10 +367,14 @@ def ensure_adb_allowed_for_selection(selected_model: dict[str, Any] | None) -> N
     """Raise UnsupportedConnectionError if UI selected ADB for a non-ADB device."""
     if not selected_model:
         return
-    if not (selected_model.get("adb_supported") is False):
-        return
     name = selected_model.get("display_name") or selected_model.get("name") or "Device"
-    conns = selected_model.get("supported_connections") or []
-    raise UnsupportedConnectionError(
-        f"{name} does not support ADB connections. Supported methods: {', '.join(str(c) for c in conns)}"
-    )
+    if selected_model.get("adb_supported") is False:
+        conns = selected_model.get("supported_connections") or []
+        raise UnsupportedConnectionError(
+            f"{name} does not support ADB connections. Supported methods: {', '.join(str(c) for c in conns)}"
+        )
+    ctypes = selected_model.get("connection_types")
+    if isinstance(ctypes, list) and len(ctypes) > 0:
+        lowered = [str(c).strip().lower() for c in ctypes if str(c).strip()]
+        if "adb" not in lowered:
+            raise UnsupportedConnectionError(f"{name} does not support ADB. Use UART.")

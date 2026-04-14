@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Callable
 
 from PySide6.QtCore import Qt, QThread, Signal, Slot
@@ -32,6 +33,7 @@ from core.fw_setup_service import (
     firmware_folder_version_label,
     folder_has_firmware_artifacts,
     list_environment_folders,
+    normalize_firmware_search_row,
     prepare_env_directories,
     sanitize_server_folder_name,
     search_firmware_archives,
@@ -98,11 +100,48 @@ def _progress_ss() -> str:
     )
 
 
-def _row_display_line(version_path: str, filename: str) -> str:
-    tail = (version_path or "").rstrip("/").split("/")[-1] or filename
-    size = "—"
-    date = "—"
-    return f"{tail}  ·  {size}  ·  {date}"
+def _repo_path_hint(repo_path: str) -> str:
+    parts = [p for p in (repo_path or "").replace("\\", "/").split("/") if p]
+    if len(parts) >= 2:
+        return f"{parts[-2]}/{parts[-1]}"
+    return parts[-1] if parts else "—"
+
+
+def _format_fw_bytes(n: int | None) -> str:
+    if n is None or n < 0:
+        return "—"
+    for label, div in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
+        if n >= div:
+            return f"{n / div:.1f} {label}"
+    return f"{n} B"
+
+
+def _format_artifactory_ts(raw: str | None) -> str:
+    if not raw:
+        return "—"
+    s = str(raw).strip()
+    if s.isdigit():
+        try:
+            ms = int(s)
+            return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        except (ValueError, OSError):
+            return s[:19]
+    if "T" in s:
+        return s.replace("T", " ")[:16]
+    return s[:24]
+
+
+def _row_display_line(
+    repo_folder_path: str,
+    filename: str,
+    size_b: int | None,
+    modified_raw: str | None,
+) -> str:
+    """Primary label is the archive name (build id); path/size/date follow."""
+    loc = _repo_path_hint(repo_folder_path)
+    return (
+        f"{filename}  ·  {loc}  ·  {_format_fw_bytes(size_b)}  ·  {_format_artifactory_ts(modified_raw)}"
+    )
 
 
 class _SearchThread(QThread):
@@ -244,7 +283,7 @@ class LocalServerDownloadDialog(QDialog):
         self._base_url = default_artifactory_url()
         self._search_thread: _SearchThread | None = None
         self._download_thread: _DownloadThread | None = None
-        self._results: list[tuple[str, str]] = []
+        self._results: list[tuple[str, str, int | None, str | None]] = []
         self._sel_folder: str | None = None
         self._sel_file: str | None = None
         self._existing_folder_names: set[str] = set()
@@ -317,7 +356,7 @@ class LocalServerDownloadDialog(QDialog):
         self._btn_search.clicked.connect(self._on_search)
         lay.addWidget(self._btn_search)
 
-        hdr = QLabel("Version  ·  Size  ·  Date")
+        hdr = QLabel("Archive  ·  Location  ·  Size  ·  Date")
         hdr.setStyleSheet(_ql(f"color: {_SECTION}; font-size: 11px; font-weight: 500;"))
         lay.addWidget(hdr)
 
@@ -419,10 +458,10 @@ class LocalServerDownloadDialog(QDialog):
         return self._artifactory_download_model()
 
     def _selected_version_label(self) -> str:
-        if not self._sel_folder or not self._sel_file:
+        if not self._sel_file:
             return "…"
-        tail = self._sel_folder.rstrip("/").split("/")[-1] or self._sel_file
-        return tail
+        fn = self._sel_file.strip()
+        return fn if len(fn) <= 48 else fn[:45] + "…"
 
     def _update_download_button_label(self) -> None:
         folder = sanitize_server_folder_name((self._combo_folder.currentText() or "").strip())
@@ -512,10 +551,10 @@ class LocalServerDownloadDialog(QDialog):
             self._status.setText(err or "Search failed.")
             return
         rows = flat if isinstance(flat, list) else []
-        self._results = [(str(a), str(b)) for a, b in rows]
+        self._results = [normalize_firmware_search_row(r) for r in rows]
         self._list.clear()
-        for folder, fn in self._results:
-            line = _row_display_line(folder, fn)
+        for folder, fn, sz, md in self._results:
+            line = _row_display_line(folder, fn, sz, md)
             it = QListWidgetItem(line)
             it.setData(Qt.ItemDataRole.UserRole, (folder, fn))
             it.setToolTip(f"{folder}\n{fn}")
@@ -679,3 +718,6 @@ class LocalServerDownloadDialog(QDialog):
         ok, msg = start_http_server(root_abs, DEFAULT_PORT)
         if not ok:
             QMessageBox.warning(self, "Local Server", msg or "Could not start server.")
+            return
+        # Refresh runs before this prompt; starting the server here left the toolbar stale.
+        self._on_complete()

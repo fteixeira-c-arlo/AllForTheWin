@@ -68,6 +68,55 @@ DEVICE_CREDENTIALS: list[CredentialRecord] = [
         "note": "ADB shell auth password",
     },
     {
+        "model_ids": [
+            "VMC3070",
+            "VMC2070",
+            "VMC3081",
+            "VMC2081",
+            "VMC3073",
+            "VMC2073",
+            "VMC3083",
+            "VMC2083",
+        ],
+        "stage": "dev_qa",
+        "transport": "adb",
+        "username": "",
+        "password": "arlo",
+        "note": "ADB shell auth — E3 Wired Dev/QA",
+    },
+    {
+        "model_ids": ["VMC3070", "VMC2070"],
+        "stage": "prod",
+        "transport": "adb",
+        "username": "",
+        "password": "fEn,Be}~L>%h;+Z?:8)N76G4g*y2JcAk",
+        "note": "ADB shell auth — Dolphin Production",
+    },
+    {
+        "model_ids": ["VMC3081", "VMC2081"],
+        "stage": "prod",
+        "transport": "adb",
+        "username": "",
+        "password": "j2W.YcSve~-_yKV=J+(@)DXma;R*?TG]",
+        "note": "ADB shell auth — Orca Production",
+    },
+    {
+        "model_ids": ["VMC3073", "VMC2073"],
+        "stage": "prod",
+        "transport": "adb",
+        "username": "",
+        "password": "j6v/XRuFeD2?8<~9BUQ:nP#JMmZSLb;f",
+        "note": "ADB shell auth — Octopus Production",
+    },
+    {
+        "model_ids": ["VMC3083", "VMC2083"],
+        "stage": "prod",
+        "transport": "adb",
+        "username": "",
+        "password": "cav8Re%T?dWf^Jz~9j;X}<&:2B,tkFxn",
+        "note": "ADB shell auth — Jellyfish Production",
+    },
+    {
         "model_ids": ["AVD5001", "AVD6001"],
         "stage": "dev_qa",
         "transport": "uart_ssh",
@@ -113,12 +162,58 @@ def get_credentials_for_model(
     return out
 
 
-def get_adb_password_for_model(model_id: str | None) -> str | None:
-    """Default ADB auth password from registry/credentials for Kea."""
-    for rec in DEVICE_CREDENTIALS:
-        if (rec.get("transport") or "").lower() != "adb":
+def _pick_adb_password_from_rows(rows: list[CredentialRecord]) -> str | None:
+    for rec in rows:
+        p = rec.get("password")
+        if p is not None and str(p).strip() != "":
+            return str(p)
+    return None
+
+
+def get_adb_password_for_model(model_id: str | None, *, stage: str | None = None) -> str | None:
+    """
+    ADB shell auth password for a model_id.
+
+    stage None (Dev/QA UI prefill): prefer dev_qa, then all, then prod.
+    stage \"prod\": prefer prod-matched rows, then \"all\" (e.g. Kea).
+    """
+    if not model_id:
+        return None
+    mid = (model_id or "").strip()
+    want = (stage or "").strip().lower() or None
+    if want == "prod":
+        p = _pick_adb_password_from_rows(
+            get_credentials_for_model(mid, stage="prod", transport="adb")
+        )
+        if p:
+            return p
+        return _pick_adb_password_from_rows(
+            get_credentials_for_model(mid, stage="all", transport="adb")
+        )
+    for st in ("dev_qa", "all", "prod"):
+        rows = get_credentials_for_model(mid, stage=st, transport="adb")
+        p = _pick_adb_password_from_rows(rows)
+        if p:
+            return p
+    return None
+
+
+def resolve_production_adb_password(selected_model: dict[str, Any] | None) -> str | None:
+    """Try primary name and fw_search_models for a Production ADB password."""
+    if not selected_model:
+        return None
+    ids: list[str] = []
+    n = selected_model.get("name")
+    if n:
+        ids.append(str(n).strip())
+    for x in selected_model.get("fw_search_models") or []:
+        s = str(x).strip()
+        if s and s.upper() not in {i.upper() for i in ids}:
+            ids.append(s)
+    for mid in ids:
+        if not mid:
             continue
-        if _model_match(model_id or "", rec.get("model_ids") or []):
-            p = rec.get("password")
-            return str(p) if p else None
+        p = get_adb_password_for_model(mid, stage="prod")
+        if p:
+            return p
     return None

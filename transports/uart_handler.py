@@ -11,6 +11,36 @@ from utils.logger import get_logger
 
 logger = get_logger()
 
+# #region agent log
+_AGENT_DEBUG_LOG_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "debug-2d906c.log"
+)
+
+
+def _agent_debug_ndjson(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    import json
+
+    try:
+        line = json.dumps(
+            {
+                "sessionId": "2d906c",
+                "timestamp": int(time.time() * 1000),
+                "hypothesisId": hypothesis_id,
+                "location": location,
+                "message": message,
+                "data": data,
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+        with open(_AGENT_DEBUG_LOG_PATH, "a", encoding="utf-8") as _df:
+            _df.write(line + "\n")
+    except Exception:
+        pass
+
+
+# #endregion
+
 # Optional: pyserial for serial port access
 try:
     import serial
@@ -77,6 +107,84 @@ def _port_key_for_match(port: str) -> str:
     return x
 
 
+def _uart_probe_windows_port_exists(port: str) -> bool:
+    """
+    When ``comports()`` is empty, probe whether ``port`` still exists.
+    If the session already holds the port open, open fails with access/busy — treat as present.
+    """
+    if not _SERIAL_AVAILABLE or sys.platform != "win32":
+        return True
+    p = (port or "").strip()
+    if not p:
+        return False
+    try:
+        s = serial.Serial(port=p, baudrate=115200, timeout=0.01)
+        s.close()
+        return True
+    except serial.SerialException as e:
+        msg = str(e).lower()
+        if (
+            "access" in msg
+            or "denied" in msg
+            or "busy" in msg
+            or "being used" in msg
+            or "in use" in msg
+            or "permission" in msg
+        ):
+            return True
+        if "could not find" in msg or "cannot find" in msg:
+            return False
+        if "no such file" in msg or "does not exist" in msg:
+            return False
+        return True
+    except OSError as e:
+        winerr = getattr(e, "winerror", None)
+        if winerr in (2, 3):
+            return False
+        return True
+    except Exception:
+        return True
+
+
+def uart_port_transport_alive_for_watchdog(port: str) -> bool:
+    """
+    OS-level check that a UART device is still attached. Safe to call from a thread
+    while another thread holds the same port open (Windows: busy → still alive).
+
+    While the app holds the port open, ``comports()`` sometimes omits it or lists it
+    under another name briefly — do not treat ``not in list`` as unplugged on Windows
+    until ``_uart_probe_windows_port_exists`` also fails (see transport_heartbeat).
+    """
+    if not _SERIAL_AVAILABLE:
+        return True
+    p = (port or "").strip()
+    if not p:
+        return False
+    try:
+        if list_ports is None:
+            return True
+        present: set[str] = set()
+        for info in list_ports.comports():
+            dev = getattr(info, "device", None) or getattr(info, "name", None)
+            if isinstance(info, (list, tuple)) and len(info) >= 1 and dev is None:
+                dev = info[0]
+            if dev:
+                present.add(str(dev).upper())
+        my_key = _port_key_for_match(p)
+        if present:
+            keys = {_port_key_for_match(x) for x in present}
+            if my_key in keys:
+                return True
+            if sys.platform == "win32":
+                return _uart_probe_windows_port_exists(p)
+            return True
+        if sys.platform == "win32":
+            return _uart_probe_windows_port_exists(p)
+        return True
+    except Exception:
+        return True
+
+
 # Camera console credentials when UART prompts (login root, password arlo)
 UART_CONSOLE_LOGIN = "root"
 UART_CONSOLE_PASSWORD = "arlo"
@@ -86,13 +194,79 @@ _UART_PASSWORD_PROMPT = re.compile(r"password\s*:?\s*(\r?\n)?\s*$", re.IGNORECAS
 # Incomplete prompt (device might still be sending "Password:")
 _UART_PASSWORD_PREFIX = re.compile(r"pass\s*$", re.IGNORECASE)
 
+
+def _uart_execute_raw_shows_unauthenticated_state(raw: str) -> bool:
+    """
+    True when a completed command capture shows the shell is back at BusyBox login/password.
+    Used only after execute() I/O (not for global log scans): line-anchored ``Password:`` / ``login:``
+    so dmesg is unlikely to false-trigger, but ``Password: [timestamp]`` on one line still matches.
+    """
+    if not (raw or "").strip():
+        return False
+    if re.search(r"(?m)(?:^|[\r\n])\s*password\s*:\s*", raw, re.IGNORECASE):
+        return True
+    if re.search(r"(?m)(?:^|[\r\n])\s*login\s*:\s*", raw, re.IGNORECASE):
+        return True
+    tail = raw[-2000:] if len(raw) > 2000 else raw
+    for ln in tail.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if re.match(r"^\s*login\s+incorrect\s*$", ln.strip(), re.IGNORECASE):
+            return True
+    if re.search(r"login\s*:?\s*$", raw, re.IGNORECASE) or _UART_PASSWORD_PROMPT.search(raw):
+        return True
+    return False
+
+
+def _uart_buffer_shows_login_or_password_prompt(text: str) -> bool:
+    """
+    True if the UART capture ends in BusyBox login/password (not an authenticated shell).
+    Used to reject false-positive verify when 'echo TOKEN' is consumed as a username and
+    TOKEN still appears in the echoed line (see debug: tail ends with Password:).
+
+    Do not scan the whole buffer for 'login incorrect' — kernel/firmware logs often contain
+    that substring and would falsely trigger credential injection mid-session.
+    """
+    t = text or ""
+    if not t.strip():
+        return False
+    if _UART_PASSWORD_PROMPT.search(t):
+        return True
+    if re.search(r"(?:^|[\r\n])\s*login\s*:\s*$", t, re.IGNORECASE | re.MULTILINE):
+        return True
+    tail = t[-400:] if len(t) > 400 else t
+    tail_lines = [ln.strip() for ln in tail.replace("\r\n", "\n").replace("\r", "\n").split("\n") if ln.strip()]
+    if tail_lines and re.match(r"^login\s+incorrect\s*$", tail_lines[-1], re.IGNORECASE):
+        return True
+    return False
+
+
 # Base64 line: only valid base64 chars (BusyBox may wrap at 76 chars)
 _BASE64_LINE = re.compile(r"^[A-Za-z0-9+/=]+$")
 
 # Shell prompt at end of output (device ready for next command)
-_UART_PROMPT_AT_END = re.compile(r"[\r\n]+VMC\d+\s*>\s*$", re.IGNORECASE)
+# Require start-of-buffer or newline before VMC so "fooVMC1234>" mid-line does not complete early.
+_UART_PROMPT_AT_END = re.compile(r"(?:^|[\r\n])VMC\d+\s*>\s*$", re.IGNORECASE)
 # Prompt at start of line (device may prefix base64 output with e.g. VMC3073> )
 _UART_PROMPT_AT_START = re.compile(r"^\s*VMC\d+\s*>\s*", re.IGNORECASE)
+
+
+def _uart_command_response_complete(decoded: str) -> bool:
+    """
+    True when the UART buffer ends with a known interactive prompt (command finished).
+    Covers VMC####> (legacy), E3 [ipc]#, Linux # prompts, and AmebaPro2-style > lines.
+    """
+    if not decoded:
+        return False
+    if _UART_PROMPT_AT_END.search(decoded):
+        return True
+    if re.search(r"\[ipc\]#\s*$", decoded):
+        return True
+    # Line ending with # (BusyBox/root), e.g. "#", " ~ #", "root@host:/#"
+    if re.search(r"(?:^|[\r\n])[^\r\n]{0,160}#\s*$", decoded):
+        return True
+    # Some AmebaPro2 consoles: last line ends with >
+    if re.search(r"(?:^|[\r\n])[^\r\n]{0,160}>\s*$", decoded):
+        return True
+    return False
 
 
 def _strip_password_prompt_from_output(text: str) -> str:
@@ -182,7 +356,6 @@ class UARTHandler:
         baud_rate: int = 115200,
         *,
         console_style: str | None = None,
-        legacy_baud: int | None = None,
         device_display_name: str | None = None,
     ) -> tuple[bool, str, dict[str, Any] | None]:
         """
@@ -192,7 +365,6 @@ class UARTHandler:
           - linux_shell (default): BusyBox/Linux login (root/arlo) then echo verify.
           - amebapro2: no login; verify with `build_info` and AGW_MODEL_ID / model token.
           - mcu: Gen5 MCU CLI; no login; open port and drain (no shell echo verify).
-        legacy_baud: if primary verify fails and this is set, retry at legacy baud (Finch/Robin).
         """
         if not _SERIAL_AVAILABLE:
             return False, "pyserial is required for UART. Install with: pip install pyserial", None
@@ -219,6 +391,20 @@ class UARTHandler:
             self._baud = baud
             self._connected = True
             self._console_style = style
+            # #region agent log
+            _agent_debug_ndjson(
+                "H4",
+                "uart_handler.py:connect",
+                "serial opened",
+                {
+                    "port": port,
+                    "baud": baud,
+                    "style": style,
+                    "dtr": bool(getattr(ser, "dtr", False)),
+                    "rts": bool(getattr(ser, "rts", False)),
+                },
+            )
+            # #endregion
             if style == "linux_shell":
                 self._uart_do_login()
                 if not self._uart_verify_connection():
@@ -233,35 +419,6 @@ class UARTHandler:
 
         try:
             ok, err = _try_once(baud_rate)
-            used_legacy = False
-            if not ok and legacy_baud and legacy_baud != baud_rate:
-                try:
-                    if self._serial:
-                        self._serial.close()
-                except Exception:
-                    pass
-                self._serial = None
-                self._port = None
-                self._connected = False
-                ok2, err2 = _try_once(legacy_baud)
-                if ok2:
-                    used_legacy = True
-                    logger.warning(
-                        "Retried connection at legacy baudrate %s for %s",
-                        legacy_baud,
-                        dev_label,
-                    )
-                    msg = (
-                        f"Connected to {port} at {legacy_baud} baud "
-                        f"(retried at legacy baudrate {legacy_baud} for {dev_label})"
-                    )
-                    return True, msg, {
-                        "port": port,
-                        "baud_rate": legacy_baud,
-                        "used_legacy_uart_baud": True,
-                        "console_style": style,
-                    }
-                err = err2
 
             if not ok:
                 try:
@@ -276,15 +433,20 @@ class UARTHandler:
                     (err or "").strip()
                     or "Connection could not be verified. Check baud rate and cable, then try again."
                 )
+                # #region agent log
+                _agent_debug_ndjson(
+                    "H3",
+                    "uart_handler.py:connect",
+                    "uart connect failed",
+                    {"detail": (detail or "")[:400], "err": (err or "")[:200]},
+                )
+                # #endregion
                 return False, detail, None
 
             msg = f"Connected to {port} at {self._baud} baud"
-            if used_legacy:
-                msg += f" (legacy baud {self._baud} for {dev_label})"
             return True, msg, {
                 "port": port,
                 "baud_rate": self._baud,
-                "used_legacy_uart_baud": used_legacy,
                 "console_style": style,
             }
         except serial.SerialException as e:
@@ -317,11 +479,19 @@ class UARTHandler:
         """Log in (root / arlo) when connecting so the session is authenticated for all later commands."""
         if not self._serial:
             return
+        saw_login = False
+        sent_username = False
+        saw_password = False
+        sent_password = False
+        pre_drain = ""
+        err_note = ""
+        in_waiting_before_reset = 0
         try:
+            in_waiting_before_reset = int(self._serial.in_waiting or 0)
             self._serial.reset_input_buffer()
             # Wait for "login:" prompt and send username (allow time for device to boot)
             login_chunks: list[bytes] = []
-            deadline = time.monotonic() + 5.0
+            deadline = time.monotonic() + 4.0
             while time.monotonic() < deadline:
                 if self._serial.in_waiting:
                     data = self._serial.read(self._serial.in_waiting)
@@ -329,13 +499,15 @@ class UARTHandler:
                         login_chunks.append(data)
                         text = b"".join(login_chunks).decode(errors="replace")
                         if re.search(r"login\s*:?\s*", text, re.IGNORECASE):
+                            saw_login = True
                             self._serial.write((UART_CONSOLE_LOGIN + "\r\n").encode())
                             self._serial.flush()
+                            sent_username = True
                             break
-                time.sleep(0.05)
+                time.sleep(0.03)
             # Wait for "Password:" and send password
             chunks = list(login_chunks)
-            deadline = time.monotonic() + 5.0
+            deadline = time.monotonic() + 4.0
             while time.monotonic() < deadline:
                 if self._serial.in_waiting:
                     data = self._serial.read(self._serial.in_waiting)
@@ -343,17 +515,95 @@ class UARTHandler:
                         chunks.append(data)
                         text = b"".join(chunks).decode(errors="replace")
                         if _UART_PASSWORD_PROMPT.search(text) or re.search(r"password\s*:\s*", text, re.IGNORECASE):
+                            saw_password = True
                             self._serial.write((UART_CONSOLE_PASSWORD + "\r\n").encode())
                             self._serial.flush()
+                            sent_password = True
                             break
-                time.sleep(0.05)
+                time.sleep(0.03)
+            pre_drain = b"".join(chunks).decode(errors="replace")
             # Drain remainder so the first command sees a clean shell prompt
-            time.sleep(0.5)
+            time.sleep(0.12)
             while self._serial.in_waiting:
                 self._serial.read(self._serial.in_waiting)
-                time.sleep(0.05)
+                time.sleep(0.03)
+        except Exception as ex:
+            err_note = type(ex).__name__
+        finally:
+            # #region agent log
+            tail = (pre_drain[-280:] if pre_drain else "").replace("\r", "\\r").replace("\n", "\\n")
+            _agent_debug_ndjson(
+                "H1-H2-H5",
+                "uart_handler.py:_uart_do_login",
+                "login sequence complete",
+                {
+                    "in_waiting_before_reset": in_waiting_before_reset,
+                    "saw_login": saw_login,
+                    "sent_username": sent_username,
+                    "saw_password": saw_password,
+                    "sent_password": sent_password,
+                    "buffer_len": len(pre_drain),
+                    "has_username_prompt": bool(re.search(r"username\s*:", pre_drain, re.IGNORECASE)),
+                    "tail_preview": tail[:220],
+                    "error": err_note,
+                },
+            )
+            # #endregion
+
+    def _uart_break_echo_used_as_login_name(self, verify_token: str) -> str:
+        """
+        When verify sends `echo TOKEN` while the UART is at login:, BusyBox treats the line as the
+        username and prompts for Password. Sending root's password then fails (wrong user). Submit a
+        bogus password so we return to `login:`, then callers can send root/arlo.
+        """
+        if not self._serial:
+            return ""
+        try:
+            self._serial.write(b"__uart_not_a_user_password__\r\n")
+            self._serial.flush()
         except Exception:
-            pass
+            return ""
+        time.sleep(0.22)
+        pre = ""
+        t_end = time.monotonic() + 0.9
+        while time.monotonic() < t_end:
+            if self._serial.in_waiting:
+                pre += self._serial.read(self._serial.in_waiting).decode(errors="replace")
+            else:
+                time.sleep(0.04)
+        return pre
+
+    def _uart_respond_to_auth_prompts(self, seed: str = "", deadline_s: float = 3.0) -> None:
+        """Send root/arlo when the buffer shows BusyBox login: or Password: (no initial reset)."""
+        if not self._serial:
+            return
+        deadline = time.monotonic() + float(deadline_s)
+        buf = seed
+        while time.monotonic() < deadline:
+            if self._serial.in_waiting:
+                buf += self._serial.read(self._serial.in_waiting).decode(errors="replace")
+            sent = False
+            if re.search(r"(?:^|[\r\n])\s*login\s*:\s*$", buf, re.IGNORECASE | re.MULTILINE):
+                self._serial.write((UART_CONSOLE_LOGIN + "\r\n").encode())
+                self._serial.flush()
+                buf = ""
+                sent = True
+            elif _UART_PASSWORD_PROMPT.search(buf) or re.search(
+                r"(?:^|[\r\n])\s*password\s*:\s*$", buf, re.IGNORECASE | re.MULTILINE
+            ):
+                self._serial.write((UART_CONSOLE_PASSWORD + "\r\n").encode())
+                self._serial.flush()
+                buf = ""
+                sent = True
+            if sent:
+                time.sleep(0.08)
+                continue
+            if not self._serial.in_waiting:
+                time.sleep(0.04)
+        time.sleep(0.1)
+        while self._serial.in_waiting:
+            self._serial.read(self._serial.in_waiting)
+            time.sleep(0.02)
 
     def _uart_verify_connection(self) -> bool:
         """Send a test command and check the response. Returns False if baud rate or link is wrong."""
@@ -361,24 +611,59 @@ class UARTHandler:
             return False
         verify_token = "UART_VERIFY_7X9K"
         try:
-            self._serial.reset_input_buffer()
-            self._serial.write(f"echo {verify_token}\r\n".encode())
-            self._serial.flush()
-            chunks: list[bytes] = []
-            deadline = time.monotonic() + 5.0
-            last_data = time.monotonic()
-            while time.monotonic() < deadline:
-                if self._serial.in_waiting:
-                    data = self._serial.read(self._serial.in_waiting)
-                    if data:
-                        chunks.append(data)
-                        last_data = time.monotonic()
-                else:
-                    if time.monotonic() - last_data >= 1.0 and chunks:
-                        break
-                    time.sleep(0.05)
-            raw = b"".join(chunks).decode(errors="replace")
-            return verify_token in raw
+            for attempt in range(3):
+                self._serial.reset_input_buffer()
+                self._serial.write(f"echo {verify_token}\r\n".encode())
+                self._serial.flush()
+                chunks: list[bytes] = []
+                deadline = time.monotonic() + 2.5
+                last_data = time.monotonic()
+                while time.monotonic() < deadline:
+                    if self._serial.in_waiting:
+                        data = self._serial.read(self._serial.in_waiting)
+                        if data:
+                            chunks.append(data)
+                            last_data = time.monotonic()
+                    else:
+                        if time.monotonic() - last_data >= 0.35 and chunks:
+                            break
+                        time.sleep(0.03)
+                raw = b"".join(chunks).decode(errors="replace")
+                while self._serial.in_waiting:
+                    raw += self._serial.read(self._serial.in_waiting).decode(errors="replace")
+                stuck = _uart_buffer_shows_login_or_password_prompt(raw)
+                ok = verify_token in raw and not stuck
+                # #region agent log
+                rt = raw[-320:] if raw else ""
+                rt_safe = rt.replace("\r", "\\r").replace("\n", "\\n")
+                _agent_debug_ndjson(
+                    "H3",
+                    "uart_handler.py:_uart_verify_connection",
+                    f"verify attempt {attempt}",
+                    {
+                        "attempt": attempt,
+                        "stuck": stuck,
+                        "token_present": verify_token in raw,
+                        "raw_len": len(raw),
+                        "tail_preview": rt_safe[:220],
+                        "garbage_ratio": round(_garbage_ratio(raw), 4),
+                    },
+                )
+                # #endregion
+                if ok:
+                    return True
+                if stuck:
+                    if verify_token in raw:
+                        pre = self._uart_break_echo_used_as_login_name(verify_token)
+                        self._uart_respond_to_auth_prompts(seed=pre, deadline_s=3.0)
+                    else:
+                        self._uart_respond_to_auth_prompts(seed=raw, deadline_s=3.0)
+                    continue
+                # Partial read (silence before full echo) is not a failure — retry.
+                if attempt < 2:
+                    continue
+                return False
+            return False
         except Exception:
             return False
 
@@ -391,7 +676,7 @@ class UARTHandler:
             self._serial.write(b"build_info\r\n")
             self._serial.flush()
             chunks: list[bytes] = []
-            deadline = time.monotonic() + 6.0
+            deadline = time.monotonic() + 3.0
             last_data = time.monotonic()
             while time.monotonic() < deadline:
                 if self._serial.in_waiting:
@@ -400,9 +685,9 @@ class UARTHandler:
                         chunks.append(data)
                         last_data = time.monotonic()
                 else:
-                    if time.monotonic() - last_data >= 1.2 and chunks:
+                    if time.monotonic() - last_data >= 0.45 and chunks:
                         break
-                    time.sleep(0.05)
+                    time.sleep(0.03)
             raw = b"".join(chunks).decode(errors="replace")
             if _garbage_ratio(raw) > 0.08 and len(raw) > 40:
                 return False
@@ -422,7 +707,7 @@ class UARTHandler:
             return False
         try:
             self._serial.reset_input_buffer()
-            end = time.monotonic() + 0.4
+            end = time.monotonic() + 0.22
             while time.monotonic() < end:
                 if self._serial.in_waiting:
                     data = self._serial.read(self._serial.in_waiting)
@@ -430,7 +715,7 @@ class UARTHandler:
                         text = data.decode(errors="replace")
                         if len(text) > 80 and _garbage_ratio(text) > 0.15:
                             return False
-                time.sleep(0.05)
+                time.sleep(0.03)
             return True
         except Exception:
             return False
@@ -479,16 +764,29 @@ class UARTHandler:
                         dev = info[0]
                     if dev:
                         present.add(str(dev).upper())
+                my_key = _port_key_for_match(self._port)
                 if present:
                     keys = {_port_key_for_match(x) for x in present}
-                    if _port_key_for_match(self._port) not in keys:
-                        self._mark_uart_dead()
-                        return False
+                    if my_key not in keys:
+                        if sys.platform == "win32" and _uart_probe_windows_port_exists(self._port):
+                            pass
+                        else:
+                            self._mark_uart_dead()
+                            return False
+                elif sys.platform == "win32" and not _uart_probe_windows_port_exists(self._port):
+                    self._mark_uart_dead()
+                    return False
         except Exception:
             pass
         return True
 
-    def execute(self, command: str, args: list[str] | None = None) -> tuple[bool, str]:
+    def execute(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        *,
+        timeout_sec: float | None = None,
+    ) -> tuple[bool, str]:
         """
         Send command (and args) over UART, read response. Returns (success, output_or_error).
         Session is already authenticated at connect; if a login prompt appears, the session expired.
@@ -504,6 +802,18 @@ class UARTHandler:
             is_tar = full_cmd.strip().startswith("tar ") or " tar " in full_cmd
             is_base64 = full_cmd.strip().startswith("base64 ") or " base64 " in full_cmd
             is_tftp = full_cmd.strip().startswith("tftp ") or " tftp " in full_cmd
+            # FOTA helpers can run tens of seconds with sparse serial output; short idle_timeout
+            # makes us return before the shell prompt, leaving the device busy for the next command.
+            low = full_cmd.lower()
+            is_fw_shell_long = (
+                not (is_tar or is_tftp or is_base64)
+                and (
+                    "update_refresh" in low
+                    or "update_url" in low
+                    or low.strip() == "arlocmd reboot"
+                    or low.strip().startswith("arlocmd reboot ")
+                )
+            )
             self._serial.reset_input_buffer()
             self._serial.write((full_cmd + "\r\n").encode())
             self._serial.flush()
@@ -518,11 +828,20 @@ class UARTHandler:
             elif is_base64:
                 total_timeout = 600.0
                 idle_timeout = 120.0
+            elif is_fw_shell_long:
+                total_timeout = max(300.0, float(timeout_sec or 0) or 300.0)
+                idle_timeout = 45.0
             else:
                 total_timeout = 120.0
                 idle_timeout = 12.0
+            if timeout_sec is not None and timeout_sec > 0 and not is_tar and not is_tftp and not is_base64:
+                total_timeout = max(total_timeout, float(timeout_sec))
             _style = getattr(self, "_console_style", "linux_shell")
-            if _style in ("amebapro2", "mcu") and not (is_tar or is_tftp or is_base64):
+            if (
+                _style in ("amebapro2", "mcu")
+                and not (is_tar or is_tftp or is_base64)
+                and not is_fw_shell_long
+            ):
                 idle_timeout = 2.0
             deadline = time.monotonic() + total_timeout
             last_data = time.monotonic()
@@ -539,18 +858,24 @@ class UARTHandler:
                             sys.stdout.write(decoded[print_offset:])
                             sys.stdout.flush()
                             print_offset = len(decoded)
-                        # Done when we see the shell prompt (command finished)
-                        if _UART_PROMPT_AT_END.search(decoded):
+                        if _uart_execute_raw_shows_unauthenticated_state(decoded):
+                            break
+                        # Done when we see a known shell prompt (command finished)
+                        if _uart_command_response_complete(decoded):
                             break
                 else:
-                    if time.monotonic() - last_data >= idle_timeout and chunks:
+                    # Stop after idle_timeout with no new bytes — including when the device
+                    # never responded (chunks empty), so we do not burn full total_timeout (120s)
+                    # per detect_device command.
+                    if time.monotonic() - last_data >= idle_timeout:
                         break
                     time.sleep(0.05)
             if (is_tar or is_tftp) and print_offset > 0:
                 sys.stdout.write("\n")
                 sys.stdout.flush()
             raw = b"".join(chunks).decode(errors="replace").strip()
-            if re.search(r"login\s*:?\s*$", raw, re.IGNORECASE) or _UART_PASSWORD_PROMPT.search(raw):
+            if _uart_execute_raw_shows_unauthenticated_state(raw):
+                self._mark_uart_dead()
                 return False, "Session expired (login prompt). Disconnect and reconnect to log in again."
             cleaned = _clean_uart_command_output(raw, full_cmd)
             out = _strip_password_prompt_from_output(cleaned)
@@ -586,7 +911,8 @@ class UARTHandler:
             success, output = self.execute(f"base64 {remote_path}")
             if not success:
                 return False, output or "Command failed."
-            if re.search(r"login\s*:?\s*$", output, re.IGNORECASE) or _UART_PASSWORD_PROMPT.search(output):
+            if _uart_execute_raw_shows_unauthenticated_state(output):
+                self._mark_uart_dead()
                 return False, "Session expired (login prompt). Disconnect and reconnect to log in again."
             if "not found" in output.lower() or "no such file" in output.lower():
                 return False, "File not found on device. Run tar_logs first to create the log archive."

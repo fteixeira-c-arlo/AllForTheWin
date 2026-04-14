@@ -23,20 +23,23 @@ from PySide6.QtWidgets import (
 from core.fw_setup_service import (
     active_folder_from_camera_update_url,
     build_camera_fota_url_for_folder,
+    create_empty_server_folder,
     default_fw_server_root,
+    extract_vmc_model_ids_from_text,
     firmware_folder_model_label,
     firmware_folder_version_label,
     folder_has_firmware_artifacts,
     folder_matches_connected_camera,
     get_local_ipv4,
+    is_firmware_archive,
     list_environment_folders,
     rename_server_folder,
     sanitize_server_folder_name,
     should_filter_firmware_folders_by_camera,
+    vmc_binaries_folder_name_for_device,
 )
 from core.local_server import (
     DEFAULT_PORT,
-    FW_ENV_TAR_GZ_SUFFIXES,
     check_server_status,
     firmware_folder_rename_blocked_reason,
     get_base_url_if_serving_root,
@@ -73,6 +76,17 @@ def _status_dot_style(color: str) -> str:
     )
 
 
+def _brief_shell_status_line(msg: str, *, fallback: str, max_len: int = 200) -> str:
+    """One line for UI labels — avoids multiline / RichText mis-detection on device output."""
+    t = (msg or "").strip()
+    if not t:
+        return fallback
+    line = t.splitlines()[0].strip()
+    if not line:
+        return fallback
+    return line[:max_len] if len(line) > max_len else line
+
+
 def _port_from_base_url(url: str) -> str:
     part = (url or "").replace("http://", "").replace("https://", "").strip("/")
     return part.split(":")[-1] if ":" in part else str(DEFAULT_PORT)
@@ -101,21 +115,36 @@ def _server_state_for_root(root_abs: str) -> tuple[bool, str, bool]:
     return False, "", False
 
 
-def _primary_archive_basename(folder_abs: str) -> str:
+def _primary_archive_basename(folder_abs: str, *, preferred_vmc: str | None = None) -> str:
+    """
+    Pick one archive/ filename to show on folder cards.
+
+    Alphabetically, VMC2070* sorts before VMC3070*; prefer the archive whose name includes the
+    connected camera model (or binaries/ model label), then newest mtime among ties.
+    """
     arch = os.path.join(folder_abs, "archive")
     if not os.path.isdir(arch):
         return "—"
     try:
-        names = sorted(os.listdir(arch), key=str.lower)
+        names = [n for n in os.listdir(arch) if is_firmware_archive(n)]
     except OSError:
         return "—"
-    for name in names:
-        low = name.lower()
-        if low.endswith(".zip") or ".tar.gz" in low:
-            return name
-        if any(low.endswith(s) for s in FW_ENV_TAR_GZ_SUFFIXES):
-            return name
-    return "—"
+    if not names:
+        return "—"
+
+    def mtime(n: str) -> float:
+        try:
+            return os.path.getmtime(os.path.join(arch, n))
+        except OSError:
+            return 0.0
+
+    pref = (preferred_vmc or "").strip().upper()
+    if pref:
+        want = frozenset([pref])
+        matched = [n for n in names if extract_vmc_model_ids_from_text(n) & want]
+        if matched:
+            return max(matched, key=mtime)
+    return max(names, key=mtime)
 
 
 class LocalServerTool(QWidget):
@@ -202,6 +231,25 @@ class LocalServerTool(QWidget):
         cl.addWidget(self._badge_not_onboarded, 0, Qt.AlignmentFlag.AlignRight)
         root.addWidget(cam_bar)
 
+        self._missing_root_banner = QFrame()
+        self._missing_root_banner.setStyleSheet(
+            f"QFrame {{ background-color: rgba(201, 162, 39, 0.12); border: 1px solid {_AMBER}; "
+            "border-radius: 8px; }}"
+        )
+        mvl = QVBoxLayout(self._missing_root_banner)
+        mvl.setContentsMargins(14, 12, 14, 12)
+        mvl.setSpacing(8)
+        self._lbl_missing_root = QLabel("")
+        self._lbl_missing_root.setWordWrap(True)
+        self._lbl_missing_root.setStyleSheet(_ql(f"color: {_TEXT}; font-size: 12px;"))
+        mvl.addWidget(self._lbl_missing_root)
+        self._btn_setup_root = QPushButton("Set up firmware folder…")
+        set_arlo_pushbutton_variant(self._btn_setup_root, variant="primary", compact=True)
+        self._btn_setup_root.clicked.connect(self._on_setup_fw_root)
+        mvl.addWidget(self._btn_setup_root, 0, Qt.AlignmentFlag.AlignLeft)
+        self._missing_root_banner.hide()
+        root.addWidget(self._missing_root_banner)
+
         root.addSpacing(16)
         sec = QLabel("FIRMWARE FOLDERS")
         sec.setStyleSheet(_ql(f"color: {_SECTION}; font-size: 12px; font-weight: 500;"))
@@ -241,6 +289,13 @@ class LocalServerTool(QWidget):
         set_arlo_pushbutton_variant(self._btn_download_fw, variant="primary", compact=True)
         self._btn_download_fw.clicked.connect(self._on_download_firmware)
         bl.addWidget(self._btn_download_fw)
+        self._btn_new_folder = QPushButton("New folder")
+        set_arlo_pushbutton_variant(self._btn_new_folder, variant=None, compact=True)
+        self._btn_new_folder.setToolTip(
+            "Create archive/, binaries/, and updaterules/ under a new server folder name."
+        )
+        self._btn_new_folder.clicked.connect(self._on_new_folder)
+        bl.addWidget(self._btn_new_folder)
         self._btn_open_root = QPushButton("Open root folder")
         set_arlo_pushbutton_variant(self._btn_open_root, variant=None, compact=True)
         self._btn_open_root.clicked.connect(self._on_open_root)
@@ -294,13 +349,36 @@ class LocalServerTool(QWidget):
 
     def _full_refresh(self) -> None:
         self._fw_root = default_fw_server_root()
+        self._sync_missing_root_banner()
         self._sync_server_bar()
         self._sync_camera_bar()
         self._sync_filter_note()
         self._rebuild_folder_cards()
         self._lbl_root_path.setText(self._fw_root)
 
+    def _sync_missing_root_banner(self) -> None:
+        root_abs = os.path.abspath(self._fw_root)
+        if os.path.isdir(root_abs):
+            self._missing_root_banner.hide()
+            return
+        self._lbl_missing_root.setText(
+            f"The firmware server folder does not exist yet:\n{root_abs}\n\n"
+            "Create the recommended folder under your profile, use your configured path, or pick "
+            "another location. The path is saved for next time (unless FW_SERVER_ROOT is set)."
+        )
+        self._missing_root_banner.show()
+
+    def _on_setup_fw_root(self) -> None:
+        from interface.fw_server_root_qt import qt_ensure_fw_server_root
+
+        new_root = qt_ensure_fw_server_root(self, self._fw_root)
+        if not new_root:
+            return
+        self._fw_root = new_root
+        self._full_refresh()
+
     def _sync_server_bar(self) -> None:
+        root_missing = not os.path.isdir(os.path.abspath(self._fw_root))
         running, pub_url, can_stop = _server_state_for_root(self._fw_root)
         if running and pub_url:
             self._dot_server.setStyleSheet(_status_dot_style(_OK))
@@ -317,6 +395,14 @@ class LocalServerTool(QWidget):
             self._url_edit.setVisible(False)
             self._btn_start.setVisible(True)
             self._btn_stop.setVisible(False)
+        self._btn_start.setEnabled(not root_missing)
+        self._btn_start.setToolTip(
+            "Set up the firmware folder first (banner above)."
+            if root_missing
+            else "Start HTTP server for this folder"
+        )
+        self._btn_download_fw.setEnabled(not root_missing)
+        self._btn_new_folder.setEnabled(not root_missing)
 
     def _sync_camera_bar(self) -> None:
         self._badge_onboarded.setVisible(self._onboarded is True)
@@ -402,6 +488,47 @@ class LocalServerTool(QWidget):
         if os.path.isdir(p):
             QDesktopServices.openUrl(QUrl.fromLocalFile(p))
 
+    def _binaries_model_for_new_folder(self) -> str:
+        """VMC subfolder under binaries/ — matches Download firmware / wizard when possible."""
+        if self._connected and self._profile_ok and (self._vmc_model or "").strip():
+            return vmc_binaries_folder_name_for_device(self._vmc_model)
+        if self._fw_search_models:
+            return (self._fw_search_models[0] or "VMC3070").strip().upper()
+        return "VMC3070"
+
+    def _on_new_folder(self) -> None:
+        root_abs = os.path.abspath(self._fw_root)
+        if not os.path.isdir(root_abs):
+            QMessageBox.warning(
+                self,
+                "Local Server",
+                f"Server root does not exist or is not a directory:\n{root_abs}",
+            )
+            return
+        name, ok = QInputDialog.getText(
+            self,
+            "New folder",
+            "Server folder name (one path segment, no \\ / : * ? \" < > |):",
+        )
+        if not ok:
+            return
+        model = self._binaries_model_for_new_folder()
+        ok_c, path_or_err = create_empty_server_folder(
+            root_abs,
+            (name or "").strip(),
+            model,
+            self._fw_search_models,
+        )
+        if not ok_c:
+            QMessageBox.warning(self, "Local Server", path_or_err or "Could not create folder.")
+            return
+        QMessageBox.information(
+            self,
+            "Local Server",
+            f"Created empty firmware layout for model binaries “{model}”:\n{path_or_err}",
+        )
+        self._full_refresh()
+
     def _open_folder(self, folder_abs: str) -> None:
         if os.path.isdir(folder_abs):
             QDesktopServices.openUrl(QUrl.fromLocalFile(folder_abs))
@@ -419,15 +546,17 @@ class LocalServerTool(QWidget):
         active = active_folder_from_camera_update_url(self._update_url_raw, visible)
 
         if not visible:
-            if not all_names:
-                lab = QLabel(f"No subfolders under the server root.\n{root_abs}")
-            elif self._should_filter_folders():
+            if self._should_filter_folders() and all_names:
                 lab = QLabel(
                     f"No firmware found for {self._vmc_model.strip().upper()}. "
                     "Use the download button below or the FW Wizard to add firmware."
                 )
             else:
-                lab = QLabel(f"No subfolders under the server root.\n{root_abs}")
+                lab = QLabel(
+                    f"No subfolders under the server root.\n{root_abs}\n\n"
+                    'Use "New folder" for an empty layout, or "Download firmware" and type a new '
+                    "name in the server folder field to pull builds from Artifactory."
+                )
             lab.setStyleSheet(_ql(f"color: {_MUTED}; font-size: 12px;"))
             lab.setWordWrap(True)
             self._folders_layout.addWidget(lab)
@@ -466,6 +595,8 @@ class LocalServerTool(QWidget):
             txt, kind = st
             col = _OK if kind == "ok" else _AMBER
             line = QLabel(txt)
+            line.setTextFormat(Qt.TextFormat.PlainText)
+            line.setWordWrap(True)
             line.setStyleSheet(_ql(f"color: {col}; font-size: 11px;"))
             vl.addWidget(line)
 
@@ -500,7 +631,14 @@ class LocalServerTool(QWidget):
             il.setSpacing(10)
             ver = firmware_folder_version_label(folder_abs)
             model_l = firmware_folder_model_label(folder_abs)
-            arch = _primary_archive_basename(folder_abs)
+            pref_vmc = ""
+            if self._connected and self._profile_ok and (self._vmc_model or "").strip():
+                pref_vmc = (self._vmc_model or "").strip().upper()
+            elif model_l and model_l != "—":
+                pref_vmc = str(model_l).strip().upper()
+            arch = _primary_archive_basename(
+                folder_abs, preferred_vmc=pref_vmc or None
+            )
             il.addLayout(self._kv_block("Version", ver, mono_value=False))
             il.addLayout(self._kv_block("Model", model_l, mono_value=False))
             il.addLayout(self._kv_block("Archive", arch, mono_value=True))
@@ -565,6 +703,7 @@ class LocalServerTool(QWidget):
         cap.setStyleSheet(_ql(f"color: {_MUTED}; font-size: 11px;"))
         col.addWidget(cap)
         val = QLabel(value or "—")
+        val.setTextFormat(Qt.TextFormat.PlainText)
         mono = f"font-family: {_MONO};" if mono_value else ""
         val.setStyleSheet(_ql(f"color: {_TEXT}; font-size: 13px; {mono}"))
         val.setWordWrap(True)
@@ -611,12 +750,18 @@ class LocalServerTool(QWidget):
             if ok_r:
                 self._folder_status[folder_name] = ("Reboot sent ✓", "ok")
             else:
-                self._folder_status[folder_name] = (msg_r or "Reboot failed.", "err")
+                self._folder_status[folder_name] = (
+                    _brief_shell_status_line(msg_r, fallback="Reboot failed."),
+                    "err",
+                )
             done_refresh_ui()
 
         def after_url(ok: bool, msg: str) -> None:
             if not ok:
-                self._folder_status[folder_name] = (msg or "update_url failed.", "err")
+                self._folder_status[folder_name] = (
+                    _brief_shell_status_line(msg, fallback="update_url failed."),
+                    "err",
+                )
                 done_refresh_ui()
                 return
             if self._onboarded is True:
@@ -634,12 +779,18 @@ class LocalServerTool(QWidget):
             return
 
         def done(ok: bool, msg: str) -> None:
-            ref_btn.setEnabled(True)
+            # Do not call ref_btn.setEnabled(True) here: apply_state / focusInEvent / this
+            # callback's _full_refresh() may have already deleteLater()'d that widget; touching
+            # a stale QPushButton* causes undefined behavior. Rebuild replaces the button.
             if ok:
-                self._folder_status[folder_name] = ((msg or "update_refresh OK").strip()[:200], "ok")
+                # stdout can be large HAL logs; QLabel AutoText may misparse "<..." as HTML.
+                self._folder_status[folder_name] = ("Update check sent ✓", "ok")
                 self._pending_refresh_folder = None
             else:
-                self._folder_status[folder_name] = (msg or "update_refresh failed.", "err")
+                self._folder_status[folder_name] = (
+                    _brief_shell_status_line(msg, fallback="update_refresh failed."),
+                    "err",
+                )
             self._full_refresh()
 
         ref_btn.setEnabled(False)

@@ -80,7 +80,7 @@ class FwQuickSwitchPanel(QWidget):
         stop_row = QHBoxLayout()
         self._btn_stop = QPushButton("Stop server (this window)")
         self._btn_stop.setToolTip(
-            "Stops the firmware HTTP server only if it was started in this ArloShell process."
+            "Stops the firmware HTTP server only if it was started in this ArloHub process."
         )
         self._btn_stop.clicked.connect(self._on_stop_server)
         stop_row.addWidget(self._btn_stop)

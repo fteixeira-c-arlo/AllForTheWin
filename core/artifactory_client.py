@@ -7,6 +7,9 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from typing import Callable
 
+# (Artifactory folder path, filename) -> (size bytes or None, modified string from API)
+FirmwareFileMeta = dict[tuple[str, str], tuple[int | None, str | None]]
+
 # Spinner for single-line search progress
 SPINNER_CHARS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
@@ -199,14 +202,15 @@ def _search_firmware_aql(
     model_folder: str,
     headers: dict,
     version_filter: str,
-) -> tuple[list[tuple[str, list[str]]] | None, str]:
+) -> tuple[list[tuple[str, list[str]]] | None, FirmwareFileMeta, str]:
     """
     Fast path: one AQL request to list all files under repo/model_folder.
-    Returns (results, "") on success, (None, error) on failure. Caller can fall back to recursive walk.
+    Returns (results, file_meta, "") on success (results may be empty).
+    (None, {}, "") means fall back to recursive walk; (None, {}, err) is a hard AQL failure.
     """
     requests = _get_requests()
     if not requests:
-        return None, "requests library required."
+        return None, {}, "requests library required."
     # AQL body is plain text: items.find({"repo":..., "path":...})
     aql_body = (
         f'items.find({{"repo":{{"$eq":"{ARTIFACTORY_REPO}"}},'
@@ -222,10 +226,11 @@ def _search_firmware_aql(
             timeout=30,
         )
         if r.status_code != 200:
-            return None, f"AQL returned {r.status_code}"
+            return None, {}, f"AQL returned {r.status_code}"
         data = r.json()
         runs = data.get("results") or []
         by_path: dict[str, list[str]] = {}
+        meta: FirmwareFileMeta = {}
         for item in runs:
             if not isinstance(item, dict):
                 continue
@@ -235,14 +240,22 @@ def _search_firmware_aql(
                 continue
             if version_lower in name.lower() or version_lower in path.lower():
                 by_path.setdefault(path, []).append(name)
+                sz_raw = item.get("size")
+                try:
+                    sz_i = int(sz_raw) if sz_raw is not None else None
+                except (TypeError, ValueError):
+                    sz_i = None
+                mod_raw = item.get("modified")
+                mod_s = str(mod_raw).strip() if mod_raw is not None and str(mod_raw).strip() else None
+                meta[(path, name)] = (sz_i, mod_s)
         if not by_path:
-            return [], ""
+            return [], meta, ""
         results = [(p, sorted(names)) for p, names in sorted(by_path.items())]
-        return results, ""
+        return results, meta, ""
     except requests.exceptions.RequestException as e:
-        return None, str(e)
+        return None, {}, str(e)
     except (KeyError, TypeError, ValueError) as e:
-        return None, str(e)
+        return None, {}, str(e)
 
 
 def find_model_folder(
@@ -310,15 +323,16 @@ def find_firmware_version_in_model(
     model_folder: str,
     version_filter: str,
     username: str | None = None,
-) -> tuple[list[tuple[str, list[str]]], str]:
+) -> tuple[list[tuple[str, list[str]]], FirmwareFileMeta, str]:
     """
     Stage 2: Search inside the model folder for firmware files matching version_filter.
     Tries fast AQL search first (one request); falls back to parallel recursive walk.
-    Returns (list of (repo_relative_folder_path, [filenames]), error).
+    Returns (list of (repo_relative_folder_path, [filenames]), file_meta, error).
+    file_meta maps (folder_path, filename) -> (size_bytes, modified) when AQL was used.
     """
     requests = _get_requests()
     if not requests:
-        return [], "requests library required for Artifactory."
+        return [], {}, "requests library required for Artifactory."
     api_base = _artifactory_api_base(base_url)
     headers = _auth_headers(access_token, username)
     version_lower = (version_filter or "").strip().lower()
@@ -329,12 +343,14 @@ def find_firmware_version_in_model(
         sys.stdout.flush()
 
     # Fast path: single AQL request
-    aql_results, _ = _search_firmware_aql(api_base, model_folder, headers, version_filter)
+    aql_results, aql_meta, _aql_err = _search_firmware_aql(
+        api_base, model_folder, headers, version_filter
+    )
     if aql_results is not None:
         if aql_results:
             sys.stdout.write(f"\r✓ Found: {len(aql_results)} folder(s) with matching firmware\n")
             sys.stdout.flush()
-        return aql_results, ""
+        return aql_results, aql_meta, ""
     # Fallback: parallel recursive walk (single executor, parallel across folders)
     results: list[tuple[str, list[str]]] = []
     results_lock = Lock()
@@ -372,12 +388,12 @@ def find_firmware_version_in_model(
                 "Try: Double-check version number format\n"
             )
             sys.stdout.flush()
-        return results, ""
+        return results, {}, ""
     except requests.exceptions.RequestException as e:
         write_progress("")
         sys.stdout.write(f"\r❌ Failed during search: {e}\n")
         sys.stdout.flush()
-        return [], str(e)
+        return [], {}, str(e)
 
 
 def list_available_firmware(
@@ -386,16 +402,17 @@ def list_available_firmware(
     version_filter: str,
     model_name: str | list[str],
     username: str | None = None,
-) -> tuple[bool, list[tuple[str, list[str]]], str]:
+) -> tuple[bool, list[tuple[str, list[str]]], FirmwareFileMeta, str]:
     """
     Two-stage search: find model folder(s), then find firmware version in each.
     model_name can be a single model (e.g. "VMC3081") or a list for 2K + FHD (e.g. ["VMC3073", "VMC2073"]).
-    Returns (success, list of (repo_relative_folder_path, matching_filenames), error).
+    Returns (success, list of (repo_relative_folder_path, matching_filenames), file_meta, error).
     """
     models_to_search = [model_name] if isinstance(model_name, str) else list(model_name)
     if not models_to_search:
-        return False, [], "No model(s) provided for search."
+        return False, [], {}, "No model(s) provided for search."
     all_results: list[tuple[str, list[str]]] = []
+    all_meta: FirmwareFileMeta = {}
     last_err = ""
     seen_folders: set[str] = set()  # Artifactory has one folder per 2K; FHD maps to same folder, skip duplicate search
     for m in models_to_search:
@@ -409,16 +426,17 @@ def list_available_firmware(
         if model_folder in seen_folders:
             continue
         seen_folders.add(model_folder)
-        results, err2 = find_firmware_version_in_model(
+        results, meta_part, err2 = find_firmware_version_in_model(
             base_url, access_token, model_folder, version_filter, username
         )
         if err2:
             last_err = err2
             continue
+        all_meta.update(meta_part)
         all_results.extend(results)
     if not all_results:
-        return False, [], last_err or "No firmware found for any of the given models."
-    return True, all_results, ""
+        return False, [], {}, last_err or "No firmware found for any of the given models."
+    return True, all_results, all_meta, ""
 
 
 def _is_archive_filename(name: str) -> bool:

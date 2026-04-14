@@ -37,6 +37,7 @@ from interface.prompts import (
     prompt_artifactory_token,
     prompt_artifactory_username,
     prompt_confirm_proceed,
+    prompt_ensure_fw_server_root,
     prompt_firmware_version_filter,
     prompt_fw_server_root,
     prompt_save_credentials_to_config,
@@ -143,7 +144,7 @@ def _cli_step_pick_version_and_list(
         return "cancelled"
 
     console.print()
-    ok, available, err = list_available_firmware(
+    ok, available, file_meta, err = list_available_firmware(
         creds.base_url, creds.token, version_filter, fw_search_models, creds.username
     )
     if not ok:
@@ -160,16 +161,19 @@ def _cli_step_pick_version_and_list(
         )
         version = version_filter
     else:
-        flat_fw = flatten_firmware_archives(available)
+        flat_fw = flatten_firmware_archives(available, file_meta)
         if not flat_fw:
             console.print("[yellow]No .zip or .<env>.tar.gz firmware found matching your version.[/]")
             console.print("[dim]Using your input as version for mock download.[/]\n")
             version = version_filter
             selected_filename = None
         else:
-            choices = [(f"{folder} — {filename}", (folder, filename)) for folder, filename in flat_fw]
+            choices = [
+                (f"{row[0]} — {row[1]}", (row[0], row[1])) for row in flat_fw
+            ]
             console.print(f"[bold]Firmware matching [cyan]{version_filter}[/] ({len(flat_fw)}):[/]")
-            for i, (folder, filename) in enumerate(flat_fw, 1):
+            for i, row in enumerate(flat_fw, 1):
+                folder, filename = row[0], row[1]
                 console.print(f"   [cyan]{i}.[/] {folder} — {filename}")
             console.print()
             selected = prompt_select_firmware_version(choices=choices)
@@ -298,7 +302,11 @@ def _cli_step_start_server_and_update_url(
         console.print("[dim]Local server remains active during this session. Use 'stop_server' to stop.[/]\n")
         return None
     show_error(output or "Command failed.")
-    if output and "Device disconnected" in output:
+    if output and (
+        "Device disconnected" in output
+        or "Session expired" in output
+        or "Login incorrect" in output
+    ):
         return "disconnected"
     return output or "Command failed."
 
@@ -344,6 +352,11 @@ def run_update_url_flow(
     download_model = compute_download_model(version, selected_filename, model_name)
 
     root = default_fw_server_root()
+    ensured = prompt_ensure_fw_server_root(root)
+    if not ensured:
+        show_error("Firmware server folder was not created. Cancelled.")
+        return "cancelled"
+    root = ensured
     env = prompt_select_env_folder(root)
     if not env:
         if not os.path.isdir(root):
@@ -436,9 +449,10 @@ def run_use_local_fw_server(
         root = prompt_fw_server_root(default_fw_server_root())
         if not root:
             return "cancelled"
-        if not os.path.isdir(root):
-            show_error(f"Directory does not exist: {root}")
-            return f"Directory does not exist: {root}"
+        ensured = prompt_ensure_fw_server_root(root)
+        if not ensured:
+            return "cancelled"
+        root = ensured
         ok, msg = start_http_server(root, DEFAULT_PORT)
         if not ok:
             show_error(msg)
@@ -472,7 +486,11 @@ def run_use_local_fw_server(
         console.print("[dim]Camera will check for updates from local server.[/]\n")
         return None
     show_error(output or "Command failed.")
-    if output and "Device disconnected" in output:
+    if output and (
+        "Device disconnected" in output
+        or "Session expired" in output
+        or "Login incorrect" in output
+    ):
         return "disconnected"
     return output or "Command failed."
 

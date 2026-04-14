@@ -1,4 +1,4 @@
-ArloShell — developer notes
+ArloHub — developer notes
 ======================================
 
 Graphical app (PySide6) for Arlo camera devices. Rich / questionary are still used

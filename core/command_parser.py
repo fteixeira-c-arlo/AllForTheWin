@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from utils.subprocess_helpers import win_subprocess_kwargs
+
 from core.abstract_dispatcher import (
     execute_abstract_command,
     load_abstract_definitions,
@@ -33,6 +35,7 @@ def set_tail_live_view_handlers(
     _tail_live_view_stop = stop
 
 from core.log_parser import parse_line, write_html
+from core.user_paths import get_arlo_logs_dir
 from core.update_url_flow import try_handle_fw_wizard_command
 from interface.menus import (
     show_abstract_commands_section,
@@ -48,6 +51,16 @@ _COMMAND_PARSER_DIR = Path(__file__).resolve().parent
 ABSTRACT_DEFINITIONS: list[dict] = load_abstract_definitions(
     str(_COMMAND_PARSER_DIR / "abstract_command_definitions.json")
 )
+
+
+def _transport_lost_output(msg: str | None) -> bool:
+    """USB/SSH drop, or UART shell back at login after reboot — session must be re-established."""
+    s = msg or ""
+    return (
+        "Device disconnected" in s
+        or "Session expired" in s
+        or "Login incorrect" in s
+    )
 
 
 def _check_command_catalog_restrictions(c: dict, model: dict[str, Any] | None) -> None:
@@ -67,21 +80,26 @@ def _check_command_catalog_restrictions(c: dict, model: dict[str, Any] | None) -
         )
 
 
-def get_visible_commands(device_commands: list[dict]) -> tuple[list[dict], list[dict]]:
+def get_visible_commands(
+    device_commands: list[dict], *, command_profile: str | None = None
+) -> tuple[list[dict], list[dict]]:
     """
     Split the device catalog for display only.
 
     Returns (abstract_command_definitions, advanced_raw_device_commands).
-    Entries with a non-empty ``abstract`` field are implementation steps for an abstract
-    command and are omitted from the second list; they remain in the full catalog for execution.
+    For **e3_wired** only: entries with a non-empty ``abstract`` field are hidden from the
+    advanced list (they back the tier-1 abstract commands). Other profiles show the full
+    device catalog in Advanced so AmebaPro2 / Gen5 / Linux sidebars list real shell lines.
     """
+    pid = (command_profile or "").strip() or "none"
     advanced: list[dict] = []
     for c in device_commands:
         if not isinstance(c, dict):
             continue
-        link = c.get("abstract")
-        if link is not None and str(link).strip():
-            continue
+        if pid == "e3_wired":
+            link = c.get("abstract")
+            if link is not None and str(link).strip():
+                continue
         advanced.append(c)
     return (list(ABSTRACT_DEFINITIONS), advanced)
 
@@ -183,7 +201,7 @@ def _spawn_tail_viewer_terminal(log_path: str, title: str | None = None) -> None
                 f.write(f"Get-Content -LiteralPath '{path_in_script}' -Wait\n")
             subprocess.Popen(
                 ["cmd", "/c", "start", title, "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_path],
-                cwd=os.getcwd(),
+                cwd=log_dir,
             )
         else:
             term = shutil.which("gnome-terminal") or shutil.which("xterm") or shutil.which("x-terminal-emulator")
@@ -420,6 +438,7 @@ def _run_push_arlod(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            **win_subprocess_kwargs(),
         )
         out, err = proc.communicate(input="arlo\n", timeout=30)
     except FileNotFoundError:
@@ -448,6 +467,7 @@ def _run_push_arlod(
             capture_output=True,
             text=True,
             timeout=600,
+            **win_subprocess_kwargs(),
         )
     except FileNotFoundError:
         show_error("adb not found.", "Install Android platform-tools and add adb to PATH.")
@@ -485,6 +505,7 @@ def _run_push_arlod(
                 capture_output=True,
                 text=True,
                 timeout=60,
+                **win_subprocess_kwargs(),
             )
         except subprocess.TimeoutExpired:
             show_error(
@@ -588,8 +609,7 @@ def parse_and_execute(
                 )
                 return "continue", None
             try:
-                log_dir = os.path.join(os.getcwd(), "arlo_logs")
-                os.makedirs(log_dir, exist_ok=True)
+                log_dir = get_arlo_logs_dir()
                 stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 log_path = os.path.join(log_dir, f"system_log_{stamp}.log")
                 result = start_tail(log_path)
@@ -646,8 +666,7 @@ def parse_and_execute(
                 )
                 return "continue", None
             try:
-                log_dir = os.path.join(os.getcwd(), "arlo_logs")
-                os.makedirs(log_dir, exist_ok=True)
+                log_dir = get_arlo_logs_dir()
                 stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 log_path = os.path.join(log_dir, f"system_log_parse_{stamp}.log")
                 _parsed_entries = []
@@ -694,8 +713,7 @@ def parse_and_execute(
                 stop_tail()
             report_path = ""
             try:
-                log_dir = os.path.join(os.getcwd(), "arlo_logs")
-                os.makedirs(log_dir, exist_ok=True)
+                log_dir = get_arlo_logs_dir()
                 stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 report_path = os.path.join(log_dir, f"parsed_{stamp}.html")
                 with _parsed_entries_lock:
@@ -725,7 +743,7 @@ def parse_and_execute(
             raw = (out or "").strip()
             show_info(f"kvcmd get KV_BS_CLAIMED → {repr(raw) if raw else '(empty)'}")
             if not ok:
-                if out and "Device disconnected" in (out or ""):
+                if _transport_lost_output(out):
                     return "disconnected", None
                 show_error("Could not read KV_BS_CLAIMED.", out or "Command failed.")
                 return "continue", None
@@ -737,14 +755,14 @@ def parse_and_execute(
                 return "continue", None
             ok, out = connection_execute("arlocmd device_info", [])
             if not ok:
-                if out and "Device disconnected" in (out or ""):
+                if _transport_lost_output(out):
                     return "disconnected", None
                 show_error("Camera did not respond (device_info). Ensure the device is online and running.", out or "")
                 return "continue", None
             tar_cmd = "tar -czvf /tmp/allsystem.logs.tar.gz /userdata/logs /tmp/logs/system-log_V1_0"
             ok, out = connection_execute(tar_cmd, [])
             if not ok:
-                if out and "Device disconnected" in (out or ""):
+                if _transport_lost_output(out):
                     return "disconnected", None
                 show_error("Tar failed.", out or "Check that paths exist on device.")
                 return "continue", None
@@ -764,7 +782,7 @@ def parse_and_execute(
             tftp_cmd = f"tftp -p -l /tmp/allsystem.logs.tar.gz {ip}"
             ok, out = connection_execute(tftp_cmd, [])
             if not ok:
-                if out and "Device disconnected" in (out or ""):
+                if _transport_lost_output(out):
                     return "disconnected", None
                 show_error("TFTP upload failed.", out or "Check network and TFTP server.")
                 return "continue", None
@@ -797,6 +815,8 @@ def parse_and_execute(
                 connection_execute=connection_execute,
                 model=model,
                 mcu_execute_fn=_mcu_fn if mcu_connection_execute else None,
+                connection_pull_file=connection_pull_file,
+                pull_logs_local_dir=pull_logs_local_dir,
             )
         except CommandNotSupportedError as e:
             show_error(str(e))
@@ -812,7 +832,7 @@ def parse_and_execute(
             return "continue", None
         except RuntimeError as e:
             err_text = str(e)
-            if "Device disconnected" in err_text:
+            if _transport_lost_output(err_text):
                 return "disconnected", None
             show_error(err_text)
             return "continue", None
@@ -832,7 +852,7 @@ def parse_and_execute(
 
     if cmd in ("help", "?", "--help"):
         show_abstract_commands_section(_abstract_help_lines(ABSTRACT_DEFINITIONS))
-        _, advanced_device = get_visible_commands(device_commands)
+        _, advanced_device = get_visible_commands(device_commands, command_profile=profile)
         full = list(advanced_device) + [
             {"name": c["name"], "description": c["description"]} for c in system_cmds
         ]
@@ -878,7 +898,7 @@ def parse_and_execute(
         return _fw_wizard_result
 
     if cmd == "parse_log_file":
-        log_dir = os.path.join(os.getcwd(), "arlo_logs")
+        log_dir = get_arlo_logs_dir()
         if not os.path.isdir(log_dir):
             show_error("arlo_logs folder not found.", "Run log tail or log parse first to create log files, or create arlo_logs manually.")
             return "continue", None
@@ -928,14 +948,14 @@ def parse_and_execute(
                     show_error("pull_logs is not supported over UART.", "Connect via ADB to download the log archive.")
                     return "continue", None
                 if connection_pull_file:
-                    local_dir = pull_logs_local_dir or os.getcwd()
+                    local_dir = pull_logs_local_dir or get_arlo_logs_dir()
                     local_path = os.path.join(local_dir, "allsystem.logs.tar")
                     if args:
                         local_path = args[0]
                     success, output = connection_pull_file(PULL_LOGS_REMOTE_PATH, local_path)
                     if success:
                         return "continue", output
-                    if output and output.strip() == "Device disconnected.":
+                    if _transport_lost_output(output):
                         return "disconnected", None
                     show_error(output or "Pull failed.")
                     return "continue", None
@@ -959,7 +979,7 @@ def parse_and_execute(
                 if success:
                     return "continue", output or f"Command '{cmd}' executed successfully."
                 # Camera disconnected from PC (USB unplugged or network lost)
-                if output and output.strip() == "Device disconnected.":
+                if _transport_lost_output(output):
                     return "disconnected", None
                 show_error(output or "Command failed.")
                 return "continue", None

@@ -9,7 +9,7 @@ import socket
 import sys
 from typing import Callable, Literal
 
-_FW_LOCAL_DETECT_LOG = logging.getLogger("arlo_shell.fw_local_detect")
+_FW_LOCAL_DETECT_LOG = logging.getLogger("arlohub.fw_local_detect")
 from urllib.parse import quote, unquote, urlparse
 
 from core.artifactory_client import ARTIFACTORY_REPO, download_firmware, list_available_firmware
@@ -28,8 +28,14 @@ from core.local_server import (
 
 # Default root for local firmware server (FxTest layout per Confluence)
 def default_fw_server_root() -> str:
-    if os.environ.get("FW_SERVER_ROOT"):
-        return os.environ.get("FW_SERVER_ROOT", "")
+    env = (os.environ.get("FW_SERVER_ROOT") or "").strip()
+    if env:
+        return env
+    from core.fw_server_prefs import load_saved_fw_server_root
+
+    saved = load_saved_fw_server_root()
+    if saved:
+        return os.path.normpath(os.path.expandvars(os.path.expanduser(saved)))
     if sys.platform == "win32":
         return r"C:\FxTest\fw_server\local_server"
     return os.path.join(os.getcwd(), "local_fw_server")
@@ -63,22 +69,47 @@ def is_firmware_archive(filename: str) -> bool:
     return any(n.endswith(s) for s in FW_ENV_TAR_GZ_SUFFIXES)
 
 
+def normalize_firmware_search_row(
+    row: tuple[object, ...] | list[object],
+) -> tuple[str, str, int | None, str | None]:
+    """Normalize 2- or 4-tuple rows from local scan / Artifactory to (path, file, size, modified)."""
+    if len(row) >= 4:
+        a, b, sz, md = row[0], row[1], row[2], row[3]
+        try:
+            sz_i = int(sz) if sz is not None else None  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            sz_i = None
+        md_s = str(md).strip() if md is not None and str(md).strip() else None
+        return str(a), str(b), sz_i, md_s
+    return str(row[0]), str(row[1]), None, None
+
+
 def flatten_firmware_archives(
     available: list[tuple[str, list[str]]],
-) -> list[tuple[str, str]]:
-    """Build (folder_path, filename) list for .zip / env .tar.gz only."""
+    file_meta: dict[tuple[str, str], tuple[int | None, str | None]] | None = None,
+) -> list[tuple[str, str, int | None, str | None]]:
+    """Build (folder_path, filename, size, modified) for .zip / env .tar.gz only."""
+    file_meta = file_meta or {}
     available_fw = [(folder, [f for f in files if is_firmware_archive(f)]) for folder, files in available]
     available_fw = [(folder, files) for folder, files in available_fw if files]
-    return [(folder, fn) for folder, files in available_fw for fn in files]
+    out: list[tuple[str, str, int | None, str | None]] = []
+    for folder, files in available_fw:
+        for fn in files:
+            m = file_meta.get((folder, fn))
+            if m:
+                out.append((folder, fn, m[0], m[1]))
+            else:
+                out.append((folder, fn, None, None))
+    return out
 
 
 def scan_local_firmware_archives(
     fw_root: str,
     server_folder: str,
     version_filter: str,
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, str, int | None, str | None]]:
     """
-    List (version_path, filename) for archives under <fw_root>/<server_folder>/archive/.
+    List (version_path, filename, None, None) for archives under <fw_root>/<server_folder>/archive/.
     Runs before Artifactory search; rows use version_path prefix 'local/<folder>/' so the wizard
     can tell them from remote paths. version_filter: non-empty means filename must contain it (case-insensitive).
     """
@@ -100,7 +131,7 @@ def scan_local_firmware_archives(
             continue
         if vf and vf not in fn.lower():
             continue
-        out.append((f"local/{folder}/{fn}", fn))
+        out.append((f"local/{folder}/{fn}", fn, None, None))
     return out
 
 
@@ -287,6 +318,63 @@ def _normalize_fw_version_token(s: str) -> str:
     return m.group(1) if m else t
 
 
+_VMC_ID_RE = re.compile(r"\b(VMC\d{4}[A-Z]?)\b", re.IGNORECASE)
+
+
+def extract_vmc_model_ids_from_text(text: str) -> frozenset[str]:
+    """VMC model tokens (e.g. VMC3070, VMC2070) in a path or filename — for 2K vs FHD disambiguation."""
+    if not (text or "").strip():
+        return frozenset()
+    return frozenset(m.group(1).upper() for m in _VMC_ID_RE.finditer(text))
+
+
+def local_folder_has_model_and_version_artifact(
+    server_folder_abs: str,
+    *,
+    version_token: str,
+    required_models: frozenset[str],
+) -> bool:
+    """
+    True if some firmware archive or .enc under the server folder matches version_token
+    and names at least one of required_models (2K vs FHD same semver).
+    """
+    if not required_models:
+        return True
+    vt = (version_token or "").strip().lower()
+    if not vt:
+        return False
+    root = os.path.abspath(server_folder_abs)
+    archive_dir = os.path.join(root, "archive")
+    if os.path.isdir(archive_dir):
+        try:
+            names = os.listdir(archive_dir)
+        except OSError:
+            names = []
+        for fn in names:
+            if not is_firmware_archive(fn):
+                continue
+            at = _normalize_fw_version_token(fn)
+            if not at or not _fw_build_tokens_compatible(vt, at):
+                continue
+            if extract_vmc_model_ids_from_text(fn) & required_models:
+                return True
+    bin_root = os.path.join(root, "binaries")
+    if os.path.isdir(bin_root):
+        try:
+            for _dp, _dns, filenames in os.walk(bin_root):
+                for fn in filenames:
+                    if not fn.lower().endswith(".enc"):
+                        continue
+                    at = _normalize_fw_version_token(fn)
+                    if not at or not _fw_build_tokens_compatible(vt, at):
+                        continue
+                    if extract_vmc_model_ids_from_text(fn) & required_models:
+                        return True
+        except OSError:
+            pass
+    return False
+
+
 def _fw_build_tokens_compatible(sel_token: str, loc_token: str) -> bool:
     """True if selection and local version refer to the same build (prefix / exact on dotted tokens)."""
     s = (sel_token or "").strip().lower()
@@ -304,10 +392,12 @@ def _archive_suggests_selected_build(
     archive_dir: str,
     selected_archive_name: str | None,
     selected_version_path: str,
+    required_models: frozenset[str] | None = None,
 ) -> bool:
     """True if any file in archive/ plausibly is the same build as the Artifactory selection."""
     if not os.path.isdir(archive_dir):
         return False
+    req = required_models or frozenset()
     sel_name = (selected_archive_name or "").strip()
     sel_low = sel_name.lower()
     path_tok = _normalize_fw_version_token(selected_version_path)
@@ -324,9 +414,13 @@ def _archive_suggests_selected_build(
         if sel_low and low == sel_low:
             return True
         if sel_low and sel_low in low or low in sel_low:
+            if req and not (extract_vmc_model_ids_from_text(fn) & req):
+                continue
             return True
         arch_tok = _normalize_fw_version_token(fn)
         if sel_tok and arch_tok and _fw_build_tokens_compatible(sel_tok, arch_tok):
+            if req and not (extract_vmc_model_ids_from_text(fn) & req):
+                continue
             return True
     return False
 
@@ -397,8 +491,11 @@ def debug_probe_local_firmware_folder(
         selected_archive_name
         and os.path.isfile(os.path.join(archive_dir, selected_archive_name))
     )
+    _req_dbg = extract_vmc_model_ids_from_text(
+        f"{selected_version_path or ''}/{selected_archive_name or ''}"
+    )
     archive_heuristic = _archive_suggests_selected_build(
-        archive_dir, selected_archive_name, selected_version_path
+        archive_dir, selected_archive_name, selected_version_path, _req_dbg
     )
     combined_sel = f"{selected_version_path or ''}/{selected_archive_name or ''}"
     sel_tok = (
@@ -434,7 +531,9 @@ def debug_probe_local_firmware_folder(
     if arch_files:
         out(f"[FW_LOCAL_DETECT]    - archive/ listing: {arch_files!r}")
 
-    cls = classify_local_firmware_vs_selection(root, selected_version_path, selected_archive_name)
+    cls = classify_local_firmware_vs_selection(
+        root, selected_version_path, selected_archive_name
+    )
     exact = cls == "exact_match"
     found = has_art
     if cls == "empty":
@@ -465,18 +564,24 @@ def classify_local_firmware_vs_selection(
 ) -> Literal["empty", "exact_match", "different_present"]:
     """
     empty: no prior firmware tree content.
-    exact_match: same archive on disk or same normalized version as selection.
+    exact_match: same archive on disk, or same version + same VMC model as selection (2K vs FHD).
     different_present: tree has firmware but not the selected build.
     """
     root = os.path.abspath(server_folder_abs)
     if not folder_has_firmware_artifacts(root):
         return "empty"
 
+    req = extract_vmc_model_ids_from_text(
+        f"{selected_version_path or ''}/{selected_archive_name or ''}"
+    )
+
     archive_dir = os.path.join(root, "archive")
     if selected_archive_name and os.path.isfile(os.path.join(archive_dir, selected_archive_name)):
         return "exact_match"
 
-    if _archive_suggests_selected_build(archive_dir, selected_archive_name, selected_version_path):
+    if _archive_suggests_selected_build(
+        archive_dir, selected_archive_name, selected_version_path, req
+    ):
         return "exact_match"
 
     local_label = firmware_folder_version_label(root)
@@ -490,9 +595,77 @@ def classify_local_firmware_vs_selection(
     if sel_tok and loc_tok and (
         sel_tok == loc_tok or _fw_build_tokens_compatible(sel_tok, loc_tok)
     ):
+        if req and not local_folder_has_model_and_version_artifact(
+            root, version_token=sel_tok, required_models=req
+        ):
+            return "different_present"
         return "exact_match"
 
     return "different_present"
+
+
+def version_filter_matches_local_folder(
+    server_folder_abs: str,
+    version_filter: str,
+    *,
+    primary_model_id: str | None = None,
+) -> tuple[bool, str]:
+    """
+    Whether a server folder already holds the build implied by the wizard's version filter.
+
+    Stricter than classify_local_firmware_vs_selection(..., filter, None): dotted-prefix aliases
+    (e.g. 5.0.5 vs 5.0.51) are not treated as a match, so typing 5.0.52 does not skip when only
+    5.0.51 is present.
+
+    When primary_model_id is set (e.g. wizard's 2K VMC3070), an archive or .enc must name that
+    model so a same-version FHD (VMC2070) package does not count as a match.
+
+    Match if either:
+    - Some archive/ entry contains the filter text (case-insensitive) and its first dotted
+      numeric token equals the filter's normalized token; or
+    - firmware_folder_version_label() normalizes to the same token as the filter.
+
+    Returns (matched, version_for_message) — version_for_message is a short label for dialogs.
+    """
+    root = os.path.abspath(server_folder_abs)
+    vf_raw = (version_filter or "").strip()
+    if not vf_raw or not folder_has_firmware_artifacts(root):
+        return False, ""
+    sel_tok = _normalize_fw_version_token(vf_raw)
+    if not sel_tok:
+        return False, ""
+    vf_low = vf_raw.lower()
+    mid = (primary_model_id or "").strip().upper()
+    req = frozenset([mid]) if mid else frozenset()
+
+    archive_dir = os.path.join(root, "archive")
+    if os.path.isdir(archive_dir):
+        try:
+            names = os.listdir(archive_dir)
+        except OSError:
+            names = []
+        for fn in names:
+            if not is_firmware_archive(fn):
+                continue
+            if vf_low not in fn.lower():
+                continue
+            arch_tok = _normalize_fw_version_token(fn)
+            if arch_tok == sel_tok:
+                if req and not (extract_vmc_model_ids_from_text(fn) & req):
+                    continue
+                return True, sel_tok
+
+    local_label = firmware_folder_version_label(root)
+    if not local_label or local_label == "—":
+        return False, ""
+    loc_tok = _normalize_fw_version_token(local_label)
+    if loc_tok and loc_tok == sel_tok:
+        if req and not local_folder_has_model_and_version_artifact(
+            root, version_token=sel_tok, required_models=req
+        ):
+            return False, ""
+        return True, str(local_label).strip()
+    return False, ""
 
 
 def rename_server_folder(root: str, old_name: str, new_name: str) -> tuple[bool, str]:
@@ -518,6 +691,32 @@ def rename_server_folder(root: str, old_name: str, new_name: str) -> tuple[bool,
     return True, ""
 
 
+def create_empty_server_folder(
+    root: str,
+    folder_name: str,
+    model_name: str,
+    fw_search_models: list[str],
+) -> tuple[bool, str]:
+    """
+    Create a new server-folder tree (archive/, binaries/<model>/, updaterules/) with no firmware.
+
+    Returns (True, env_dir_abs) on success, or (False, error_message).
+    """
+    sn = sanitize_server_folder_name((folder_name or "").strip())
+    if not sn:
+        return False, "Invalid folder name."
+    root_abs = os.path.abspath(root)
+    env_dir = os.path.join(root_abs, sn)
+    if os.path.exists(env_dir):
+        return False, f"A folder named {sn!r} already exists."
+    ok_setup, path_or_err, _, _, _, _ = prepare_env_directories(
+        root_abs, sn, model_name, fw_search_models
+    )
+    if not ok_setup:
+        return False, path_or_err or "Could not create folder."
+    return True, os.path.abspath(path_or_err)
+
+
 def list_environment_folders(root: str) -> list[str]:
     """Subdirectory names under FW server root (user-defined server folders)."""
     if not os.path.isdir(root):
@@ -539,17 +738,18 @@ def search_firmware_archives(
     version_filter: str,
     fw_search_models: list[str],
     username: str | None = None,
-) -> tuple[bool, list[tuple[str, str]], str]:
+) -> tuple[bool, list[tuple[str, str, int | None, str | None]], str]:
     """
-    Query Artifactory and return flat (repo_folder_path, filename) archives.
+    Query Artifactory and return flat rows (repo_folder_path, filename, size, modified).
+    size/modified are set when the AQL fast path was used; otherwise None.
     version_filter may be empty (matches broadly in client-side filter).
     """
-    ok, available, err = list_available_firmware(
+    ok, available, file_meta, err = list_available_firmware(
         base_url, token, version_filter, fw_search_models, username
     )
     if not ok:
         return False, [], err or "Search failed."
-    flat = flatten_firmware_archives(available)
+    flat = flatten_firmware_archives(available, file_meta)
     return True, flat, ""
 
 

@@ -1,4 +1,4 @@
-ArloShell — quick install
+ArloHub — quick install
 
   • Nothing else to install (no Python, no command line).
   • Installs under your user account — administrator rights are not required.
