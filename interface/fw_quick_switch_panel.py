@@ -24,7 +24,7 @@ from core.fw_setup_service import (
 )
 from core.local_server import check_server_status, firmware_server_listener_summary, stop_http_server
 
-from interface.app_styles import ARLO_ACCENT, set_arlo_pushbutton_variant
+from interface.app_styles import ARLO_ACCENT, apply_qframe_stylesheet, set_arlo_pushbutton_variant
 
 ShellAsyncFn = Callable[[str, list[str], Callable[[bool, str], None]], None]
 
@@ -88,7 +88,7 @@ class FwQuickSwitchPanel(QWidget):
         outer.addLayout(stop_row)
 
         foot = QFrame()
-        foot.setStyleSheet("QFrame { border-top: 1px solid #2a313a; }")
+        apply_qframe_stylesheet(foot, "QFrame { border-top: 1px solid #2a313a; background-color: transparent; }")
         fl = QVBoxLayout(foot)
         fl.setContentsMargins(0, 8, 0, 0)
         self._foot_model = QLabel("Model: —")
@@ -161,8 +161,9 @@ class FwQuickSwitchPanel(QWidget):
             for name, ver in pairs:
                 row = QFrame()
                 border = f"2px solid {ARLO_ACCENT}" if name == active else "1px solid rgba(255,255,255,0.12)"
-                row.setStyleSheet(
-                    f"QFrame {{ background-color: #161a20; border: {border}; border-radius: 11px; }}"
+                apply_qframe_stylesheet(
+                    row,
+                    f"QFrame {{ background-color: #161a20; border: {border}; border-radius: 11px; }}",
                 )
                 rl = QVBoxLayout(row)
                 rl.setContentsMargins(14, 12, 14, 12)

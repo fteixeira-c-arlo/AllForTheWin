@@ -76,7 +76,12 @@ from utils.config_manager import (
     update_last_used,
 )
 
-from interface.app_styles import qcombobox_dark_stylesheet, set_arlo_pushbutton_variant
+from interface.app_styles import (
+    apply_qframe_stylesheet,
+    prepare_qframe_for_qss,
+    qcombobox_dark_stylesheet,
+    set_arlo_pushbutton_variant,
+)
 
 _FW_GATE_LOG = logging.getLogger("arlohub.fw_local_detect")
 
@@ -429,7 +434,10 @@ class FwWizard(QDialog):
 
         sidebar = QFrame()
         sidebar.setFixedWidth(210)
-        sidebar.setStyleSheet(f"QFrame {{ background-color: {_SIDEBAR_BG}; border-right: 1px solid {_BORDER}; }}")
+        apply_qframe_stylesheet(
+            sidebar,
+            f"QFrame {{ background-color: {_SIDEBAR_BG}; border-right: 1px solid {_BORDER}; }}",
+        )
         side_lay = QVBoxLayout(sidebar)
         side_lay.setContentsMargins(14, 20, 14, 16)
         side_lay.setSpacing(0)
@@ -465,7 +473,7 @@ class FwWizard(QDialog):
                 vline.setFixedWidth(1)
                 vline.setMinimumHeight(12)
                 vline.setMaximumWidth(1)
-                vline.setStyleSheet(f"background-color: {_BORDER}; border: none;")
+                apply_qframe_stylesheet(vline, f"QFrame {{ background-color: {_BORDER}; border: none; }}")
                 conn_row.addWidget(indent)
                 conn_row.addWidget(vline)
                 conn_row.addStretch(1)
@@ -602,8 +610,10 @@ class FwWizard(QDialog):
         row = QHBoxLayout()
         row.setSpacing(12)
 
-        def _mode_card(radio: QRadioButton, subtitle: str) -> QFrame:
+        def _mode_card(radio: QRadioButton, subtitle: str, *, object_name: str) -> QFrame:
             fr = QFrame()
+            fr.setObjectName(object_name)
+            prepare_qframe_for_qss(fr)
             inner = QVBoxLayout(fr)
             inner.setContentsMargins(16, 14, 16, 14)
             inner.setSpacing(10)
@@ -626,10 +636,12 @@ class FwWizard(QDialog):
         self._frame_fw_single = _mode_card(
             self._radio_fw_single,
             "One Artifactory search, one download, one server folder — typical QA or dev install.",
+            object_name="fwWizardModeSingle",
         )
         self._frame_fw_stress = _mode_card(
             self._radio_fw_stress,
             "Two firmware builds side by side for A/B stress testing on the same local server.",
+            object_name="fwWizardModeStress",
         )
         row.addWidget(self._frame_fw_single, 1)
         row.addWidget(self._frame_fw_stress, 1)
@@ -751,9 +763,10 @@ class FwWizard(QDialog):
 
         def _stress_column_card(title: str) -> tuple[QFrame, QVBoxLayout]:
             card = QFrame()
-            card.setStyleSheet(
+            apply_qframe_stylesheet(
+                card,
                 "QFrame { border: 1px solid rgba(255,255,255,0.12); border-radius: 11px; "
-                "background-color: #161a20; }"
+                "background-color: #161a20; }",
             )
             inner = QVBoxLayout(card)
             inner.setContentsMargins(15, 14, 15, 14)
@@ -1206,11 +1219,11 @@ class FwWizard(QDialog):
         acc = _ACCENT
         ina = "rgba(255, 255, 255, 0.12)"
         self._frame_fw_single.setStyleSheet(
-            f"QFrame {{ background-color: #161a20; border-radius: 11px; "
+            f"#fwWizardModeSingle {{ background-color: #161a20; border-radius: 11px; "
             f"border: {'2px solid ' + acc if single_sel else '1px solid ' + ina}; }}"
         )
         self._frame_fw_stress.setStyleSheet(
-            f"QFrame {{ background-color: #161a20; border-radius: 11px; "
+            f"#fwWizardModeStress {{ background-color: #161a20; border-radius: 11px; "
             f"border: {'2px solid ' + acc if not single_sel else '1px solid ' + ina}; }}"
         )
 

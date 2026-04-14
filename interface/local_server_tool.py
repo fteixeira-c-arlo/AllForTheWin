@@ -48,7 +48,7 @@ from core.local_server import (
     start_http_server,
     stop_http_server,
 )
-from interface.app_styles import ARLO_ACCENT, set_arlo_pushbutton_variant
+from interface.app_styles import ARLO_ACCENT, apply_qframe_stylesheet, set_arlo_pushbutton_variant
 
 ShellAsyncFn = Callable[[str, list[str], Callable[[bool, str], None]], None]
 
@@ -170,8 +170,9 @@ class LocalServerTool(QWidget):
 
         # --- Top: server status ---
         top = QFrame()
-        top.setStyleSheet(
-            "QFrame { background-color: #12161c; border: none; border-bottom: 1px solid rgba(255,255,255,0.08); }"
+        apply_qframe_stylesheet(
+            top,
+            "QFrame { background-color: #12161c; border: none; border-bottom: 1px solid rgba(255,255,255,0.08); }",
         )
         tl = QHBoxLayout(top)
         tl.setContentsMargins(24, 16, 24, 16)
@@ -206,8 +207,9 @@ class LocalServerTool(QWidget):
         root.addWidget(top)
 
         cam_bar = QFrame()
-        cam_bar.setStyleSheet(
-            "QFrame { border: none; border-bottom: 1px solid rgba(255,255,255,0.08); background: transparent; }"
+        apply_qframe_stylesheet(
+            cam_bar,
+            "QFrame { border: none; border-bottom: 1px solid rgba(255,255,255,0.08); background-color: transparent; }",
         )
         cl = QHBoxLayout(cam_bar)
         cl.setContentsMargins(24, 16, 24, 16)
@@ -232,9 +234,10 @@ class LocalServerTool(QWidget):
         root.addWidget(cam_bar)
 
         self._missing_root_banner = QFrame()
-        self._missing_root_banner.setStyleSheet(
+        apply_qframe_stylesheet(
+            self._missing_root_banner,
             f"QFrame {{ background-color: rgba(201, 162, 39, 0.12); border: 1px solid {_AMBER}; "
-            "border-radius: 8px; }}"
+            "border-radius: 8px; }}",
         )
         mvl = QVBoxLayout(self._missing_root_banner)
         mvl.setContentsMargins(14, 12, 14, 12)
@@ -275,7 +278,10 @@ class LocalServerTool(QWidget):
         root.addWidget(scroll, stretch=1)
 
         bottom = QFrame()
-        bottom.setStyleSheet("QFrame { border: none; border-top: 1px solid rgba(255,255,255,0.08); }")
+        apply_qframe_stylesheet(
+            bottom,
+            "QFrame { border: none; border-top: 1px solid rgba(255,255,255,0.08); background-color: transparent; }",
+        )
         bl = QHBoxLayout(bottom)
         bl.setContentsMargins(0, 14, 0, 0)
         bl.setSpacing(10)
@@ -583,8 +589,9 @@ class LocalServerTool(QWidget):
             border = f"1px solid {_CARD_BORDER}"
 
         card = QFrame()
-        card.setStyleSheet(
-            f"QFrame {{ background-color: {_CARD_BG}; border: {border}; border-radius: 11px; }}"
+        apply_qframe_stylesheet(
+            card,
+            f"QFrame {{ background-color: {_CARD_BG}; border: {border}; border-radius: 11px; }}",
         )
         vl = QVBoxLayout(card)
         vl.setContentsMargins(16, 15, 16, 15)
@@ -622,9 +629,10 @@ class LocalServerTool(QWidget):
 
         if has_fw:
             inner = QFrame()
-            inner.setStyleSheet(
+            apply_qframe_stylesheet(
+                inner,
                 "QFrame { background-color: rgba(0,0,0,0.22); border: 1px solid rgba(255,255,255,0.06); "
-                "border-radius: 8px; }"
+                "border-radius: 8px; }",
             )
             il = QVBoxLayout(inner)
             il.setContentsMargins(12, 10, 12, 10)

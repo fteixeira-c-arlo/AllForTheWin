@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, QRect, Signal, Slot
+from PySide6.QtCore import QObject, Qt, Q_ARG, QMetaObject, QThread, QTimer, QRect, Signal, Slot
 from PySide6.QtGui import (
     QAction,
     QFont,
@@ -89,7 +89,11 @@ from transports.uart_handler import UARTHandler, list_uart_ports
 from transports.connection_config import ConnectionConfig
 from interface.gui_bridge import GuiBridge, _SELECT_CANCELLED
 from interface.log_viewer_widget import LogViewerWidget
-from interface.app_styles import polish_dynamic_properties, qcombobox_dark_stylesheet
+from interface.app_styles import (
+    polish_dynamic_properties,
+    prepare_qframe_for_qss,
+    qcombobox_dark_stylesheet,
+)
 from styles.tokens import (
     CMD_ROW_HEIGHT_PX,
     PANEL_FIXED_WIDTH,
@@ -189,8 +193,7 @@ _CLAIMED_BADGE_NOT_CLAIMED_QSS = (
 def _header_vertical_divider(parent: QWidget | None = None) -> QFrame:
     f = QFrame(parent)
     f.setFixedSize(1, 20)
-    f.setFrameShape(QFrame.Shape.NoFrame)
-    f.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+    prepare_qframe_for_qss(f)
     f.setStyleSheet("background-color: #333333; border: none;")
     return f
 
@@ -340,7 +343,7 @@ def _supported_connection_methods_union() -> set[str]:
     return out
 
 
-class WelcomeConnectionCard(QFrame):
+class WelcomeConnectionCard(QWidget):
     """Rounded welcome card; interactive cards get hover border and emit ``clicked``."""
 
     clicked = Signal()
@@ -358,14 +361,13 @@ class WelcomeConnectionCard(QFrame):
         super().__init__(parent)
         self._interactive = interactive
         self.setObjectName("welcomeConnectionCard")
-        self.setFrameShape(QFrame.Shape.NoFrame)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._qss_normal = (
-            f"QFrame#welcomeConnectionCard {{ background-color: {_WELCOME_CARD_BG}; "
+            f"#welcomeConnectionCard {{ background-color: {_WELCOME_CARD_BG}; "
             f"border: 1px solid {_WELCOME_CARD_BORDER}; border-radius: 10px; }}"
         )
         self._qss_hover = (
-            f"QFrame#welcomeConnectionCard {{ background-color: #2a2d32; "
+            f"#welcomeConnectionCard {{ background-color: #2a2d32; "
             f"border: 1px solid {_WELCOME_CARD_BORDER_HOVER}; border-radius: 10px; }}"
         )
         self.setStyleSheet(self._qss_normal)
@@ -710,7 +712,7 @@ def _row_section_from_group(
     return group.section_kind()
 
 
-class _AdbPickerDeviceCard(QFrame):
+class _AdbPickerDeviceCard(QWidget):
     """One selectable row: ADB USB serial only (no device queries)."""
 
     def __init__(
@@ -725,7 +727,6 @@ class _AdbPickerDeviceCard(QFrame):
         self._selected = False
         self._hover = False
         self.setObjectName("adbDeviceCard")
-        self.setFrameShape(QFrame.Shape.NoFrame)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -757,16 +758,16 @@ class _AdbPickerDeviceCard(QFrame):
         accent = ARLO_ACCENT_COLOR
         if self._selected:
             self.setStyleSheet(
-                f"QFrame#adbDeviceCard {{ background-color: rgba(0, 137, 123, 0.22); "
+                f"#adbDeviceCard {{ background-color: rgba(0, 137, 123, 0.22); "
                 f"border: 2px solid {accent}; border-radius: 8px; }}"
             )
         elif self._hover:
             self.setStyleSheet(
-                "QFrame#adbDeviceCard { background-color: #2a3038; border: 1px solid #5a6570; border-radius: 8px; }"
+                "#adbDeviceCard { background-color: #2a3038; border: 1px solid #5a6570; border-radius: 8px; }"
             )
         else:
             self.setStyleSheet(
-                "QFrame#adbDeviceCard { background-color: #181c22; border: 1px solid #3d4650; border-radius: 8px; }"
+                "#adbDeviceCard { background-color: #181c22; border: 1px solid #3d4650; border-radius: 8px; }"
             )
 
     def mousePressEvent(self, event: Any) -> None:
@@ -928,7 +929,7 @@ class _CollapsibleCategoryBlock(QWidget):
         divider.setObjectName("sectionHeaderDivider")
         divider.setFrameShape(QFrame.Shape.NoFrame)
         divider.setFixedHeight(1)
-        divider.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        prepare_qframe_for_qss(divider)
 
         self._body = QWidget(self)
         self._body_layout = QVBoxLayout(self._body)
@@ -1007,7 +1008,7 @@ class _AdvancedTierBlock(QWidget):
         divider.setObjectName("sectionHeaderDivider")
         divider.setFrameShape(QFrame.Shape.NoFrame)
         divider.setFixedHeight(1)
-        divider.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        prepare_qframe_for_qss(divider)
 
         self._body = QWidget(self)
         self._body_layout = QVBoxLayout(self._body)
@@ -1066,8 +1067,7 @@ class _CommandRowFrame(QFrame):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("cmdRow")
-        self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        prepare_qframe_for_qss(self)
         self.setProperty("tier", str(int(tier)))
         self.setProperty("section", section)
         self._cmd_key = cmd_key
@@ -1896,12 +1896,32 @@ class MainWindow(QMainWindow):
         self._cmd_sep_t1_tools: QFrame | None = None
         self._cmd_sep_tools_adv: QFrame | None = None
         self._live_tail_sessions: dict[str, dict[str, Any]] = {}
-        self._bridge.tail_live_start.connect(self._on_tail_live_start)
-        self._bridge.tail_live_stop.connect(self._on_tail_live_stop)
-        set_tail_live_view_handlers(
-            lambda p, t: self._bridge.tail_live_start.emit(p, t),
-            lambda p: self._bridge.tail_live_stop.emit(p),
-        )
+
+        def _marshal_tail_open(path: str, title: str) -> None:
+            # command_parser runs on SessionWorker thread; tab/UI must run on the GUI thread.
+            if QThread.currentThread() is self.thread():
+                self.tail_live_open_tab(path, title)
+                return
+            QMetaObject.invokeMethod(
+                self,
+                "tail_live_open_tab",
+                Qt.ConnectionType.BlockingQueuedConnection,
+                Q_ARG(str, path),
+                Q_ARG(str, title),
+            )
+
+        def _marshal_tail_stop(path: str) -> None:
+            if QThread.currentThread() is self.thread():
+                self.tail_live_stop_tab(path)
+                return
+            QMetaObject.invokeMethod(
+                self,
+                "tail_live_stop_tab",
+                Qt.ConnectionType.BlockingQueuedConnection,
+                Q_ARG(str, path),
+            )
+
+        set_tail_live_view_handlers(_marshal_tail_open, _marshal_tail_stop)
 
         self._header_bar = QWidget()
         self._header_bar.setObjectName("mainHeaderBar")
@@ -2828,6 +2848,15 @@ class MainWindow(QMainWindow):
                 self._tab_logs.setTabText(idx, (cur + " (stopped)")[:44])
 
     @Slot(str, str)
+    def tail_live_open_tab(self, path: str, title: str) -> None:
+        """Marshaled from worker thread via QMetaObject.invokeMethod (log tail / log parse)."""
+        self._on_tail_live_start(path, title)
+
+    @Slot(str)
+    def tail_live_stop_tab(self, path: str) -> None:
+        self._on_tail_live_stop(path)
+
+    @Slot(str, str)
     def _on_tail_live_start(self, path: str, title: str) -> None:
         key = self._tail_path_key(path)
         if key in self._live_tail_sessions:
@@ -2951,9 +2980,8 @@ class MainWindow(QMainWindow):
     def _make_cmd_panel_separator(self) -> QFrame:
         line = QFrame()
         line.setObjectName("cmdPanelSeparator")
-        line.setFrameShape(QFrame.Shape.NoFrame)
         line.setFixedHeight(1)
-        line.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        prepare_qframe_for_qss(line)
         return line
 
     def _clear_cmd_panel_body(self) -> None:

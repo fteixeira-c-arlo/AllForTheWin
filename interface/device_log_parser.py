@@ -125,11 +125,11 @@ def tokenize_message_for_paint(message: str) -> list[tuple[str, str | None]]:
     """
     if not message:
         return []
-    # Colors tuned for dark table background
-    hex_c = "#f6ad55"
-    num_c = "#63b3ed"
+    # Colors tuned for dark table background (aligned with embedded log palette).
+    hex_c = "#e8b060"
+    num_c = "#90d8a8"
     str_c = "#f687b3"
-    key_c = "#8b95a5"
+    key_c = "#a8b8d0"
 
     spans: list[tuple[int, int, str]] = []
 

@@ -117,6 +117,25 @@ def polish_dynamic_properties(widget: QWidget) -> None:
     widget.style().polish(widget)
 
 
+def prepare_qframe_for_qss(frame: QWidget) -> None:
+    """Before ``setStyleSheet`` on a ``QFrame``: plain frame + ``WA_StyledBackground`` (Windows parse/paint)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QFrame
+
+    if isinstance(frame, QFrame):
+        frame.setFrameShape(QFrame.Shape.NoFrame)
+        frame.setFrameShadow(QFrame.Shadow.Plain)
+        frame.setLineWidth(0)
+        frame.setMidLineWidth(0)
+    frame.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+
+def apply_qframe_stylesheet(frame: QWidget, stylesheet: str) -> None:
+    """Run :func:`prepare_qframe_for_qss` then apply QSS."""
+    prepare_qframe_for_qss(frame)
+    frame.setStyleSheet(stylesheet)
+
+
 def set_arlo_pushbutton_variant(
     btn: QPushButton,
     *,
