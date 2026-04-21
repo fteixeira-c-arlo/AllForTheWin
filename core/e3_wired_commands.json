@@ -38,6 +38,9 @@
     {"name": "get_device_info", "abstract": "get_device_info", "description": "Primary device_info (abstract alias)", "syntax": "arlocmd device_info", "category": "arlocmd", "shell": "arlocmd device_info"},
     {"name": "get_update_url", "abstract": "get_update_url", "description": "Read update URL (abstract alias)", "syntax": "arlocmd update_url", "category": "arlocmd", "shell": "arlocmd update_url"},
     {"name": "migrate_run", "abstract": "migrate_environment", "description": "Migrate stage then reboot via abstract", "syntax": "arlocmd migrate <stage>", "category": "arlocmd", "shell": "arlocmd migrate"},
+    {"name": "migrate", "abstract": "migrate", "description": "Migrate to stage (ISP shell; Dolphin firmware has no arlocmd on PATH)", "syntax": "migrate <stage>", "category": "isp", "shell": "migrate", "only_codenames": ["dolphin"]},
+    {"name": "reboot", "abstract": "reboot", "description": "Reboot via cli arlod general (Dolphin has no arlocmd)", "syntax": "cli arlod general perform reboot", "category": "arlod", "shell": "cli arlod general perform reboot", "only_codenames": ["dolphin"]},
+    {"name": "migrate_run", "abstract": "migrate_environment", "description": "Migrate stage (ISP) for Dolphin", "syntax": "migrate <stage>", "category": "isp", "shell": "migrate", "only_codenames": ["dolphin"]},
     {"name": "get_kv_item", "abstract": "get_kv_item", "description": "kvcmd read key", "syntax": "kvcmd read <key>", "category": "kvcmd", "shell": "kvcmd read"},
     {"name": "set_kv_write", "abstract": "set_kv_item", "description": "kvcmd set", "syntax": "kvcmd set <k> <v>", "category": "kvcmd", "shell": "kvcmd set"},
     {"name": "kv_commit", "abstract": "set_kv_item", "description": "kvcmd commit after set", "syntax": "kvcmd commit", "category": "kvcmd", "shell": "kvcmd commit"},
@@ -46,6 +49,8 @@
     {"name": "refresh_update_rules", "abstract": "refresh_update_rules", "description": "Refresh update metadata", "syntax": "arlocmd update_refresh", "category": "arlocmd", "shell": "arlocmd update_refresh"},
     {"name": "tail_logs", "abstract": "tail_logs", "description": "Not available as a UART shell tail on E3 Wired", "syntax": "(n/a)", "category": "logs", "shell": "", "unsupported": true, "unsupported_message": "tail_logs is not available over E3 Wired UART shell; use log tail over ADB/SSH."},
     {"name": "get_wifi_status", "abstract": "get_wifi_status", "description": "No single-line WiFi status command in this catalog", "syntax": "(n/a)", "category": "net", "shell": "", "unsupported": true, "unsupported_message": "get_wifi_status is not defined for E3 Wired in this catalog."},
-    {"name": "connect_wifi", "abstract": "connect_wifi_ip", "description": "Use wifi connect (spaced) on E3", "syntax": "(n/a)", "category": "net", "shell": "", "unsupported": true, "unsupported_message": "On E3 Wired use: wifi connect <ssid> <password>"}
+    {"name": "connect_wifi", "abstract": "connect_wifi_ip", "description": "Use connect_wifi_ip abstract or nimif on UART", "syntax": "(n/a)", "category": "net", "shell": "", "unsupported": true, "unsupported_message": "On E3 Wired use connect_wifi_ip (itool) or the abstract wifi connect (nimif) over a shell that supports nimif."},
+    {"name": "wifi_connect", "abstract": "wifi connect", "description": "WiFi join via nimif (ISP / nimif-capable shell)", "syntax": "nimif wifi connect <ssid> [psk] [timeout]", "category": "net", "shell": "nimif wifi connect"},
+    {"name": "general_get_ip", "abstract": "wifi connect", "description": "Start DHCP on wifi after nimif connect", "syntax": "nimif dhcp start wifi [timeout]", "category": "net", "shell": "nimif dhcp start wifi"}
   ]
 }

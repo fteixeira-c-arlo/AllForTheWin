@@ -1,43 +1,350 @@
 {
-  "source": "Gen5 ISP shell + MCU CLI (Caracara / Pro 5 Phoenix–Griffin)",
+  "source": "Gen5 ISP shell + MCU CLI (Caracara / Pro 5 Phoenix\u2013Griffin)",
   "commands": [
-    {"name": "get_firmware_version", "abstract": "get_firmware_version", "description": "Version from nvram", "syntax": "nvram show | grep version", "category": "isp", "shell": "nvram show | grep version"},
-    {"name": "get_model_id", "abstract": "get_model_id", "description": "Model from nvram", "syntax": "nvram show | grep model", "category": "isp", "shell": "nvram show | grep model"},
-    {"name": "get_serial_number", "abstract": "get_serial_number", "description": "Serial from nvram", "syntax": "nvram show | grep serial", "category": "isp", "shell": "nvram show | grep serial"},
-    {"name": "get_device_info", "abstract": "get_device_info", "description": "Full nvram", "syntax": "nvram show", "category": "isp", "shell": "nvram show"},
-    {"name": "factory_reset", "abstract": "factory_reset", "description": "Prod: hold sync 12–14s; or use factory flow from shell docs", "syntax": "(see docs)", "category": "isp", "shell": "echo \"[manual] Hold sync 12-14s on production for factory reset\""},
-    {"name": "reboot", "abstract": "reboot", "description": "Reboot (ISP)", "syntax": "reboot", "category": "isp", "shell": "reboot"},
-    {"name": "get_update_url", "abstract": "get_update_url", "description": "Read vz_update_url", "syntax": "nvram show | grep vz_update_url", "category": "isp", "shell": "nvram show | grep vz_update_url"},
-    {"name": "set_update_url_nvram", "description": "nvram set vz_update_url (then run nvram_commit_reboot)", "syntax": "nvram set vz_update_url=<url>", "category": "isp", "shell": "nvram set vz_update_url="},
-    {"name": "nvram_commit_reboot", "description": "nvram commit && reboot", "syntax": "nvram commit && reboot", "category": "isp", "shell": "nvram commit && reboot"},
-    {"name": "refresh_update_rules", "abstract": "refresh_update_rules", "description": "Not on ISP shell", "syntax": "(n/a)", "category": "isp", "shell": "", "unsupported": true, "unsupported_message": "refresh_update_rules is not available on Gen5 ISP shell."},
-    {"name": "migrate_run", "abstract": "migrate_environment", "description": "migrate <env>", "syntax": "migrate <env>", "category": "isp", "shell": "migrate"},
-    {"name": "get_current_environment", "abstract": "get_current_environment", "description": "stage from nvram", "syntax": "nvram show | grep stage", "category": "isp", "shell": "nvram show | grep stage"},
-    {"name": "get_kv_item", "abstract": "get_kv_item", "description": "N/A on Gen5 ISP", "syntax": "(n/a)", "category": "isp", "shell": "", "unsupported": true, "unsupported_message": "get_kv_item is not available on Gen5 ISP shell."},
-    {"name": "set_kv_item", "abstract": "set_kv_item", "description": "N/A on Gen5 ISP", "syntax": "(n/a)", "category": "isp", "shell": "", "unsupported": true, "unsupported_message": "set_kv_item is not available on Gen5 ISP shell."},
-    {"name": "tail_logs", "abstract": "tail_logs", "description": "Tail system log", "syntax": "cd /tmp && tail -f system-log", "category": "isp", "shell": "cd /tmp && tail -f system-log"},
-    {"name": "get_wifi_status", "abstract": "get_wifi_status", "description": "wl status", "syntax": "wl status", "category": "isp", "shell": "wl status"},
-    {"name": "connect_wifi", "abstract": "connect_wifi", "description": "N/A on Gen5 ISP", "syntax": "(n/a)", "category": "isp", "shell": "", "unsupported": true, "unsupported_message": "connect_wifi is not available on Gen5 ISP shell."},
-    {"name": "ping", "abstract": "ping", "description": "Ping", "syntax": "ping <host>", "category": "isp", "shell": "ping"},
-    {"name": "read_adc", "abstract": "read_adc", "description": "MCU: ADC read", "syntax": "adc", "category": "mcu", "shell": "adc", "console": "mcu"},
-    {"name": "read_lux", "abstract": "read_lux", "description": "MCU: ALS", "syntax": "als", "category": "mcu", "shell": "als", "console": "mcu"},
-    {"name": "read_temperature", "abstract": "read_temperature", "description": "MCU: temp", "syntax": "get_temp 01", "category": "mcu", "shell": "get_temp 01", "console": "mcu"},
-    {"name": "get_power_metrics", "abstract": "get_power_metrics", "description": "MCU: pm", "syntax": "pm 05", "category": "mcu", "shell": "pm 05", "console": "mcu"},
-    {"name": "set_voltage", "abstract": "set_voltage", "description": "MCU: volt (hex mV)", "syntax": "volt <hex>", "category": "mcu", "shell": "volt", "console": "mcu"},
-    {"name": "set_battery_percentage", "abstract": "set_battery_percentage", "description": "MCU: percent (hex)", "syntax": "perc <hex>", "category": "mcu", "shell": "perc", "console": "mcu"},
-    {"name": "read_register", "abstract": "read_register", "description": "MCU: regr", "syntax": "regr <reg>", "category": "mcu", "shell": "regr", "console": "mcu"},
-    {"name": "write_register", "abstract": "write_register", "description": "MCU: regw", "syntax": "regw <reg> <val>", "category": "mcu", "shell": "regw", "console": "mcu"},
-    {"name": "power_cycle_isp", "abstract": "power_cycle_isp", "description": "MCU: reset ISP", "syntax": "reset", "category": "mcu", "shell": "reset", "console": "mcu"},
-    {"name": "isp_off", "abstract": "isp_off", "description": "MCU: ovoff", "syntax": "ovoff", "category": "mcu", "shell": "ovoff", "console": "mcu"},
-    {"name": "isp_on", "abstract": "isp_on", "description": "MCU: ovon", "syntax": "ovon", "category": "mcu", "shell": "ovon", "console": "mcu"},
-    {"name": "wifi_chip_off", "abstract": "wifi_chip_off", "description": "MCU: wifioff", "syntax": "wifioff", "category": "mcu", "shell": "wifioff", "console": "mcu"},
-    {"name": "wifi_chip_on", "abstract": "wifi_chip_on", "description": "MCU: wifion", "syntax": "wifion", "category": "mcu", "shell": "wifion", "console": "mcu"},
-    {"name": "fire_pir", "abstract": "fire_pir", "description": "MCU: pir", "syntax": "pir 3c", "category": "mcu", "shell": "pir 3c", "console": "mcu"},
-    {"name": "arm_pir", "abstract": "arm_pir", "description": "MCU: arm PIR", "syntax": "sp 4", "category": "mcu", "shell": "sp 4", "console": "mcu"},
-    {"name": "floodlight_on", "abstract": "floodlight_on", "description": "MCU: flon", "syntax": "flon", "category": "mcu", "shell": "flon", "console": "mcu"},
-    {"name": "floodlight_off", "abstract": "floodlight_off", "description": "MCU: floff", "syntax": "floff", "category": "mcu", "shell": "floff", "console": "mcu"},
-    {"name": "override_lux", "abstract": "override_lux", "description": "MCU: mlux", "syntax": "mlux <hex>", "category": "mcu", "shell": "mlux", "console": "mcu"},
-    {"name": "read_gpio", "abstract": "read_gpio", "description": "MCU: gpio_i", "syntax": "gpio_i <port>", "category": "mcu", "shell": "gpio_i", "console": "mcu"},
-    {"name": "write_gpio", "abstract": "write_gpio", "description": "MCU: gpio_o", "syntax": "gpio_o <port> <level>", "category": "mcu", "shell": "gpio_o", "console": "mcu"}
+    {
+      "name": "get_firmware_version",
+      "abstract": "get_firmware_version",
+      "description": "Version from nvram",
+      "syntax": "nvram show | grep version",
+      "category": "isp",
+      "shell": "nvram show | grep version"
+    },
+    {
+      "name": "get_model_id",
+      "abstract": "get_model_id",
+      "description": "Model from nvram",
+      "syntax": "nvram show | grep model",
+      "category": "isp",
+      "shell": "nvram show | grep model"
+    },
+    {
+      "name": "get_serial_number",
+      "abstract": "get_serial_number",
+      "description": "Serial from nvram",
+      "syntax": "nvram show | grep serial",
+      "category": "isp",
+      "shell": "nvram show | grep serial"
+    },
+    {
+      "name": "get_device_info",
+      "abstract": "get_device_info",
+      "description": "Full nvram",
+      "syntax": "nvram show",
+      "category": "isp",
+      "shell": "nvram show"
+    },
+    {
+      "name": "factory_reset",
+      "abstract": "factory_reset",
+      "description": "Prod: hold sync 12\u201314s; or use factory flow from shell docs",
+      "syntax": "(see docs)",
+      "category": "isp",
+      "shell": "echo \"[manual] Hold sync 12-14s on production for factory reset\""
+    },
+    {
+      "name": "reboot",
+      "abstract": "reboot",
+      "description": "Reboot (ISP)",
+      "syntax": "reboot",
+      "category": "isp",
+      "shell": "reboot"
+    },
+    {
+      "name": "get_update_url",
+      "abstract": "get_update_url",
+      "description": "Read vz_update_url",
+      "syntax": "nvram show | grep vz_update_url",
+      "category": "isp",
+      "shell": "nvram show | grep vz_update_url"
+    },
+    {
+      "name": "set_update_url_nvram",
+      "description": "nvram set vz_update_url (then run nvram_commit_reboot)",
+      "syntax": "nvram set vz_update_url=<url>",
+      "category": "isp",
+      "shell": "nvram set vz_update_url="
+    },
+    {
+      "name": "nvram_commit_reboot",
+      "description": "nvram commit && reboot",
+      "syntax": "nvram commit && reboot",
+      "category": "isp",
+      "shell": "nvram commit && reboot"
+    },
+    {
+      "name": "refresh_update_rules",
+      "abstract": "refresh_update_rules",
+      "description": "Not on ISP shell",
+      "syntax": "(n/a)",
+      "category": "isp",
+      "shell": "",
+      "unsupported": true,
+      "unsupported_message": "refresh_update_rules is not available on Gen5 ISP shell."
+    },
+    {
+      "name": "migrate_run",
+      "abstract": "migrate_environment",
+      "description": "migrate <env>",
+      "syntax": "migrate <env>",
+      "category": "isp",
+      "shell": "migrate"
+    },
+    {
+      "name": "get_current_environment",
+      "abstract": "get_current_environment",
+      "description": "stage from nvram",
+      "syntax": "nvram show | grep stage",
+      "category": "isp",
+      "shell": "nvram show | grep stage"
+    },
+    {
+      "name": "get_kv_item",
+      "abstract": "get_kv_item",
+      "description": "N/A on Gen5 ISP",
+      "syntax": "(n/a)",
+      "category": "isp",
+      "shell": "",
+      "unsupported": true,
+      "unsupported_message": "get_kv_item is not available on Gen5 ISP shell."
+    },
+    {
+      "name": "set_kv_write",
+      "abstract": "set_kv_item",
+      "description": "N/A on Gen5 ISP (set_kv_item step 1)",
+      "syntax": "(n/a)",
+      "category": "isp",
+      "shell": "",
+      "unsupported": true,
+      "unsupported_message": "set_kv_item is not available on Gen5 ISP shell."
+    },
+    {
+      "name": "kv_commit",
+      "abstract": "set_kv_item",
+      "description": "N/A on Gen5 ISP (set_kv_item step 2)",
+      "syntax": "(n/a)",
+      "category": "isp",
+      "shell": "",
+      "unsupported": true,
+      "unsupported_message": "set_kv_item is not available on Gen5 ISP shell."
+    },
+    {
+      "name": "tail_logs",
+      "abstract": "tail_logs",
+      "description": "Tail system log",
+      "syntax": "cd /tmp && tail -f system-log",
+      "category": "isp",
+      "shell": "cd /tmp && tail -f system-log"
+    },
+    {
+      "name": "get_wifi_status",
+      "abstract": "get_wifi_status",
+      "description": "wl status",
+      "syntax": "wl status",
+      "category": "isp",
+      "shell": "wl status"
+    },
+    {
+      "name": "connect_wifi",
+      "abstract": "connect_wifi_ip",
+      "description": "N/A on Gen5 ISP (use connect_wifi_ip on Linux / itool flows)",
+      "syntax": "(n/a)",
+      "category": "isp",
+      "shell": "",
+      "unsupported": true,
+      "unsupported_message": "connect_wifi_ip is not available on Gen5 ISP shell."
+    },
+    {
+      "name": "wifi_connect",
+      "abstract": "wifi connect",
+      "description": "WiFi join (not exposed on Gen5 ISP)",
+      "syntax": "(n/a)",
+      "category": "isp",
+      "shell": "",
+      "unsupported": true,
+      "unsupported_message": "wifi connect is not available on Gen5 ISP shell."
+    },
+    {
+      "name": "general_get_ip",
+      "abstract": "wifi connect",
+      "description": "DHCP/IP after WiFi (not on Gen5 ISP)",
+      "syntax": "(n/a)",
+      "category": "isp",
+      "shell": "",
+      "unsupported": true,
+      "unsupported_message": "general_get_ip is not available on Gen5 ISP shell."
+    },
+    {
+      "name": "ping",
+      "abstract": "ping",
+      "description": "Ping",
+      "syntax": "ping <host>",
+      "category": "isp",
+      "shell": "ping"
+    },
+    {
+      "name": "read_adc",
+      "abstract": "read_adc",
+      "description": "MCU: ADC read",
+      "syntax": "adc",
+      "category": "mcu",
+      "shell": "adc",
+      "console": "mcu"
+    },
+    {
+      "name": "read_lux",
+      "abstract": "read_lux",
+      "description": "MCU: ALS",
+      "syntax": "als",
+      "category": "mcu",
+      "shell": "als",
+      "console": "mcu"
+    },
+    {
+      "name": "read_temperature",
+      "abstract": "read_temperature",
+      "description": "MCU: temp",
+      "syntax": "get_temp 01",
+      "category": "mcu",
+      "shell": "get_temp 01",
+      "console": "mcu"
+    },
+    {
+      "name": "get_power_metrics",
+      "description": "MCU: pm",
+      "syntax": "pm 05",
+      "category": "mcu",
+      "shell": "pm 05",
+      "console": "mcu"
+    },
+    {
+      "name": "set_voltage",
+      "description": "MCU: volt (hex mV)",
+      "syntax": "volt <hex>",
+      "category": "mcu",
+      "shell": "volt",
+      "console": "mcu"
+    },
+    {
+      "name": "set_battery_percentage",
+      "description": "MCU: percent (hex)",
+      "syntax": "perc <hex>",
+      "category": "mcu",
+      "shell": "perc",
+      "console": "mcu"
+    },
+    {
+      "name": "read_register",
+      "description": "MCU: regr",
+      "syntax": "regr <reg>",
+      "category": "mcu",
+      "shell": "regr",
+      "console": "mcu"
+    },
+    {
+      "name": "write_register",
+      "description": "MCU: regw",
+      "syntax": "regw <reg> <val>",
+      "category": "mcu",
+      "shell": "regw",
+      "console": "mcu"
+    },
+    {
+      "name": "power_cycle_isp",
+      "description": "MCU: reset ISP",
+      "syntax": "reset",
+      "category": "mcu",
+      "shell": "reset",
+      "console": "mcu"
+    },
+    {
+      "name": "isp_off",
+      "description": "MCU: ovoff",
+      "syntax": "ovoff",
+      "category": "mcu",
+      "shell": "ovoff",
+      "console": "mcu"
+    },
+    {
+      "name": "isp_on",
+      "description": "MCU: ovon",
+      "syntax": "ovon",
+      "category": "mcu",
+      "shell": "ovon",
+      "console": "mcu"
+    },
+    {
+      "name": "wifi_chip_off",
+      "description": "MCU: wifioff",
+      "syntax": "wifioff",
+      "category": "mcu",
+      "shell": "wifioff",
+      "console": "mcu"
+    },
+    {
+      "name": "wifi_chip_on",
+      "description": "MCU: wifion",
+      "syntax": "wifion",
+      "category": "mcu",
+      "shell": "wifion",
+      "console": "mcu"
+    },
+    {
+      "name": "fire_pir",
+      "description": "MCU: pir",
+      "syntax": "pir 3c",
+      "category": "mcu",
+      "shell": "pir 3c",
+      "console": "mcu"
+    },
+    {
+      "name": "arm_pir",
+      "description": "MCU: arm PIR",
+      "syntax": "sp 4",
+      "category": "mcu",
+      "shell": "sp 4",
+      "console": "mcu"
+    },
+    {
+      "name": "floodlight_on",
+      "abstract": "floodlight_on",
+      "description": "MCU: flon",
+      "syntax": "flon",
+      "category": "mcu",
+      "shell": "flon",
+      "console": "mcu"
+    },
+    {
+      "name": "floodlight_off",
+      "abstract": "floodlight_off",
+      "description": "MCU: floff",
+      "syntax": "floff",
+      "category": "mcu",
+      "shell": "floff",
+      "console": "mcu"
+    },
+    {
+      "name": "override_lux",
+      "description": "MCU: mlux",
+      "syntax": "mlux <hex>",
+      "category": "mcu",
+      "shell": "mlux",
+      "console": "mcu"
+    },
+    {
+      "name": "read_gpio",
+      "description": "MCU: gpio_i",
+      "syntax": "gpio_i <port>",
+      "category": "mcu",
+      "shell": "gpio_i",
+      "console": "mcu"
+    },
+    {
+      "name": "write_gpio",
+      "description": "MCU: gpio_o",
+      "syntax": "gpio_o <port> <level>",
+      "category": "mcu",
+      "shell": "gpio_o",
+      "console": "mcu"
+    }
   ]
 }

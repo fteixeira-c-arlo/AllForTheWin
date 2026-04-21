@@ -34,6 +34,26 @@ appear only under Advanced (help / GUI), while abstract-linked
 entries are still in the full catalog for execution but are omitted from the
 Advanced list (they run as part of the abstract command’s sequence).
 
+Abstract linking policy (hybrid model)
+--------------------------------------
+
+  • Set "abstract" only when the catalog entry is the real implementation of
+    that global abstract on this product line (same user intent and safe
+    failure behaviour). If the CLI looks similar but means something different,
+    do not set "abstract".
+
+  • Prefer leaving vendor-specific or ambiguous commands without "abstract"
+    so they stay Advanced-only (profile vocabulary).
+
+  • When a global abstract exists but this line cannot run it, add a catalog
+    row for the missing step "name" with "unsupported": true and a clear
+    "unsupported_message" instead of guessing a shell mapping.
+
+  • The "abstract" string must match the "name" field of an entry in
+    abstract_command_definitions.json exactly (case and spacing). Do not set
+    "abstract" to a string that is not a defined global abstract (orphan
+    values confuse tooling and imply a contract that does not exist).
+
 
 2. Register the profile in core/command_profiles.json
 ---------------------------------------------------------
@@ -42,13 +62,28 @@ Add a key for your profile id (referenced from camera_models):
 
   "your_profile_id": {
     "label": "Short label",
-    "commands_file": "your_commands.json"
+    "commands_file": "your_commands.json",
+    "abstract_commands": [ "version", "reboot", "..." ]
   }
 
 The built-in profile "none" uses "commands_file": null — no device catalog;
 only shared system commands apply.
 
 Optional "notes" on an entry is fine (see existing entries).
+
+Optional key: "abstract_commands"
+---------------------------------
+
+  • Omit the key or set it to null → all entries from abstract_command_definitions.json
+    are offered for that profile (subject to each step existing in the device
+    catalog at runtime).
+
+  • Set to a JSON array of global abstract "name" strings → only those commands
+    appear in help / the GUI command tab and only those names match in the CLI
+    for that profile. Use this so users never see E3-centric abstracts on lines
+    that cannot implement them.
+
+  • Set to [] only if you intentionally want no abstract layer for that profile.
 
 
 3. Point models at the profile in core/camera_models.py
@@ -88,3 +123,8 @@ To support the new abstract on a device line:
 
 No Python is required for the abstract definition itself; execution is handled
 by the existing abstract dispatcher.
+
+Prefer adding a new global abstract only when every product line you ship in
+this tool either implements the full sequence (or marks steps unsupported) or
+you list that abstract only on capable profiles via "abstract_commands" in
+command_profiles.json. Otherwise add a raw Advanced command for one line only.

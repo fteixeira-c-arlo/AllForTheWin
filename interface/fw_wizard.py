@@ -82,6 +82,7 @@ from interface.app_styles import (
     qcombobox_dark_stylesheet,
     set_arlo_pushbutton_variant,
 )
+from interface.fw_wizard_select_version import SelectVersion
 
 _FW_GATE_LOG = logging.getLogger("arlohub.fw_local_detect")
 
@@ -887,29 +888,9 @@ class FwWizard(QDialog):
         self._select_stack = QStackedWidget()
         w0 = QWidget()
         l0 = QVBoxLayout(w0)
-        h = QLabel("Select firmware build")
-        h.setStyleSheet(_fw_qlabel_ss("font-size: 15px; font-weight: 500;"))
-        l0.addWidget(h)
-        hint = QLabel(
-            "Choose one row. Version is the Artifactory folder path; Variant is the archive file name."
-        )
-        hint.setStyleSheet(_fw_qlabel_ss(f"color: {_MUTED}; font-size: 12px;"))
-        hint.setWordWrap(True)
-        l0.addWidget(hint)
-        self._table = QTableWidget(0, 5)
-        self._table.setHorizontalHeaderLabels(
-            ["Version (path)", "Archive", "Size", "Date", "Variant"]
-        )
-        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self._table.setSortingEnabled(True)
-        self._table.itemSelectionChanged.connect(self._on_table_selection)
-        l0.addWidget(self._table)
+        self._select_version = SelectVersion()
+        self._select_version.selection_changed.connect(self._on_select_version_selection_changed)
+        l0.addWidget(self._select_version)
         self._select_stack.addWidget(w0)
 
         w1 = QWidget()
@@ -1155,8 +1136,8 @@ class FwWizard(QDialog):
             pill = QLabel(tag)
             pill.setStyleSheet(
                 _fw_qlabel_ss(
-                    f"background-color: rgba(0, 137, 123, 0.16); color: #b2dfdb; "
-                    f"border: 1px solid rgba(0, 137, 123, 0.28); border-radius: 10px; "
+                    "background-color: rgba(0, 137, 123, 0.16); color: #b2dfdb; "
+                    "border: 1px solid rgba(0, 137, 123, 0.28); border-radius: 10px; "
                     "padding: 4px 10px; font-size: 11px; font-weight: 500;"
                 )
             )
@@ -1570,20 +1551,6 @@ class FwWizard(QDialog):
             return
         if self._current_step == 4 and self._download_thread and self._download_thread.isRunning():
             return
-        if self._current_step == 3:
-            self._search_results = []
-            self._stress_results_a = []
-            self._stress_results_b = []
-            self._fill_results_table()
-            self._fill_stress_tables()
-            self._selected_filename = None
-            self._selected_folder = None
-            self._stress_sel_a_folder = None
-            self._stress_sel_a_file = None
-            self._stress_sel_b_folder = None
-            self._stress_sel_b_file = None
-            self._search_status.setText("")
-            self._search_status.setStyleSheet(_fw_qlabel_ss(f"color: {_MUTED};"))
         self._current_step -= 1
         self._stack.setCurrentIndex(self._current_step)
         self._update_sidebar()
@@ -2229,18 +2196,7 @@ class FwWizard(QDialog):
         )
 
     def _fill_results_table(self) -> None:
-        self._table.setSortingEnabled(False)
-        self._table.setRowCount(0)
-        for folder, fn, sz, md in self._search_results:
-            r = self._table.rowCount()
-            self._table.insertRow(r)
-            self._table.setItem(r, 0, QTableWidgetItem(folder))
-            self._table.setItem(r, 1, QTableWidgetItem(fn))
-            self._table.setItem(r, 2, QTableWidgetItem(_format_fw_bytes(sz)))
-            self._table.setItem(r, 3, QTableWidgetItem(_format_artifactory_ts(md)))
-            ext = fn.lower().split(".")[-1] if "." in fn else fn
-            self._table.setItem(r, 4, QTableWidgetItem(ext))
-        self._table.setSortingEnabled(True)
+        self._select_version.set_search_rows(self._search_results)
         self._selected_filename = None
         self._selected_folder = None
 
@@ -2266,20 +2222,14 @@ class FwWizard(QDialog):
         self._stress_sel_b_folder = None
         self._stress_sel_b_file = None
 
-    def _on_table_selection(self) -> None:
-        rows = self._table.selectionModel().selectedRows()
-        if not rows:
+    def _on_select_version_selection_changed(self, row: object) -> None:
+        if not isinstance(row, dict):
             self._selected_filename = None
             self._selected_folder = None
             self._sync_nav()
             return
-        r = rows[0].row()
-        folder_item = self._table.item(r, 0)
-        file_item = self._table.item(r, 1)
-        if not folder_item or not file_item:
-            return
-        self._selected_folder = folder_item.text()
-        self._selected_filename = file_item.text()
+        self._selected_folder = (row.get("path") or "").strip() or None
+        self._selected_filename = (row.get("archive") or "").strip() or None
         self._version_path = self._selected_folder or ""
         self._sync_nav()
 
@@ -2827,3 +2777,5 @@ class FwWizard(QDialog):
         self._server_footer_text.setText(line)
         self._server_footer_text.setToolTip(tooltip)
         self._server_footer_dot.setToolTip(tooltip)
+        if getattr(self, "_select_version", None) is not None:
+            self._select_version.sync_server_footer(hint, line, tooltip)

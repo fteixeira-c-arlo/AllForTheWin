@@ -11,36 +11,6 @@ from utils.logger import get_logger
 
 logger = get_logger()
 
-# #region agent log
-_AGENT_DEBUG_LOG_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "debug-2d906c.log"
-)
-
-
-def _agent_debug_ndjson(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
-    import json
-
-    try:
-        line = json.dumps(
-            {
-                "sessionId": "2d906c",
-                "timestamp": int(time.time() * 1000),
-                "hypothesisId": hypothesis_id,
-                "location": location,
-                "message": message,
-                "data": data,
-            },
-            ensure_ascii=False,
-            default=str,
-        )
-        with open(_AGENT_DEBUG_LOG_PATH, "a", encoding="utf-8") as _df:
-            _df.write(line + "\n")
-    except Exception:
-        pass
-
-
-# #endregion
-
 # Optional: pyserial for serial port access
 try:
     import serial
@@ -243,10 +213,16 @@ def _uart_buffer_shows_login_or_password_prompt(text: str) -> bool:
 _BASE64_LINE = re.compile(r"^[A-Za-z0-9+/=]+$")
 
 # Shell prompt at end of output (device ready for next command)
-# Require start-of-buffer or newline before VMC so "fooVMC1234>" mid-line does not complete early.
-_UART_PROMPT_AT_END = re.compile(r"(?:^|[\r\n])VMC\d+\s*>\s*$", re.IGNORECASE)
+# Require start-of-buffer or newline before model token so "fooVMC1234>" mid-line does not complete early.
+_UART_PROMPT_AT_END = re.compile(
+    r"(?:^|[\r\n])(?:VMC\d{4}[A-Z]?|AVD\d{4})\s*>\s*$",
+    re.IGNORECASE,
+)
 # Prompt at start of line (device may prefix base64 output with e.g. VMC3073> )
-_UART_PROMPT_AT_START = re.compile(r"^\s*VMC\d+\s*>\s*", re.IGNORECASE)
+_UART_PROMPT_AT_START = re.compile(
+    r"^\s*(?:VMC\d{4}[A-Z]?|AVD\d{4})\s*>\s*",
+    re.IGNORECASE,
+)
 
 
 def _uart_command_response_complete(decoded: str) -> bool:
@@ -313,7 +289,7 @@ def _clean_uart_command_output(raw: str, sent_cmd: str) -> str:
         if not last:
             lines.pop()
             continue
-        if re.match(r"^VMC\d+\s*>?\s*$", last, re.IGNORECASE):
+        if re.match(r"^(?:VMC\d{4}[A-Z]?|AVD\d{4})\s*>\s*$", last, re.IGNORECASE):
             lines.pop()
             continue
         if re.match(r"^#\s*$|^>\s*$", last):
@@ -357,6 +333,8 @@ class UARTHandler:
         *,
         console_style: str | None = None,
         device_display_name: str | None = None,
+        codename: str | None = None,
+        log_callback: Callable[[str], None] | None = None,
     ) -> tuple[bool, str, dict[str, Any] | None]:
         """
         Open serial port at given baud rate. Returns (success, message, settings_for_config).
@@ -365,13 +343,28 @@ class UARTHandler:
           - linux_shell (default): BusyBox/Linux login (root/arlo) then echo verify.
           - amebapro2: no login; verify with `build_info` and AGW_MODEL_ID / model token.
           - mcu: Gen5 MCU CLI; no login; open port and drain (no shell echo verify).
+
+        ``codename`` and ``log_callback`` are accepted for compatibility with the GUI worker
+        (Connect dialog); optional ``log_callback`` receives status lines with trailing newlines.
         """
+        _ = codename  # reserved for future console routing; Connect passes it today
+
+        def _log(msg: str) -> None:
+            if not callable(log_callback):
+                return
+            try:
+                s = msg if msg.endswith("\n") else msg + "\n"
+                log_callback(s)
+            except Exception:
+                pass
+
         if not _SERIAL_AVAILABLE:
             return False, "pyserial is required for UART. Install with: pip install pyserial", None
         style = (console_style or "linux_shell").strip().lower()
         if style not in ("linux_shell", "amebapro2", "mcu"):
             style = "linux_shell"
         dev_label = (device_display_name or "device").strip()
+        _log(f"Opened {port} @ {baud_rate} baud ({style} console) — {dev_label}.")
 
         def _try_once(baud: int) -> tuple[bool, str | None]:
             try:
@@ -391,30 +384,25 @@ class UARTHandler:
             self._baud = baud
             self._connected = True
             self._console_style = style
-            # #region agent log
-            _agent_debug_ndjson(
-                "H4",
-                "uart_handler.py:connect",
-                "serial opened",
-                {
-                    "port": port,
-                    "baud": baud,
-                    "style": style,
-                    "dtr": bool(getattr(ser, "dtr", False)),
-                    "rts": bool(getattr(ser, "rts", False)),
-                },
-            )
-            # #endregion
             if style == "linux_shell":
+                _log("Waiting for shell login (use root / arlo if prompted)…")
                 self._uart_do_login()
+                _log("Login sequence finished, verifying shell…")
                 if not self._uart_verify_connection():
+                    _log("Shell verify failed (no echo token). Check baud/cable.\n")
                     return False, None
+                _log("Shell verified.")
             elif style == "amebapro2":
+                _log("Verifying ISP link (build_info)…")
                 if not self._uart_verify_amebapro2():
+                    _log("ISP verify failed (build_info).\n")
                     return False, None
+                _log("ISP link OK.")
             else:
                 if not self._uart_verify_mcu():
+                    _log("MCU UART verify failed.\n")
                     return False, None
+                _log("MCU UART ready.")
             return True, None
 
         try:
@@ -433,14 +421,6 @@ class UARTHandler:
                     (err or "").strip()
                     or "Connection could not be verified. Check baud rate and cable, then try again."
                 )
-                # #region agent log
-                _agent_debug_ndjson(
-                    "H3",
-                    "uart_handler.py:connect",
-                    "uart connect failed",
-                    {"detail": (detail or "")[:400], "err": (err or "")[:200]},
-                )
-                # #endregion
                 return False, detail, None
 
             msg = f"Connected to {port} at {self._baud} baud"
@@ -479,15 +459,7 @@ class UARTHandler:
         """Log in (root / arlo) when connecting so the session is authenticated for all later commands."""
         if not self._serial:
             return
-        saw_login = False
-        sent_username = False
-        saw_password = False
-        sent_password = False
-        pre_drain = ""
-        err_note = ""
-        in_waiting_before_reset = 0
         try:
-            in_waiting_before_reset = int(self._serial.in_waiting or 0)
             self._serial.reset_input_buffer()
             # Wait for "login:" prompt and send username (allow time for device to boot)
             login_chunks: list[bytes] = []
@@ -499,10 +471,8 @@ class UARTHandler:
                         login_chunks.append(data)
                         text = b"".join(login_chunks).decode(errors="replace")
                         if re.search(r"login\s*:?\s*", text, re.IGNORECASE):
-                            saw_login = True
                             self._serial.write((UART_CONSOLE_LOGIN + "\r\n").encode())
                             self._serial.flush()
-                            sent_username = True
                             break
                 time.sleep(0.03)
             # Wait for "Password:" and send password
@@ -515,40 +485,17 @@ class UARTHandler:
                         chunks.append(data)
                         text = b"".join(chunks).decode(errors="replace")
                         if _UART_PASSWORD_PROMPT.search(text) or re.search(r"password\s*:\s*", text, re.IGNORECASE):
-                            saw_password = True
                             self._serial.write((UART_CONSOLE_PASSWORD + "\r\n").encode())
                             self._serial.flush()
-                            sent_password = True
                             break
                 time.sleep(0.03)
-            pre_drain = b"".join(chunks).decode(errors="replace")
             # Drain remainder so the first command sees a clean shell prompt
             time.sleep(0.12)
             while self._serial.in_waiting:
                 self._serial.read(self._serial.in_waiting)
                 time.sleep(0.03)
-        except Exception as ex:
-            err_note = type(ex).__name__
-        finally:
-            # #region agent log
-            tail = (pre_drain[-280:] if pre_drain else "").replace("\r", "\\r").replace("\n", "\\n")
-            _agent_debug_ndjson(
-                "H1-H2-H5",
-                "uart_handler.py:_uart_do_login",
-                "login sequence complete",
-                {
-                    "in_waiting_before_reset": in_waiting_before_reset,
-                    "saw_login": saw_login,
-                    "sent_username": sent_username,
-                    "saw_password": saw_password,
-                    "sent_password": sent_password,
-                    "buffer_len": len(pre_drain),
-                    "has_username_prompt": bool(re.search(r"username\s*:", pre_drain, re.IGNORECASE)),
-                    "tail_preview": tail[:220],
-                    "error": err_note,
-                },
-            )
-            # #endregion
+        except Exception:
+            logger.exception("UART login sequence")
 
     def _uart_break_echo_used_as_login_name(self, verify_token: str) -> str:
         """
@@ -633,23 +580,6 @@ class UARTHandler:
                     raw += self._serial.read(self._serial.in_waiting).decode(errors="replace")
                 stuck = _uart_buffer_shows_login_or_password_prompt(raw)
                 ok = verify_token in raw and not stuck
-                # #region agent log
-                rt = raw[-320:] if raw else ""
-                rt_safe = rt.replace("\r", "\\r").replace("\n", "\\n")
-                _agent_debug_ndjson(
-                    "H3",
-                    "uart_handler.py:_uart_verify_connection",
-                    f"verify attempt {attempt}",
-                    {
-                        "attempt": attempt,
-                        "stuck": stuck,
-                        "token_present": verify_token in raw,
-                        "raw_len": len(raw),
-                        "tail_preview": rt_safe[:220],
-                        "garbage_ratio": round(_garbage_ratio(raw), 4),
-                    },
-                )
-                # #endregion
                 if ok:
                     return True
                 if stuck:
@@ -812,6 +742,11 @@ class UARTHandler:
                     or "update_url" in low
                     or low.strip() == "arlocmd reboot"
                     or low.strip().startswith("arlocmd reboot ")
+                    or "perform reboot" in low
+                    or (
+                        low.strip().startswith("migrate ")
+                        and "arlocmd" not in low
+                    )
                 )
             )
             self._serial.reset_input_buffer()

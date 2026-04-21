@@ -518,7 +518,7 @@ def firmware_rename_access_denied_user_hint() -> str:
     if check_server_status()[0]:
         return (
             "This window still has the firmware server running. Stop it first (e.g. command "
-            f"server stop), then rename."
+            "server stop), then rename."
         )
     st = read_fw_server_state()
     if st and is_firmware_port_accepting_connections(int(st["port"])):

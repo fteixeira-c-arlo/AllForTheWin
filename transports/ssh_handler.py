@@ -11,6 +11,8 @@ from utils.subprocess_helpers import win_subprocess_kwargs
 
 logger = get_logger()
 
+_DEFAULT_SSH_TAIL_INNER = "tail -f /tmp/logs/system-log_V1_0"
+
 
 class SSHHandler:
     """Handle SSH connect/disconnect and optional command execution."""
@@ -22,6 +24,7 @@ class SSHHandler:
         self._port: int = 22
         self._username: str = "root"
         self._connected = False
+        self._tail_inner: str | None = None
 
     def connect(
         self,
@@ -84,6 +87,12 @@ class SSHHandler:
             self._client = None
         self._device_id = None
         self._connected = False
+        self._tail_inner = None
+
+    def set_tail_logs_shell(self, shell_one_liner: str | None) -> None:
+        """Device-side command for log tail (from catalog); None restores default."""
+        s = (shell_one_liner or "").strip()
+        self._tail_inner = s or None
 
     def execute(
         self,
@@ -159,9 +168,10 @@ class SSHHandler:
         """Return shell command to run tail -f system log in another terminal, or None if not connected."""
         if not self._connected or not self._host:
             return None
+        inner = self._tail_inner or _DEFAULT_SSH_TAIL_INNER
         return (
             f"ssh -o StrictHostKeyChecking=no -p {self._port} "
-            f"{self._username}@{self._host} \"sh -c 'tail -f /tmp/logs/system-log_V1_0'\""
+            f"{self._username}@{self._host} \"sh -c '{inner}'\""
         )
 
     def start_tail_logs_to_file(

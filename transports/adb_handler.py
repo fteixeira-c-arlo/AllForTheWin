@@ -24,6 +24,8 @@ _MSG_NOT_FOUND = (
     "and the USB cable is connected."
 )
 
+_DEFAULT_ADB_TAIL_INNER = "tail -f /tmp/logs/system-log_V1_0"
+
 
 def parse_adb_devices_lines(stdout: str) -> list[tuple[str, str]]:
     """
@@ -59,6 +61,7 @@ class ADBHandler:
     def __init__(self) -> None:
         self._device_serial: str | None = None  # from adb devices
         self._connected = False
+        self._tail_inner: str | None = None
 
     @staticmethod
     def list_attached_usb_serials() -> list[str]:
@@ -245,6 +248,7 @@ class ADBHandler:
         """Clear connection state. No adb disconnect for USB."""
         self._device_serial = None
         self._connected = False
+        self._tail_inner = None
 
     def execute(
         self,
@@ -347,13 +351,17 @@ class ADBHandler:
     def device_identifier(self) -> str | None:
         return self._device_serial or None
 
+    def set_tail_logs_shell(self, shell_one_liner: str | None) -> None:
+        """Device-side command for log tail (from catalog); None restores default."""
+        s = (shell_one_liner or "").strip()
+        self._tail_inner = s or None
+
     def get_tail_logs_command(self) -> str | None:
         """Return shell command to run tail -f system log in another terminal, or None if not connected."""
         if not self._connected or not self._device_serial:
             return None
-        return (
-            f"{self._adb_cmd()} -s {self._device_serial} shell sh -c 'tail -f /tmp/logs/system-log_V1_0'"
-        )
+        inner = self._tail_inner or _DEFAULT_ADB_TAIL_INNER
+        return f"{self._adb_cmd()} -s {self._device_serial} shell sh -c '{inner}'"
 
     def start_tail_logs_to_file(
         self, log_path: str, line_callback: Callable[[str], None] | None = None

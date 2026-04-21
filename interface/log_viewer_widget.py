@@ -103,10 +103,13 @@ _ARLO_BODY_NUM = re.compile(r"(?<=[\s,])(\d+(?:\.\d+)?)s?\b")
 _ARLO_BODY_DASH = re.compile(r"(^|\s)(--)(\s|$)")
 _ARLO_BODY_SSRC_HEX = re.compile(r"(?i)ssrc\s+([a-f0-9]{6,8})\b")
 _ARLO_BODY_BARE_HEX_AFTER_DASH = re.compile(r"\b[a-f0-9]{6,8}\b")
+# Standalone word or `mqtt_` / `cloud_` prefix inside filenames (underscore is not a \b boundary).
+_RE_SUBSYS_MQTT = re.compile(r"\bmqtt\b|\bmqtt_(?=\w)", re.I)
+_RE_SUBSYS_CLOUD = re.compile(r"\bcloud\b|\bcloud_(?=\w)", re.I)
 
 _C_EMB_DATE = "#6b8cad"
 _C_EMB_TIME = "#7eb3e8"
-_C_EMB_TID = "#4a6080"
+_C_EMB_TID = "#7a9ab8"
 _C_EMB_PROC = "#a8b8d0"
 _C_EMB_MODPATH = "#60a888"
 _C_EMB_FUNC = "#80c8e8"
@@ -115,6 +118,8 @@ _C_EMB_LABEL = "#a8b8d0"
 _C_EMB_HEX = "#e8b060"
 _C_EMB_NUM = "#90d8a8"
 _C_EMB_MSG = "#c0c8d8"
+_C_EMB_MQTT = "#c4a7f5"
+_C_EMB_CLOUD = "#7ec8f0"
 
 
 def _emb_level_color(level_tok: str) -> str:
@@ -133,7 +138,10 @@ def _emb_level_color(level_tok: str) -> str:
 def _tokenize_arlo_embedded_log_line(s: str) -> list[tuple[str, str | None]]:
     """
     Per-segment colors for embedded log lines (variants A and B). Message-body rules
-    apply only after the module path (if any); module path is never key/value highlighted.
+    (hex, numbers, labels, dashes) apply only in the message span on default-colored
+    positions. The module path is otherwise left as modpath/func paint only, except
+    for a narrow set of subsystem tokens (mqtt, cloud) which may override within path
+    or message for readability.
     """
     if not s:
         return []
@@ -147,13 +155,10 @@ def _tokenize_arlo_embedded_log_line(s: str) -> list[tuple[str, str | None]]:
     body = s[body0:]
 
     mod = ""
-    msg_body = body
     mm = _ARLO_MODULE_TO_BODY.match(body)
     msg_off = body0
-    if mm:
-        mod = mm.group(1)
-        msg_body = mm.group(2)
-        msg_off = body0 + mm.start(2)
+    mod_lo: int | None = None
+    mod_hi: int | None = None
 
     col = [_C_EMB_MSG] * n
 
@@ -168,6 +173,8 @@ def _tokenize_arlo_embedded_log_line(s: str) -> list[tuple[str, str | None]]:
     fill(m.start(5), m.end(5), _C_EMB_PROC)
 
     if mm:
+        mod = mm.group(1)
+        msg_off = body0 + mm.start(2)
         mod_lo = body0 + mm.start(1)
         mod_hi = body0 + mm.end(1)
         mf = re.search(r"([\w.]+)\(([^)]*)\)$", mod)
@@ -229,6 +236,23 @@ def _tokenize_arlo_embedded_log_line(s: str) -> list[tuple[str, str | None]]:
         for i in range(a, b):
             if msg_lo <= i < msg_hi:
                 col[i] = _C_EMB_DASH
+
+    def paint_subsystem_kw(a: int, b: int, color: str) -> None:
+        """Highlight mqtt/cloud inside module path or message (after body rules)."""
+        for i in range(max(0, a), min(n, b)):
+            if mod_lo is not None and mod_lo <= i < mod_hi:
+                col[i] = color
+            elif msg_lo <= i < msg_hi:
+                col[i] = color
+
+    for mk in _RE_SUBSYS_MQTT.finditer(s):
+        if mk.start() < body0:
+            continue
+        paint_subsystem_kw(mk.start(), mk.end(), _C_EMB_MQTT)
+    for ck in _RE_SUBSYS_CLOUD.finditer(s):
+        if ck.start() < body0:
+            continue
+        paint_subsystem_kw(ck.start(), ck.end(), _C_EMB_CLOUD)
 
     out: list[tuple[str, str | None]] = []
     i = 0

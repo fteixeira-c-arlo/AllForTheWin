@@ -69,3 +69,29 @@ def load_device_commands(model_name: str) -> list[dict[str, Any]]:
     (E3 Wired still uses e3_wired_commands.json when profile is e3_wired.)
     """
     return load_device_commands_for_model(model_name)
+
+
+def get_command_profile_manifest_entry(profile_id: str) -> dict[str, Any]:
+    """Return the manifest entry for a profile id, or {} if missing."""
+    pid = (profile_id or "none").strip() or "none"
+    manifest = _load_profiles_manifest()
+    entry = manifest.get(pid)
+    return dict(entry) if isinstance(entry, dict) else {}
+
+
+def get_profile_abstract_command_allowlist(profile_id: str) -> list[str] | None:
+    """
+    Optional per-profile filter for user-visible / dispatchable abstract commands.
+
+    Returns:
+      None — no filter; all entries from abstract_command_definitions.json apply.
+      []   — empty allowlist (no abstract commands for this profile).
+      list of names — only those abstracts (matched case-insensitively to JSON ``name``).
+    """
+    entry = get_command_profile_manifest_entry(profile_id)
+    raw = entry.get("abstract_commands")
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        return None
+    return [str(x) for x in raw]

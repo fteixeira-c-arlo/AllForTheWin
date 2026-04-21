@@ -58,14 +58,18 @@ from rich.console import Console
 
 from core.app_metadata import APP_NAME, APP_VERSION
 from core.build_info import UPDATE_URL_SHELL, parse_env_from_update_url
-from core.device_connection import detect_after_connect, ensure_adb_allowed_for_selection
+from core.device_connection import (
+    detect_after_connect,
+    ensure_adb_allowed_for_selection,
+    selection_is_lory,
+)
 from core.device_credentials import get_adb_password_for_model, resolve_production_adb_password
 from core.device_errors import UnknownDeviceError, UnsupportedConnectionError
 from core.device_registry import lookup_registry_by_model_id
 from core.user_paths import get_arlo_logs_dir
 from core.command_definitions import load_device_commands
 from core.command_parser import (
-    ABSTRACT_DEFINITIONS,
+    abstract_definitions_for_profile,
     get_abstract_command_help_lines,
     get_system_commands_for_profile,
     get_tools_for_profile,
@@ -77,15 +81,14 @@ from core.camera_models import (
     connection_methods_upper,
     default_uart_baud_for_model_group,
     format_connect_dialog_device_label,
-    format_supported_connections,
     get_command_profile_for_model_name,
     get_model_by_name,
     get_models,
     model_supports_adb,
 )
-from transports.adb_handler import ADBHandler
+from transports.adb_handler import ADBHandler, adb_serial_transport_alive
 from transports.ssh_handler import SSHHandler
-from transports.uart_handler import UARTHandler, list_uart_ports
+from transports.uart_handler import UARTHandler, list_uart_ports, uart_port_transport_alive_for_watchdog
 from transports.connection_config import ConnectionConfig
 from interface.gui_bridge import GuiBridge, _SELECT_CANCELLED
 from interface.log_viewer_widget import LogViewerWidget
@@ -1397,7 +1400,20 @@ class SessionWorker(QObject):
         self._device_commands = load_device_commands(model_for_cmds)
         self._emit_state()
         self.commands_updated.emit(list(self._device_commands), self._command_profile or "none")
+        self._apply_tail_logs_shell_from_catalog()
         self._heartbeat_timer.start()
+
+    def _apply_tail_logs_shell_from_catalog(self) -> None:
+        """Set UART/ADB/SSH log-tail command from device catalog (e.g. Lory vs Kea)."""
+        if not self._handle:
+            return
+        sel = self._selected_model if isinstance(self._selected_model, dict) else {}
+        from core.abstract_dispatcher import resolve_tail_logs_shell
+
+        sh = resolve_tail_logs_shell(self._device_commands, sel)
+        fn = getattr(self._handle, "set_tail_logs_shell", None)
+        if callable(fn):
+            fn(sh)
 
     @Slot()
     def _try_run_detect_and_load(self) -> None:
@@ -1431,12 +1447,21 @@ class SessionWorker(QObject):
         handler = UARTHandler()
         m = self._selected_model
         plat = (m.get("platform") or "").strip().lower()
-        console_style = "amebapro2" if plat == "amebapro2" else "linux_shell"
+        codename = (m.get("codename") or "").strip().lower()
+        # Parrot: ISP expects root/arlo login (same as MobaXterm) before shell commands; not raw Ameba ISP.
+        if codename == "parrot":
+            console_style = "linux_shell"
+        elif plat == "amebapro2":
+            console_style = "amebapro2"
+        else:
+            console_style = "linux_shell"
         ok, msg, settings = handler.connect(
             port=port,
             baud_rate=baud,
             console_style=console_style,
             device_display_name=str(m.get("display_name") or m.get("name") or "device"),
+            codename=codename or None,
+            log_callback=lambda s: self.append_log.emit(s),
         )
         if ok and settings:
             cfg = _make_config(
@@ -1599,8 +1624,26 @@ class SessionWorker(QObject):
             else:
                 conn = "uart"
             try:
+                sel = self._selected_model if isinstance(self._selected_model, dict) else {}
+                is_parrot = (sel.get("codename") or "").strip().lower() == "parrot"
+                if is_parrot:
+                    self.append_log.emit(
+                        "[Parrot] Probing device (build_info, update_url, KV) — each step can take "
+                        "several seconds while the UART is busy. Buffered camera text is appended on the "
+                        "heartbeat when the link is idle (no command running).\n"
+                    )
+
+                def _detect_execute(cmd: str, args: list[str] | None = None) -> tuple[bool, str]:
+                    a = list(args or [])
+                    if is_parrot:
+                        one = cmd if not a else f"{cmd} {' '.join(a)}"
+                        if len(one) > 120:
+                            one = one[:117] + "…"
+                        self.append_log.emit(f"[detect] {one}\n")
+                    return self._handle.execute(cmd, a)
+
                 self._detected, _dc = detect_after_connect(
-                    self._handle.execute,
+                    _detect_execute if is_parrot else self._handle.execute,
                     conn,
                     selected_model=self._selected_model,
                 )
@@ -1616,19 +1659,25 @@ class SessionWorker(QObject):
                 self._do_disconnect(msg)
                 self.connect_failed.emit(msg)
                 return
-            sel = self._selected_model if isinstance(self._selected_model, dict) else {}
             picked = str(sel.get("name") or "").strip().upper()
             det_model = str(self._detected.get("model") or "").strip()
             if not det_model and picked:
                 self._detected = {**self._detected, "model": picked}
-                self.append_log.emit(
-                    "Using the model you selected in Connect (UART did not return build_info this session).\n"
-                )
+                if selection_is_lory(sel):
+                    self.append_log.emit(
+                        "Using the model you selected in Connect (UART did not return a parseable device id; "
+                        "Lory uses `info`, not build_info).\n"
+                    )
+                else:
+                    self.append_log.emit(
+                        "Using the model you selected in Connect (UART did not return build_info this session).\n"
+                    )
             model_for_commands = self._detected.get("model") or "Device"
             self._command_profile = get_command_profile_for_model_name(self._detected.get("model"))
             self._device_commands = load_device_commands(model_for_commands)
             self._emit_state()
             self.commands_updated.emit(list(self._device_commands), self._command_profile or "none")
+            self._apply_tail_logs_shell_from_catalog()
             ob = self._detected.get("is_onboarded")
             ob_note = ""
             if ob is True:
@@ -1687,6 +1736,19 @@ class SessionWorker(QObject):
     def _on_heartbeat_tick(self) -> None:
         if self._io_busy or self._detect_busy or not self._cfg or not self._handle:
             return
+        sel_hb = self._selected_model if isinstance(self._selected_model, dict) else {}
+        if (
+            (sel_hb.get("codename") or "").strip().lower() == "parrot"
+            and (self._cfg.type or "").strip().upper() == "UART"
+        ):
+            drain_fn = getattr(self._handle, "drain_uart_spill", None)
+            if callable(drain_fn):
+                spilled = drain_fn()
+                s = spilled or ""
+                if s.strip():
+                    if not s.endswith("\n"):
+                        s = s + "\n"
+                    self.append_log.emit(s)
         alive_fn = getattr(self._handle, "transport_heartbeat", None)
         if callable(alive_fn):
             alive = alive_fn()
@@ -1844,6 +1906,8 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(_load_icon(_icon_path))
         self.resize(1100, 720)
         self._device_connected = False
+        # Same UART session can emit state_changed twice (pre-detect + post-detect); avoid double UI hooks.
+        self._connect_session_device_id: str | None = None
         self._status_phase: str = "disconnected"
         self._status_detail_model: str = "—"
         self._status_detail_fw: str = "—"
@@ -2136,7 +2200,7 @@ class MainWindow(QMainWindow):
         self._welcome_tab_root, self._welcome_log = self._build_welcome_tab_widget()
         self._tab_logs.addTab(self._welcome_tab_root, "Welcome")
         self._e3_reference_widget: QWidget | None = None
-        self._active_session_log: QTextEdit | None = None
+        self._active_session_log: QTextEdit | LogViewerWidget | None = None
         self._update_tab_close_buttons()
 
         self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -2770,10 +2834,11 @@ class MainWindow(QMainWindow):
             self._btn_disconnect.setVisible(False)
             self._btn_disconnect.setEnabled(False)
 
-    def _begin_connection_log_tab(self) -> None:
+    def _begin_connection_log_tab(self, *, structured_stream: bool = False) -> None:
         """Open a new tab for this connection attempt; worker log lines go here until disconnect or failure."""
-        log = self._new_log_editor()
-        idx = self._tab_logs.addTab(log, "Connecting…")
+        log = self._new_log_editor(tail=structured_stream)
+        tab_lbl = "Connecting (UART log)…" if structured_stream else "Connecting…"
+        idx = self._tab_logs.addTab(log, tab_lbl)
         self._tab_logs.setCurrentIndex(idx)
         self._active_session_log = log
         self._status_phase = "connecting"
@@ -2801,7 +2866,7 @@ class MainWindow(QMainWindow):
         if i >= 0:
             self._tab_logs.setTabText(i, "Connection failed")
 
-    def _log_target(self) -> QTextEdit:
+    def _log_target(self) -> QTextEdit | LogViewerWidget:
         """Live output: session tab while connecting/connected, otherwise Welcome."""
         if self._active_session_log is not None:
             return self._active_session_log
@@ -3152,9 +3217,12 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_append_log(self, text: str) -> None:
         w = self._log_target()
-        w.moveCursor(QTextCursor.MoveOperation.End)
-        w.insertPlainText(text)
-        w.moveCursor(QTextCursor.MoveOperation.End)
+        if isinstance(w, LogViewerWidget):
+            w.append_plain(text)
+        else:
+            w.moveCursor(QTextCursor.MoveOperation.End)
+            w.insertPlainText(text)
+            w.moveCursor(QTextCursor.MoveOperation.End)
         if w is self._welcome_log and self._welcome_log.toPlainText():
             self._welcome_log.setMinimumHeight(120)
             self._welcome_log.show()
@@ -3173,6 +3241,7 @@ class MainWindow(QMainWindow):
         self._watchdog_uart_port = ""
         self._preferred_adb_serial = None
         self._device_connected = False
+        self._connect_session_device_id = None
         self._command_profile = "none"
         self._conn_type = ""
         self._action_fw_wizard.setEnabled(False)
@@ -3204,7 +3273,15 @@ class MainWindow(QMainWindow):
     def _on_state_changed(self, info: dict) -> None:
         if info.get("connected"):
             self._production_connect_resume = None
+            new_did = str(info.get("device_id") or "").strip()
+            re_same_session = bool(
+                self._device_connected
+                and new_did
+                and getattr(self, "_connect_session_device_id", None) == new_did
+            )
             self._device_connected = True
+            if new_did:
+                self._connect_session_device_id = new_did
             self._command_profile = str(info.get("command_profile") or "none")
             self._conn_type = str(info.get("conn_type") or "")
             self._action_fw_wizard.setEnabled(self._command_profile == "e3_wired")
@@ -3233,7 +3310,6 @@ class MainWindow(QMainWindow):
                 self._watchdog_uart_port = ""
             self._watchdog_fail_streak = 0
             self._watchdog_poll_busy = False
-            self._transport_watchdog_timer.start()
             self._set_active_session_tab_title(self._prompt_model_name)
             self._sync_status_strip()
             fwp = getattr(self, "_fw_switch_panel", None)
@@ -3242,6 +3318,10 @@ class MainWindow(QMainWindow):
             lsp = getattr(self, "_local_server_panel", None)
             if lsp is not None:
                 lsp.apply_state(info)
+            if re_same_session:
+                self._update_tab_close_buttons()
+                return
+            self._transport_watchdog_timer.start()
             wiz = getattr(self, "_fw_wizard", None)
             if wiz is not None:
                 wiz.apply_shell_connection(True)
@@ -3258,10 +3338,10 @@ class MainWindow(QMainWindow):
         self._cmd_filter_row.setVisible(True)
         _, advanced = get_visible_commands(list(device_cmds), command_profile=prof)
 
-        help_lines = get_abstract_command_help_lines()
+        help_lines = get_abstract_command_help_lines(prof)
         abs_with_names = [
             d
-            for d in ABSTRACT_DEFINITIONS
+            for d in abstract_definitions_for_profile(prof)
             if isinstance(d, dict) and (d.get("name") or "").strip()
         ]
         help_by_name: dict[str, str] = {}
@@ -4061,7 +4141,9 @@ class MainWindow(QMainWindow):
         mode = connect_result.get("mode")
         if mode == "dev_uart":
             self._production_connect_resume = None
-            self._begin_connection_log_tab()
+            m_uart = connect_result.get("model") or {}
+            parrot_uart = (m_uart.get("codename") or "").strip().lower() == "parrot"
+            self._begin_connection_log_tab(structured_stream=parrot_uart)
             self._worker.connect_uart.emit(
                 connect_result["port"],
                 connect_result["baud"],

@@ -237,7 +237,7 @@ class LocalServerTool(QWidget):
         apply_qframe_stylesheet(
             self._missing_root_banner,
             f"QFrame {{ background-color: rgba(201, 162, 39, 0.12); border: 1px solid {_AMBER}; "
-            "border-radius: 8px; }}",
+            "border-radius: 8px; }",
         )
         mvl = QVBoxLayout(self._missing_root_banner)
         mvl.setContentsMargins(14, 12, 14, 12)
@@ -615,7 +615,7 @@ class LocalServerTool(QWidget):
         if is_active:
             badge = QLabel("Active")
             badge.setStyleSheet(
-                f"QLabel {{ background-color: rgba(0, 137, 123, 0.28); color: #80cbc4; border-radius: 10px; "
+                "QLabel { background-color: rgba(0, 137, 123, 0.28); color: #80cbc4; border-radius: 10px; "
                 "padding: 4px 10px; font-size: 10px; font-weight: 600; }"
             )
             title_row.addWidget(badge)

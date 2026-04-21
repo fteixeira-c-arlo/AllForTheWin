@@ -2,7 +2,7 @@
 Canonical device registry: model IDs, platform, transports, UART settings, and command profiles.
 
 E3 Wired models remain defined in camera_models.py; this registry adds Finch/Robin/Swallow,
-Pro 5 (Phoenix/Griffin), Pro 6 (Kea), Lory, and lookup helpers used after detection.
+Pro 5 (Phoenix/Griffin), Pro 6 (Kea), Lory, Parrot (AVD3001/AVD4001), and lookup helpers used after detection.
 """
 from __future__ import annotations
 
@@ -102,6 +102,17 @@ DEVICE_REGISTRY: list[DeviceRegistryEntry] = [
         "uart_baudrate": 115200,
         "enable_debug_method": "uart_always_accessible",
         "command_profile": "linux_kealory",
+    },
+    {
+        "model_ids": ["AVD4001", "AVD3001"],
+        "codename": "parrot",
+        "display_name": "Arlo Parrot (AVD4001 2K · AVD3001 FHD)",
+        "platform": "amebapro2",
+        "connection_types": ["uart"],
+        "adb_supported": False,
+        "uart_baudrate": 921600,
+        "enable_debug_method": "sync_button_6x",
+        "command_profile": "parrot",
     },
 ]
 

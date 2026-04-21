@@ -21,6 +21,53 @@ def load_abstract_definitions(path: str) -> list[dict]:
     return data
 
 
+def select_device_command_entry(matches: list[dict], model: dict | None) -> dict:
+    """
+    When the catalog lists multiple entries with the same ``name`` (e.g. Lory vs Kea),
+    pick the row whose ``only_codenames`` matches the connected model's codename;
+    otherwise prefer a row with no ``only_codenames`` (profile default).
+    """
+    if not matches:
+        raise ValueError("select_device_command_entry: empty matches")
+    if len(matches) == 1:
+        return matches[0]
+    cod = ((model or {}).get("codename") or "").strip().lower()
+    if cod:
+        specific: list[dict] = []
+        for c in matches:
+            only = c.get("only_codenames")
+            if not isinstance(only, list):
+                continue
+            allowed = {str(x).strip().lower() for x in only if str(x).strip()}
+            if cod in allowed:
+                specific.append(c)
+        if len(specific) == 1:
+            return specific[0]
+        if len(specific) > 1:
+            return specific[0]
+    generic = [c for c in matches if not c.get("only_codenames")]
+    if len(generic) == 1:
+        return generic[0]
+    if len(generic) > 1:
+        return generic[0]
+    return matches[0]
+
+
+def resolve_tail_logs_shell(device_commands: list[dict], model: dict | None) -> str | None:
+    """Return the ``shell`` line for catalog command ``tail_logs`` for this model, or None."""
+    matches: list[dict] = []
+    for c in device_commands or []:
+        if not isinstance(c, dict):
+            continue
+        if (c.get("name") or "").strip().lower() == "tail_logs":
+            matches.append(c)
+    if not matches:
+        return None
+    entry = select_device_command_entry(matches, model)
+    sh = (entry.get("shell") or "").strip()
+    return sh or None
+
+
 def find_abstract(name: str, definitions: list[dict]) -> dict | None:
     """Find an abstract command definition by name (case-insensitive)."""
     key = (name or "").strip().lower()
@@ -35,33 +82,35 @@ def find_abstract(name: str, definitions: list[dict]) -> dict | None:
     return None
 
 
-def resolve_step(raw_name: str, step_args: list[str], device_commands: list[dict]) -> tuple[str, str]:
+def resolve_step(
+    raw_name: str,
+    step_args: list[str],
+    device_commands: list[dict],
+    model: dict | None = None,
+) -> tuple[str, str]:
     """
     Look up the raw command by name in device_commands; return (shell + args, console).
     console is 'isp' (default) or 'mcu' for Gen5 MCU UART routing.
     Raises ValueError if missing; CommandNotSupportedError if entry is marked unsupported.
     """
     want = (raw_name or "").strip().lower()
-    shell = ""
-    console = "isp"
-    entry: dict | None = None
+    matches: list[dict] = []
     for c in device_commands:
         if not isinstance(c, dict):
             continue
         if (c.get("name") or "").strip().lower() == want:
-            entry = c
-            shell = c.get("shell")
-            if shell is None:
-                shell = ""
-            else:
-                shell = str(shell)
-            console = str(c.get("console") or "isp").strip().lower() or "isp"
-            break
-    else:
+            matches.append(c)
+    if not matches:
         raise ValueError(
             f"Raw command '{raw_name}' is not defined in the device command catalog."
         )
-    assert entry is not None
+    entry = select_device_command_entry(matches, model)
+    shell = entry.get("shell")
+    if shell is None:
+        shell = ""
+    else:
+        shell = str(shell)
+    console = str(entry.get("console") or "isp").strip().lower() or "isp"
     if entry.get("unsupported"):
         dn = (entry.get("unsupported_message") or "This command is not available on this device.").strip()
         raise CommandNotSupportedError(dn)
@@ -226,7 +275,7 @@ def execute_abstract_command(
             outputs.append("")
             continue
         try:
-            shell_line, console = resolve_step(raw_name, step_args, device_commands)
+            shell_line, console = resolve_step(raw_name, step_args, device_commands, model)
         except CommandNotSupportedError:
             raise
         if raw_name.lower() == "pull_logs" and not (shell_line or "").strip():

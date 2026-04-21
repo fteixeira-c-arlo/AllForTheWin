@@ -13,7 +13,9 @@ from utils.subprocess_helpers import win_subprocess_kwargs
 from core.abstract_dispatcher import (
     execute_abstract_command,
     load_abstract_definitions,
+    select_device_command_entry,
 )
+from core.command_definitions import get_profile_abstract_command_allowlist
 from core.device_errors import (
     CommandNotSupportedError,
     MCUConsoleNotConnectedError,
@@ -53,6 +55,28 @@ ABSTRACT_DEFINITIONS: list[dict] = load_abstract_definitions(
 )
 
 
+def abstract_definitions_for_profile(command_profile: str | None) -> list[dict]:
+    """
+    Abstract commands visible / dispatchable for this device command profile.
+
+    ``command_profiles.json`` may set ``abstract_commands`` to a list of global
+    abstract ``name`` strings; when omitted or null, all definitions are used.
+    """
+    pid = (command_profile or "").strip() or "none"
+    allow = get_profile_abstract_command_allowlist(pid)
+    if allow is None:
+        return list(ABSTRACT_DEFINITIONS)
+    allow_norm = {str(x).strip().lower() for x in allow if isinstance(x, str) and str(x).strip()}
+    out: list[dict] = []
+    for d in ABSTRACT_DEFINITIONS:
+        if not isinstance(d, dict):
+            continue
+        nm = (d.get("name") or "").strip().lower()
+        if nm in allow_norm:
+            out.append(d)
+    return out
+
+
 def _transport_lost_output(msg: str | None) -> bool:
     """USB/SSH drop, or UART shell back at login after reboot — session must be re-established."""
     s = msg or ""
@@ -87,21 +111,23 @@ def get_visible_commands(
     Split the device catalog for display only.
 
     Returns (abstract_command_definitions, advanced_raw_device_commands).
-    For **e3_wired** only: entries with a non-empty ``abstract`` field are hidden from the
-    advanced list (they back the tier-1 abstract commands). Other profiles show the full
+    For **e3_wired** and **parrot**: entries with a non-empty ``abstract`` field are hidden from
+    the advanced list (they back the tier-1 abstract commands). Other profiles show the full
     device catalog in Advanced so AmebaPro2 / Gen5 / Linux sidebars list real shell lines.
+
+    The abstract list is filtered by optional ``abstract_commands`` in ``command_profiles.json``.
     """
     pid = (command_profile or "").strip() or "none"
     advanced: list[dict] = []
     for c in device_commands:
         if not isinstance(c, dict):
             continue
-        if pid == "e3_wired":
+        if pid in ("e3_wired", "parrot"):
             link = c.get("abstract")
             if link is not None and str(link).strip():
                 continue
         advanced.append(c)
-    return (list(ABSTRACT_DEFINITIONS), advanced)
+    return (abstract_definitions_for_profile(pid), advanced)
 
 
 # Default remote path for log archive on camera (BusyBox tar creates uncompressed .tar)
@@ -123,10 +149,26 @@ SYSTEM_COMMANDS = [
     {"name": "config_show", "description": "Show saved Artifactory credentials (no token)", "command_profiles": None},
     {"name": "config_update", "description": "Update saved Artifactory credentials", "command_profiles": None},
     {"name": "config_delete", "description": "Delete saved Artifactory credentials", "command_profiles": None},
-    {"name": "log tail", "description": "Stream device system log live; use log tail stop to stop", "command_profiles": ["e3_wired"]},
-    {"name": "log tail stop", "description": "Stop log streaming and save the log file", "command_profiles": ["e3_wired"]},
-    {"name": "log parse", "description": "Stream and parse logs live; use log parse stop to save HTML report", "command_profiles": ["e3_wired"]},
-    {"name": "log parse stop", "description": "Stop log parsing and save HTML report", "command_profiles": ["e3_wired"]},
+    {
+        "name": "log tail",
+        "description": "Stream device system log live; use log tail stop to stop",
+        "command_profiles": ["e3_wired", "linux_kealory"],
+    },
+    {
+        "name": "log tail stop",
+        "description": "Stop log streaming and save the log file",
+        "command_profiles": ["e3_wired", "linux_kealory"],
+    },
+    {
+        "name": "log parse",
+        "description": "Stream and parse logs live; use log parse stop to save HTML report",
+        "command_profiles": ["e3_wired", "linux_kealory"],
+    },
+    {
+        "name": "log parse stop",
+        "description": "Stop log parsing and save HTML report",
+        "command_profiles": ["e3_wired", "linux_kealory"],
+    },
     {"name": "parse_log_file", "description": "Select a log file from arlo_logs folder and generate HTML parse report", "command_profiles": None},
     {"name": "log export", "description": "Archive logs on device and upload via TFTP (UART only)", "command_profiles": ["e3_wired"]},
     {"name": "disconnect", "description": "Close connection and exit", "command_profiles": None},
@@ -272,15 +314,18 @@ def _similar_commands(name: str, commands: list[dict]) -> list[str]:
     return out[:5]
 
 
-def _match_abstract_prefix(parts: list[str]) -> tuple[str, list[str]] | None:
+def _match_abstract_prefix(
+    parts: list[str], definitions: list[dict] | None = None
+) -> tuple[str, list[str]] | None:
     """
     If the leading tokens match a known abstract command name, return (abstract_name, remaining_args).
     Longer names win so e.g. 'update url get' is matched before 'update url'.
     """
-    if not parts or not ABSTRACT_DEFINITIONS:
+    defs_src = definitions if definitions is not None else ABSTRACT_DEFINITIONS
+    if not parts or not defs_src:
         return None
     defs = sorted(
-        ABSTRACT_DEFINITIONS,
+        defs_src,
         key=lambda d: len((d.get("name") or "").strip()),
         reverse=True,
     )
@@ -371,9 +416,9 @@ def _abstract_help_lines(definitions: list[dict]) -> list[str]:
     return lines
 
 
-def get_abstract_command_help_lines() -> list[str]:
+def get_abstract_command_help_lines(command_profile: str | None = None) -> list[str]:
     """Lines for the primary «Commands» section (same as help output)."""
-    return _abstract_help_lines(ABSTRACT_DEFINITIONS)
+    return _abstract_help_lines(abstract_definitions_for_profile(command_profile))
 
 
 def _run_push_arlod(
@@ -791,7 +836,8 @@ def parse_and_execute(
         show_error(f"Unhandled tool command {tool_name!r}.")
         return "continue", None
 
-    abstract_hit = _match_abstract_prefix(parts)
+    abs_defs = abstract_definitions_for_profile(profile)
+    abstract_hit = _match_abstract_prefix(parts, abs_defs)
     if abstract_hit is not None:
         abstract_name, abstract_args = abstract_hit
 
@@ -808,7 +854,7 @@ def parse_and_execute(
             abstract_out = execute_abstract_command(
                 abstract_name,
                 abstract_args,
-                ABSTRACT_DEFINITIONS,
+                abs_defs,
                 device_commands,
                 _execute_shell,
                 connection_type,
@@ -851,7 +897,7 @@ def parse_and_execute(
     cmd_names = [c["name"].lower() for c in all_cmds]
 
     if cmd in ("help", "?", "--help"):
-        show_abstract_commands_section(_abstract_help_lines(ABSTRACT_DEFINITIONS))
+        show_abstract_commands_section(_abstract_help_lines(abstract_definitions_for_profile(profile)))
         _, advanced_device = get_visible_commands(device_commands, command_profile=profile)
         full = list(advanced_device) + [
             {"name": c["name"], "description": c["description"]} for c in system_cmds
@@ -935,59 +981,60 @@ def parse_and_execute(
         return "continue", None
 
     # Device command: use "shell" for E3 Wired (full cli command), else command name + args
-    for c in device_commands:
-        if c["name"].lower() == cmd:
-            try:
-                _check_command_catalog_restrictions(c, model)
-            except CommandNotSupportedError as e:
-                show_error(str(e))
+    matches = [c for c in device_commands if (c.get("name") or "").strip().lower() == cmd]
+    if matches:
+        try:
+            c = select_device_command_entry(matches, model)
+            _check_command_catalog_restrictions(c, model)
+        except CommandNotSupportedError as e:
+            show_error(str(e))
+            return "continue", None
+        # pull_logs: download log archive from camera to PC (no shell command)
+        if cmd == "pull_logs":
+            if connection_type.upper() == "UART":
+                show_error("pull_logs is not supported over UART.", "Connect via ADB to download the log archive.")
                 return "continue", None
-            # pull_logs: download log archive from camera to PC (no shell command)
-            if cmd == "pull_logs":
-                if connection_type.upper() == "UART":
-                    show_error("pull_logs is not supported over UART.", "Connect via ADB to download the log archive.")
-                    return "continue", None
-                if connection_pull_file:
-                    local_dir = pull_logs_local_dir or get_arlo_logs_dir()
-                    local_path = os.path.join(local_dir, "allsystem.logs.tar")
-                    if args:
-                        local_path = args[0]
-                    success, output = connection_pull_file(PULL_LOGS_REMOTE_PATH, local_path)
-                    if success:
-                        return "continue", output
-                    if _transport_lost_output(output):
-                        return "disconnected", None
-                    show_error(output or "Pull failed.")
-                    return "continue", None
-                show_error("Pull not available for this connection.", "Use ADB or SSH.")
-                return "continue", None
-            if connection_execute:
-                base_cmd = c.get("shell") or cmd
-                run_exec = connection_execute
-                if (c.get("console") or "").strip().lower() == "mcu":
-                    if not mcu_connection_execute:
-                        show_error(
-                            str(
-                                MCUConsoleNotConnectedError(
-                                    "MCU CLI is not connected. Connect the MCU UART (Gen5) and retry."
-                                )
-                            )
-                        )
-                        return "continue", None
-                    run_exec = mcu_connection_execute
-                success, output = run_exec(base_cmd, args)
+            if connection_pull_file:
+                local_dir = pull_logs_local_dir or get_arlo_logs_dir()
+                local_path = os.path.join(local_dir, "allsystem.logs.tar")
+                if args:
+                    local_path = args[0]
+                success, output = connection_pull_file(PULL_LOGS_REMOTE_PATH, local_path)
                 if success:
-                    return "continue", output or f"Command '{cmd}' executed successfully."
-                # Camera disconnected from PC (USB unplugged or network lost)
+                    return "continue", output
                 if _transport_lost_output(output):
                     return "disconnected", None
-                show_error(output or "Command failed.")
+                show_error(output or "Pull failed.")
                 return "continue", None
-            # Placeholder: no real device, just echo success
-            if cmd == "capture":
-                return "continue", "Image captured successfully (placeholder). Saved to: /tmp/capture_placeholder.jpg"
-            if cmd == "record":
-                return "continue", "Recording started (placeholder)."
-            return "continue", f"Command '{cmd}' executed (placeholder)."
+            show_error("Pull not available for this connection.", "Use ADB or SSH.")
+            return "continue", None
+        if connection_execute:
+            base_cmd = c.get("shell") or cmd
+            run_exec = connection_execute
+            if (c.get("console") or "").strip().lower() == "mcu":
+                if not mcu_connection_execute:
+                    show_error(
+                        str(
+                            MCUConsoleNotConnectedError(
+                                "MCU CLI is not connected. Connect the MCU UART (Gen5) and retry."
+                            )
+                        )
+                    )
+                    return "continue", None
+                run_exec = mcu_connection_execute
+            success, output = run_exec(base_cmd, args)
+            if success:
+                return "continue", output or f"Command '{cmd}' executed successfully."
+            # Camera disconnected from PC (USB unplugged or network lost)
+            if _transport_lost_output(output):
+                return "disconnected", None
+            show_error(output or "Command failed.")
+            return "continue", None
+        # Placeholder: no real device, just echo success
+        if cmd == "capture":
+            return "continue", "Image captured successfully (placeholder). Saved to: /tmp/capture_placeholder.jpg"
+        if cmd == "record":
+            return "continue", "Recording started (placeholder)."
+        return "continue", f"Command '{cmd}' executed (placeholder)."
 
     return "continue", None

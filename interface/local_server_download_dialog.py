@@ -26,7 +26,6 @@ from core.fw_setup_service import (
     classify_local_firmware_vs_selection,
     compute_download_model,
     default_artifactory_url,
-    default_fw_server_root,
     download_firmware_to_layout,
     extract_firmware_archive,
     firmware_folder_model_label,

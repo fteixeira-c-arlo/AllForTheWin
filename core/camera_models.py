@@ -71,7 +71,7 @@ CAMERA_MODEL_GROUPS = [
     },
 ]
 
-# Finch, Robin, Swallow, Pro 5, Pro 6, Lory — from device_registry (platform + UART defaults).
+# Finch, Robin, Swallow, Pro 5, Pro 6, Lory, Parrot — from device_registry (platform + UART defaults).
 CAMERA_MODEL_GROUPS = CAMERA_MODEL_GROUPS + [
     registry_entry_to_camera_group(e) for e in DEVICE_REGISTRY
 ]

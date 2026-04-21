@@ -5,12 +5,20 @@ Routes by platform (amebapro2, gen5, linux) and integrates E3 Wired `detect_devi
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from core.build_info import detect_device as detect_device_e3_wired, parse_env_from_isp_or_kv_text
+from core.build_info import (
+    _kv_bs_claimed_indicates_onboarded,
+    _parse_env_from_kv_bs_stage,
+    detect_device as detect_device_e3_wired,
+    parse_build_info,
+    parse_env_from_isp_or_kv_text,
+    parse_onboarded_from_device_info_text,
+)
 from core.device_errors import UnknownDeviceError, UnsupportedConnectionError
 from core.device_registry import lookup_registry_by_model_id
 
@@ -49,7 +57,7 @@ def _parse_amebapro2_build_info(text: str) -> tuple[str | None, str | None]:
     if m:
         model = m.group(1).strip().upper()
     if not model:
-        m = re.search(r"\b(VMC\d{4}[A-Z]?)\b", text, re.IGNORECASE)
+        m = re.search(r"\b(VMC\d{4}[A-Z]?|AVD\d{4})\b", text, re.IGNORECASE)
         if m:
             model = m.group(1).upper()
     fw = None
@@ -161,7 +169,82 @@ def _maybe_disable_robin_hibernate(
             "Robin detected — could not disable hibernate (session continues); "
             "see application log for device output."
         )
-    result["post_connect_messages"] = msgs
+    prev = result.get("post_connect_messages")
+    if isinstance(prev, list):
+        result["post_connect_messages"] = prev + msgs
+    else:
+        result["post_connect_messages"] = msgs
+
+
+def _lory_fw_version_plausible(v: Any) -> bool:
+    """Reject syslog / shell junk (e.g. lone '>') mistaken for a version string."""
+    if v is None or not isinstance(v, str):
+        return False
+    s = v.strip()
+    if len(s) < 3 or not re.search(r"\d", s):
+        return False
+    if len(s) <= 2:
+        return False
+    alnumish = sum(1 for c in s if c.isalnum() or c in "._-+")
+    if alnumish < len(s) * 0.3 and len(s) < 8:
+        return False
+    return True
+
+
+def _extract_lory_fw_from_text(text: str) -> str | None:
+    """Best-effort FW string from noisy `info` output (semantic version + optional suffix)."""
+    if not text or not str(text).strip():
+        return None
+    t = str(text)
+    for pat in (
+        r"\b(\d+\.\d+\.\d+(?:\.\d+)?(?:_[a-zA-Z0-9]+)?)\b",
+        r"\b(\d+\.\d+\.\d+[._][a-zA-Z0-9_.-]+)\b",
+        r"(?im)^VERSION_ID\s*=\s*(\S+)",
+        r"(?im)^VERSION\s*=\s*(\S+)",
+    ):
+        m = re.search(pat, t)
+        if m:
+            cand = m.group(1).strip().strip('"')
+            if _lory_fw_version_plausible(cand):
+                return cand
+    return None
+
+
+def _parse_lory_info_output(raw: str) -> dict[str, Any]:
+    """Parse `info` shell output on Lory (may be key=value lines or JSON)."""
+    text = raw or ""
+    out: dict[str, Any] = dict(parse_build_info(text))
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            root = json.loads(stripped)
+        except json.JSONDecodeError:
+            root = None
+        if isinstance(root, dict):
+            if not out.get("model"):
+                mid = root.get("model_id") or root.get("model") or root.get("MODEL_ID")
+                if isinstance(mid, str) and mid.strip():
+                    out["model"] = mid.strip().upper()
+            if not out.get("fw_version"):
+                ver = root.get("fw_version") or root.get("version") or root.get("firmware_version")
+                if isinstance(ver, str) and ver.strip():
+                    out["fw_version"] = ver.strip()
+            if not out.get("serial"):
+                sn = root.get("serial") or root.get("serial_number") or root.get("ssn")
+                if isinstance(sn, str) and sn.strip():
+                    out["serial"] = sn.strip()
+    if not _lory_fw_version_plausible(out.get("fw_version")):
+        out.pop("fw_version", None)
+        alt = _extract_lory_fw_from_text(text)
+        if alt:
+            out["fw_version"] = alt
+    envx = parse_env_from_isp_or_kv_text(text)
+    if envx:
+        out["env"] = envx
+    ob = parse_onboarded_from_device_info_text(text)
+    if ob is not None:
+        out["is_onboarded"] = ob
+    return out
 
 
 def _parse_device_tree_model(text: str) -> str | None:
@@ -172,6 +255,27 @@ def _parse_device_tree_model(text: str) -> str | None:
     if m:
         return m.group(1).upper()
     return None
+
+
+_LORY_MODEL_IDS = frozenset({"AVD5001", "AVD6001"})
+
+
+def selection_is_lory(sel: dict[str, Any] | None) -> bool:
+    """True when Connect selection is Lory (codename, registry copy, or known model IDs)."""
+    if not isinstance(sel, dict) or not sel:
+        return False
+    if (sel.get("codename") or "").strip().lower() == "lory":
+        return True
+    reg = sel.get("registry_entry")
+    if isinstance(reg, dict) and (reg.get("codename") or "").strip().lower() == "lory":
+        return True
+    name = (sel.get("name") or "").strip().upper()
+    if name in _LORY_MODEL_IDS:
+        return True
+    for x in sel.get("fw_search_models") or []:
+        if str(x).strip().upper() in _LORY_MODEL_IDS:
+            return True
+    return False
 
 
 def detect_after_connect(
@@ -190,6 +294,14 @@ def detect_after_connect(
     plat_hint = None
     if selected_model:
         plat_hint = (selected_model.get("platform") or "").strip().lower() or None
+
+    # Lory is Linux shell + `info` only; missing/empty `platform` used to skip the linux branch and
+    # fall through to E3 `cli mfg build_info` — never do that for Lory UART/SSH.
+    if selection_is_lory(selected_model if isinstance(selected_model, dict) else None) and ct in (
+        "uart",
+        "ssh",
+    ):
+        plat_hint = "linux"
 
     dc = DeviceConnection(
         device={},
@@ -328,6 +440,8 @@ def detect_after_connect(
     if plat_hint == "linux" and ct in ("uart", "ssh"):
         ok, out = execute("cat /etc/os-release", [])
         mid, fw = _parse_linux_model(out or "")
+        ok2: bool | None = None
+        out2 = ""
         if not mid:
             ok2, out2 = execute("arlod -V", [])
             mid, fw = _parse_linux_model(out2 or (out or ""))
@@ -343,10 +457,80 @@ def detect_after_connect(
             dc.device = dict(reg)
         elif mid:
             raise UnknownDeviceError(f"Unknown model ID from device: {mid!r}.")
-        merged = detect_device_e3_wired(execute)
+        sel = selected_model or {}
+        is_lory = selection_is_lory(sel)
+        if is_lory:
+            # Lory: device identity comes from `info` only — no E3 build_info / arlocmd device_info / bs_info.
+            merged = {
+                "model": None,
+                "fw_version": None,
+                "serial": None,
+                "env": None,
+                "update_url_raw": "",
+                "raw_build_info": "",
+                "is_onboarded": None,
+            }
+            ok_li, out_li = execute("info", [])
+            if ok_li and (out_li or "").strip():
+                parsed_li = _parse_lory_info_output(out_li)
+                if parsed_li.get("model"):
+                    merged["model"] = parsed_li["model"]
+                if parsed_li.get("fw_version"):
+                    merged["fw_version"] = parsed_li["fw_version"]
+                if parsed_li.get("serial"):
+                    merged["serial"] = parsed_li["serial"]
+                if parsed_li.get("env"):
+                    merged["env"] = parsed_li["env"]
+                if parsed_li.get("is_onboarded") is not None:
+                    merged["is_onboarded"] = parsed_li["is_onboarded"]
+                merged["raw_build_info"] = (out_li or "").strip()
+        else:
+            merged = detect_device_e3_wired(execute)
         for k in ("env", "update_url_raw", "is_onboarded", "serial"):
             if merged.get(k) is not None:
                 result[k] = merged.get(k)
+        if is_lory:
+            if merged.get("model"):
+                result["model"] = merged["model"]
+                dc.model_id = merged["model"]
+            if merged.get("fw_version"):
+                result["fw_version"] = merged["fw_version"]
+                dc.firmware_version = merged["fw_version"]
+            if merged.get("raw_build_info"):
+                result["raw_build_info"] = merged["raw_build_info"]
+                dc.raw_detection = merged["raw_build_info"]
+            reg_li = lookup_registry_by_model_id(str(result["model"])) if result.get("model") else None
+            if reg_li:
+                dc.device = dict(reg_li)
+            # Env / claimed from KV (Lory does not use E3 build_info / bs_info; `info` may omit these).
+            if not result.get("env"):
+                for kv_cmd in ("kvcmd read KV_BS_STAGE", "kvcmd get KV_BS_STAGE"):
+                    ok_kv, out_kv = execute(kv_cmd, [])
+                    if not ok_kv or not (out_kv or "").strip():
+                        continue
+                    env = _parse_env_from_kv_bs_stage(out_kv or "")
+                    if env:
+                        result["env"] = env
+                        break
+            if result.get("is_onboarded") is None:
+                ok_c, out_c = execute("kvcmd read KV_BS_CLAIMED", [])
+                if not ok_c or not (out_c or "").strip():
+                    ok_c, out_c = execute("kvcmd get KV_BS_CLAIMED", [])
+                if ok_c and out_c:
+                    if _kv_bs_claimed_indicates_onboarded(out_c):
+                        result["is_onboarded"] = True
+                    else:
+                        z = (out_c or "").strip()
+                        zlines = [ln.strip() for ln in z.splitlines() if ln.strip()]
+                        if z == "0" or (zlines and zlines[-1] == "0"):
+                            result["is_onboarded"] = False
+            if not result.get("fw_version") or not _lory_fw_version_plausible(result.get("fw_version")):
+                m = re.search(r"(?im)^VERSION=(\S+)", out or "")
+                if m:
+                    v = m.group(1).strip().strip('"')
+                    if _lory_fw_version_plausible(v):
+                        result["fw_version"] = v
+                        dc.firmware_version = v
         return result, dc
 
     # Default: E3 Wired Linux path (existing behavior)

@@ -12,7 +12,7 @@ from typing import Callable, Literal
 _FW_LOCAL_DETECT_LOG = logging.getLogger("arlohub.fw_local_detect")
 from urllib.parse import quote, unquote, urlparse
 
-from core.artifactory_client import ARTIFACTORY_REPO, download_firmware, list_available_firmware
+from core.artifactory_client import download_firmware, list_available_firmware
 from core.local_server import (
     DEFAULT_PORT,
     FW_ENV_TAR_GZ_SUFFIXES,
