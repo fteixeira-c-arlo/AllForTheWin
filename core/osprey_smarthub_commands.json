@@ -1,0 +1,292 @@
+{
+  "source": "Arlo Confluence: VMB4540 (Osprey BS / Pro3 SmartHub), Arlo Cost-Down Base Station Platform (VMB3500/VMB4500/VMB4540), Local SSH access to Low Cost Gen3 Base Station, QCA WiFi commands, Loading images and initial board configuration, ACSD information for Basestations.",
+  "url": "https://arlo.atlassian.net/wiki/spaces/ACGBS/overview",
+  "models": ["VMB4540", "VMB4500", "VMB3500", "Osprey"],
+  "notes": "OpenWrt + QCA4531 SmartHub firmware (vzdaemon/vzwatchdog/xagent). SSH: root@<ip>, password 'ngbase' (dev/qa) or 'NX9PvLX2L3YvhjBjVLi68yBA8' (staging/ftrial/production). Enable SSH on prod by long-pressing sync button 11s. Categories use the canonical sidebar taxonomy (firmware/device/kv/logs/network/mfg) so every block gets proper section styling.",
+  "commands": [
+    {
+      "name": "update_url",
+      "abstract": "update url",
+      "description": "Set vz_update_url in /tmp/media/nand/config/arlo/env/vzdaemon.env, then check_configs --backup. The 'update url' abstract reboots afterwards.",
+      "syntax": "update_url <url>   (e.g. http://<ipv4>:8000/<env>)",
+      "category": "firmware",
+      "shell": "sh -c 'FILE=/tmp/media/nand/config/arlo/env/vzdaemon.env; [ -f \"$FILE\" ] || { echo \"ERR: $FILE not found\" >&2; exit 1; }; if grep -q \"^vz_update_url=\" \"$FILE\"; then sed -i \"s|^vz_update_url=.*|vz_update_url=$1|\" \"$FILE\"; else printf \"\\nvz_update_url=%s\\n\" \"$1\" >> \"$FILE\"; fi && grep \"^vz_update_url=\" \"$FILE\" && check_configs --backup' _"
+    },
+    {
+      "name": "get_update_url",
+      "abstract": "get_update_url",
+      "description": "Read vz_update_url from vzdaemon.env",
+      "syntax": "grep '^vz_update_url=' /tmp/media/nand/config/arlo/env/vzdaemon.env",
+      "category": "firmware",
+      "shell": "grep '^vz_update_url=' /tmp/media/nand/config/arlo/env/vzdaemon.env"
+    },
+    {
+      "name": "ls_env_dir",
+      "description": "List /tmp/media/nand/config/arlo/env (where vzdaemon.env lives)",
+      "syntax": "ls -la /tmp/media/nand/config/arlo/env",
+      "category": "firmware",
+      "shell": "ls -la /tmp/media/nand/config/arlo/env"
+    },
+    {
+      "name": "show_vzdaemon_env",
+      "description": "Dump contents of vzdaemon.env",
+      "syntax": "cat /tmp/media/nand/config/arlo/env/vzdaemon.env",
+      "category": "firmware",
+      "shell": "cat /tmp/media/nand/config/arlo/env/vzdaemon.env"
+    },
+    {
+      "name": "check_configs_backup",
+      "description": "Persist /tmp/media/nand/config changes to flash (check_configs --backup)",
+      "syntax": "check_configs --backup",
+      "category": "firmware",
+      "shell": "check_configs --backup"
+    },
+    {
+      "name": "manual_ota",
+      "abstract": "manual_ota",
+      "description": "Install firmware update from URL, toggle active partition and reboot (fwupgrade)",
+      "syntax": "fwupgrade --install --toggle --reboot <url>",
+      "category": "firmware",
+      "shell": "fwupgrade --install --toggle --reboot"
+    },
+    {
+      "name": "uboot_printenv",
+      "description": "Print u-boot environment (requires fw_printenv tool)",
+      "syntax": "fw_printenv",
+      "category": "firmware",
+      "shell": "fw_printenv"
+    },
+    {
+      "name": "version",
+      "description": "FoxConn board/model version banner",
+      "syntax": "version",
+      "category": "device",
+      "shell": "version"
+    },
+    {
+      "name": "vzdaemon_version",
+      "description": "Arlo firmware version reported by vzdaemon",
+      "syntax": "vzdaemon --version",
+      "category": "device",
+      "shell": "vzdaemon --version"
+    },
+    {
+      "name": "get_firmware_version",
+      "abstract": "get_firmware_version",
+      "description": "Arlo firmware version via vzdaemon",
+      "syntax": "vzdaemon --version",
+      "category": "device",
+      "shell": "vzdaemon --version"
+    },
+    {
+      "name": "get_model_id",
+      "abstract": "get_model_id",
+      "description": "Model banner printed by `version`",
+      "syntax": "version",
+      "category": "device",
+      "shell": "version"
+    },
+    {
+      "name": "get_device_info",
+      "abstract": "get_device_info",
+      "description": "Board/FW banner + arlo firmware version",
+      "syntax": "version; vzdaemon --version",
+      "category": "device",
+      "shell": "version; vzdaemon --version"
+    },
+    {
+      "name": "reboot",
+      "abstract": "reboot",
+      "description": "Reboot the hub",
+      "syntax": "reboot",
+      "category": "device",
+      "shell": "reboot"
+    },
+    {
+      "name": "factory_reset",
+      "abstract": "factory_reset",
+      "description": "Stop services, wipe overlay + user partitions, reboot (documented Osprey reset sequence)",
+      "syntax": "killall vzdaemon vzwatchdog xagent; umount -f /overlay; mtd erase rootfs_data; umount -f /tmp/media/nand; mtd erase user; reboot",
+      "category": "device",
+      "shell": "killall vzdaemon vzwatchdog xagent; umount -f /overlay; mtd erase rootfs_data; umount -f /tmp/media/nand; mtd erase user; reboot"
+    },
+    {
+      "name": "stop_arlo_service",
+      "abstract": "stop_arlo_service",
+      "description": "Stop arlo daemon trio (vzdaemon/vzwatchdog/xagent)",
+      "syntax": "killall vzdaemon vzwatchdog xagent",
+      "category": "device",
+      "shell": "killall vzdaemon vzwatchdog xagent"
+    },
+    {
+      "name": "get_current_environment",
+      "abstract": "get_current_environment",
+      "description": "Osprey SmartHub has no documented single-key stage read; check u-boot env manually",
+      "syntax": "(n/a)",
+      "category": "device",
+      "shell": "",
+      "unsupported": true,
+      "unsupported_message": "get_current_environment has no documented one-liner on Osprey SmartHub; inspect fw_printenv / NVRAM manually."
+    },
+    {
+      "name": "refresh_update_rules",
+      "abstract": "refresh_update_rules",
+      "description": "No arlocmd-style update rule refresh on this hub",
+      "syntax": "(n/a)",
+      "category": "device",
+      "shell": "",
+      "unsupported": true,
+      "unsupported_message": "refresh_update_rules is not defined on Osprey SmartHub."
+    },
+    {
+      "name": "get_serial_number",
+      "abstract": "get_serial_number",
+      "description": "Serial number from NVRAM (burnsn target)",
+      "syntax": "nvram get serialno",
+      "category": "kv",
+      "shell": "nvram get serialno"
+    },
+    {
+      "name": "get_kv_item",
+      "abstract": "get_kv_item",
+      "description": "Read NVRAM key (OpenWrt nvram)",
+      "syntax": "nvram get <key>",
+      "category": "kv",
+      "shell": "nvram get"
+    },
+    {
+      "name": "set_kv_write",
+      "abstract": "set_kv_item",
+      "description": "Set NVRAM key (pair with kv_commit to persist)",
+      "syntax": "nvram set <key>=<value>",
+      "category": "kv",
+      "shell": "nvram set"
+    },
+    {
+      "name": "kv_commit",
+      "abstract": "set_kv_item",
+      "description": "Commit pending NVRAM changes to flash",
+      "syntax": "nvram commit",
+      "category": "kv",
+      "shell": "nvram commit"
+    },
+    {
+      "name": "nvram_show",
+      "description": "Dump all NVRAM key/value pairs",
+      "syntax": "nvram show",
+      "category": "kv",
+      "shell": "nvram show"
+    },
+    {
+      "name": "tail_logs",
+      "abstract": "tail_logs",
+      "description": "Follow the system log (OpenWrt logread)",
+      "syntax": "logread -f",
+      "category": "logs",
+      "shell": "logread -f"
+    },
+    {
+      "name": "tail_system_log",
+      "description": "Tail the /tmp/system-log file directly (alt. to logread)",
+      "syntax": "tail -F /tmp/system-log",
+      "category": "logs",
+      "shell": "tail -F /tmp/system-log"
+    },
+    {
+      "name": "get_wifi_status",
+      "abstract": "get_wifi_status",
+      "description": "Wireless interface summary (SSID, channel, signal, bitrate)",
+      "syntax": "iwinfo",
+      "category": "network",
+      "shell": "iwinfo"
+    },
+    {
+      "name": "wifi_station_dump",
+      "description": "List associated stations on wlan0",
+      "syntax": "iw wlan0 station dump",
+      "category": "network",
+      "shell": "iw wlan0 station dump"
+    },
+    {
+      "name": "wifi_scan",
+      "description": "Scan nearby APs on wlan0",
+      "syntax": "iwinfo wlan0 scan",
+      "category": "network",
+      "shell": "iwinfo wlan0 scan"
+    },
+    {
+      "name": "wifi_survey",
+      "description": "Per-channel survey on wlan0 (active/busy/tx/rx time)",
+      "syntax": "iw wlan0 survey dump",
+      "category": "network",
+      "shell": "iw wlan0 survey dump"
+    },
+    {
+      "name": "acsd_scan",
+      "description": "Trigger manual ACSD channel scan (VMB3500/VMB4500/VMB4540 path)",
+      "syntax": "killall -USR2 hostapd",
+      "category": "network",
+      "shell": "killall -USR2 hostapd"
+    },
+    {
+      "name": "acsd_scan_vzcmd",
+      "description": "Trigger ACSD scan via vzdaemon so paired cameras are notified",
+      "syntax": "vzcmd --expandJson PassThru='{\"resource\":\"diagnostics\",\"action\":\"performAcsdScan\"}'",
+      "category": "network",
+      "shell": "vzcmd --expandJson PassThru='{\"resource\":\"diagnostics\",\"action\":\"performAcsdScan\"}'"
+    },
+    {
+      "name": "disassociate_station",
+      "description": "Force-disassociate all stations on wlan0 (hostapd_cli)",
+      "syntax": "/usr/sbin/hostapd_cli -iwlan0 disassociate",
+      "category": "network",
+      "shell": "/usr/sbin/hostapd_cli -iwlan0 disassociate"
+    },
+    {
+      "name": "ping",
+      "abstract": "ping",
+      "description": "Ping host",
+      "syntax": "ping <host>",
+      "category": "network",
+      "shell": "ping"
+    },
+    {
+      "name": "connect_wifi",
+      "abstract": "connect_wifi_ip",
+      "description": "Hub is a WiFi AP for paired cameras — connecting the hub to an upstream WiFi is not a supported workflow",
+      "syntax": "(n/a)",
+      "category": "network",
+      "shell": "",
+      "unsupported": true,
+      "unsupported_message": "Osprey SmartHub runs as a WiFi AP (hostapd) for paired cameras; joining upstream WiFi as a station is not a supported workflow from this tool."
+    },
+    {
+      "name": "burnsn",
+      "description": "MFG: burn serial number (factory provisioning only)",
+      "syntax": "burnsn <serial>",
+      "category": "mfg",
+      "shell": "burnsn"
+    },
+    {
+      "name": "burnethermac",
+      "description": "MFG: burn ethernet MAC (factory provisioning only)",
+      "syntax": "burnethermac <mac>",
+      "category": "mfg",
+      "shell": "burnethermac"
+    },
+    {
+      "name": "burnhwver",
+      "description": "MFG: burn hardware revision",
+      "syntax": "burnhwver <rev>",
+      "category": "mfg",
+      "shell": "burnhwver"
+    },
+    {
+      "name": "burnboardid",
+      "description": "MFG: burn board ID",
+      "syntax": "burnboardid <id>",
+      "category": "mfg",
+      "shell": "burnboardid"
+    }
+  ]
+}

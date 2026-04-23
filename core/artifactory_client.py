@@ -1,4 +1,12 @@
-"""Artifactory client for firmware download. Repo: camera-fw-generic-release-local."""
+"""Artifactory client for firmware download.
+
+The correct Artifactory repo is selected per-device:
+  - Cameras        → ``camera-fw-generic-release-local``
+  - Base stations  → ``gateway-fw-generic-release-local``
+
+Use :func:`resolve_repo_for_model` (or pass ``repo=`` explicitly) to drive
+listing / search / download against the right repository.
+"""
 import base64
 import json
 import os
@@ -6,6 +14,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from typing import Callable
+
+from core.device_registry import is_basestation_model
 
 # (Artifactory folder path, filename) -> (size bytes or None, modified string from API)
 FirmwareFileMeta = dict[tuple[str, str], tuple[int | None, str | None]]
@@ -29,8 +39,29 @@ def _parse_json_response(r) -> tuple[bool, dict | None, str]:
             f"Body starts with: {preview!r}..."
         )
 
-# Repo for camera firmware (Artifactory)
-ARTIFACTORY_REPO = "camera-fw-generic-release-local"
+# Artifactory repos. Use :func:`resolve_repo_for_model` to pick the right one.
+CAMERA_FIRMWARE_REPO = "camera-fw-generic-release-local"
+GATEWAY_FIRMWARE_REPO = "gateway-fw-generic-release-local"
+
+# Back-compat alias: defaulted to the camera repo so older call sites keep working.
+# New code should prefer ``resolve_repo_for_model()`` or pass ``repo=`` explicitly.
+ARTIFACTORY_REPO = CAMERA_FIRMWARE_REPO
+
+
+def resolve_repo_for_model(model_name: str | None) -> str:
+    """Return the Artifactory repo that hosts firmware for ``model_name``.
+
+    Basestation / gateway models (e.g. VMB4540 Osprey) use
+    ``gateway-fw-generic-release-local``; everything else uses the camera repo.
+    """
+    return GATEWAY_FIRMWARE_REPO if is_basestation_model(model_name) else CAMERA_FIRMWARE_REPO
+
+
+def _coerce_repo(repo: str | None, model_name: str | None) -> str:
+    """Fall back to model-derived repo when ``repo`` is not explicitly provided."""
+    if repo and repo.strip():
+        return repo.strip()
+    return resolve_repo_for_model(model_name)
 
 # Artifactory folder names are 2K only (VMC3xxx). FHD models (VMC2xxx) share the same product folder.
 # Map FHD model name -> 2K folder name for folder lookup.
@@ -109,14 +140,15 @@ def _error_message_for_status(r) -> str:
     return f"HTTP {status}. {msg}" if msg else f"HTTP {status}"
 
 
-def _artifact_path_for_version(model_name: str, version: str) -> str:
+def _artifact_path_for_version(model_name: str, version: str, repo: str | None = None) -> str:
     """Build repo path segment: model/version or ENV/model/version when version is 'ENV/subfolder'.
     Uses 2K folder name for Artifactory (FHD models map to 2K folder)."""
+    active_repo = _coerce_repo(repo, model_name)
     folder = _artifactory_folder_for_model(model_name)
     if "/" in version:
         env, version_part = version.split("/", 1)
-        return f"{ARTIFACTORY_REPO}/{env}/{folder}/{version_part}"
-    return f"{ARTIFACTORY_REPO}/{folder}/{version}"
+        return f"{active_repo}/{env}/{folder}/{version_part}"
+    return f"{active_repo}/{folder}/{version}"
 
 
 def list_version_files(
@@ -126,6 +158,7 @@ def list_version_files(
     version: str,
     username: str | None = None,
     repo_folder_path: str | None = None,
+    repo: str | None = None,
 ) -> tuple[bool, list[str], str]:
     """
     List file names in Artifactory. When repo_folder_path is set, list repo/repo_folder_path;
@@ -136,10 +169,11 @@ def list_version_files(
         return False, [], "requests library required for Artifactory download."
 
     api_base = _artifactory_api_base(base_url)
+    active_repo = _coerce_repo(repo, model_name)
     if repo_folder_path:
-        path = f"{ARTIFACTORY_REPO}/{repo_folder_path.strip('/')}"
+        path = f"{active_repo}/{repo_folder_path.strip('/')}"
     else:
-        path = _artifact_path_for_version(model_name, version)
+        path = _artifact_path_for_version(model_name, version, repo=active_repo)
     url = f"{api_base}/api/storage/{path}"
     headers = _auth_headers(access_token, username)
     try:
@@ -202,6 +236,7 @@ def _search_firmware_aql(
     model_folder: str,
     headers: dict,
     version_filter: str,
+    repo: str,
 ) -> tuple[list[tuple[str, list[str]]] | None, FirmwareFileMeta, str]:
     """
     Fast path: one AQL request to list all files under repo/model_folder.
@@ -213,7 +248,7 @@ def _search_firmware_aql(
         return None, {}, "requests library required."
     # AQL body is plain text: items.find({"repo":..., "path":...})
     aql_body = (
-        f'items.find({{"repo":{{"$eq":"{ARTIFACTORY_REPO}"}},'
+        f'items.find({{"repo":{{"$eq":"{repo}"}},'
         f'"path":{{"$match":"{model_folder}*"}}}})'
     )
     url = f"{api_base}/api/search/aql"
@@ -263,9 +298,11 @@ def find_model_folder(
     access_token: str,
     model_name: str,
     username: str | None = None,
+    repo: str | None = None,
 ) -> tuple[str | None, str]:
     """
-    Stage 1: Search camera-fw-generic-release-local for a folder matching the device model.
+    Stage 1: Search the model's Artifactory repo for a folder matching the device model.
+    The repo is resolved from ``model_name`` unless explicitly provided.
     Updates progress on a single line with spinner. Returns (repo_relative_path or None, error).
     """
     requests = _get_requests()
@@ -273,7 +310,7 @@ def find_model_folder(
         return None, "requests library required for Artifactory."
     api_base = _artifactory_api_base(base_url)
     headers = _auth_headers(access_token, username)
-    repo_path = ARTIFACTORY_REPO
+    repo_path = _coerce_repo(repo, model_name)
     model_upper = (model_name or "").strip().upper()
     # Artifactory folders are 2K only; FHD (2070/2083/2081/2073) -> use 2K folder (3070/3083/3081/3073)
     folder_to_find = _artifactory_folder_for_model(model_upper)
@@ -306,7 +343,7 @@ def find_model_folder(
             f"\r❌ Model folder not found for {model_name}\n\n"
             "Possible reasons:\n"
             "  - Model name doesn't match folder name in Artifactory\n"
-            "  - Model not in camera-fw-generic-release-local\n"
+            f"  - Model not in {repo_path}\n"
         )
         sys.stdout.flush()
         return None, f"Model folder not found for {model_name}"
@@ -323,10 +360,13 @@ def find_firmware_version_in_model(
     model_folder: str,
     version_filter: str,
     username: str | None = None,
+    repo: str | None = None,
+    model_name: str | None = None,
 ) -> tuple[list[tuple[str, list[str]]], FirmwareFileMeta, str]:
     """
     Stage 2: Search inside the model folder for firmware files matching version_filter.
     Tries fast AQL search first (one request); falls back to parallel recursive walk.
+    Repo is resolved from ``model_name`` (or ``model_folder``) when not provided.
     Returns (list of (repo_relative_folder_path, [filenames]), file_meta, error).
     file_meta maps (folder_path, filename) -> (size_bytes, modified) when AQL was used.
     """
@@ -335,8 +375,9 @@ def find_firmware_version_in_model(
         return [], {}, "requests library required for Artifactory."
     api_base = _artifactory_api_base(base_url)
     headers = _auth_headers(access_token, username)
+    active_repo = _coerce_repo(repo, model_name or model_folder)
     version_lower = (version_filter or "").strip().lower()
-    base_path = f"{ARTIFACTORY_REPO}/{model_folder}"
+    base_path = f"{active_repo}/{model_folder}"
 
     def write_progress(msg: str) -> None:
         sys.stdout.write(f"\r{msg}                    ")
@@ -344,7 +385,7 @@ def find_firmware_version_in_model(
 
     # Fast path: single AQL request
     aql_results, aql_meta, _aql_err = _search_firmware_aql(
-        api_base, model_folder, headers, version_filter
+        api_base, model_folder, headers, version_filter, active_repo
     )
     if aql_results is not None:
         if aql_results:
@@ -362,7 +403,10 @@ def find_firmware_version_in_model(
             return
         matching = [f for f in files if version_lower in f.lower()]
         if matching:
-            repo_relative = path.replace(f"{ARTIFACTORY_REPO}/", "", 1) if path.startswith(ARTIFACTORY_REPO + "/") else path
+            repo_prefix = f"{active_repo}/"
+            repo_relative = (
+                path.replace(repo_prefix, "", 1) if path.startswith(repo_prefix) else path
+            )
             with results_lock:
                 results.append((repo_relative, sorted(matching)))
         if not dirs:
@@ -402,10 +446,12 @@ def list_available_firmware(
     version_filter: str,
     model_name: str | list[str],
     username: str | None = None,
+    repo: str | None = None,
 ) -> tuple[bool, list[tuple[str, list[str]]], FirmwareFileMeta, str]:
     """
     Two-stage search: find model folder(s), then find firmware version in each.
     model_name can be a single model (e.g. "VMC3081") or a list for 2K + FHD (e.g. ["VMC3073", "VMC2073"]).
+    Repo is auto-selected per-model (camera vs gateway) unless ``repo`` is explicitly given.
     Returns (success, list of (repo_relative_folder_path, matching_filenames), file_meta, error).
     """
     models_to_search = [model_name] if isinstance(model_name, str) else list(model_name)
@@ -419,7 +465,10 @@ def list_available_firmware(
         mn = (m or "").strip()
         if not mn:
             continue
-        model_folder, err = find_model_folder(base_url, access_token, mn, username)
+        active_repo = _coerce_repo(repo, mn)
+        model_folder, err = find_model_folder(
+            base_url, access_token, mn, username, repo=active_repo
+        )
         if not model_folder:
             last_err = err or f"Model folder not found for {mn}."
             continue
@@ -427,7 +476,8 @@ def list_available_firmware(
             continue
         seen_folders.add(model_folder)
         results, meta_part, err2 = find_firmware_version_in_model(
-            base_url, access_token, model_folder, version_filter, username
+            base_url, access_token, model_folder, version_filter, username,
+            repo=active_repo, model_name=mn,
         )
         if err2:
             last_err = err2
@@ -460,10 +510,13 @@ def download_firmware(
     files_allowlist: list[str] | None = None,
     repo_folder_path: str | None = None,
     archive_dir: str | None = None,
+    repo: str | None = None,
 ) -> tuple[bool, str]:
     """
-    Download firmware from Artifactory. When archive_dir is set, .zip/.tar.gz files go there;
-    otherwise into binaries_dir. UpdateRules.json always goes to updaterules_dir.
+    Download firmware from Artifactory. Repo is auto-selected from ``model_name``
+    (camera vs gateway) when not explicitly provided. When archive_dir is set,
+    .zip/.tar.gz files go there; otherwise into binaries_dir. UpdateRules.json
+    always goes to updaterules_dir.
     byte_progress_callback: optional (bytes_downloaded_so_far, total_or_none) for the current file.
     Returns (success, error_message).
     """
@@ -476,14 +529,18 @@ def download_firmware(
     if archive_dir:
         os.makedirs(archive_dir, exist_ok=True)
 
+    active_repo = _coerce_repo(repo, model_name)
     if repo_folder_path:
         ok, file_names, _ = list_version_files(
-            base_url, access_token, model_name, version, username, repo_folder_path=repo_folder_path
+            base_url, access_token, model_name, version, username,
+            repo_folder_path=repo_folder_path, repo=active_repo,
         )
-        path_prefix = f"{ARTIFACTORY_REPO}/{repo_folder_path.strip('/')}"
+        path_prefix = f"{active_repo}/{repo_folder_path.strip('/')}"
     else:
-        ok, file_names, _ = list_version_files(base_url, access_token, model_name, version, username)
-        path_prefix = _artifact_path_for_version(model_name, version)
+        ok, file_names, _ = list_version_files(
+            base_url, access_token, model_name, version, username, repo=active_repo
+        )
+        path_prefix = _artifact_path_for_version(model_name, version, repo=active_repo)
     if not ok or not file_names:
         file_names = list(DEFAULT_BINARY_FILES) + list(DEFAULT_UPDATERULE_FILES)
     if files_allowlist:
@@ -541,14 +598,23 @@ def verify_access_token(base_url: str, token: str) -> tuple[bool, str]:
 
 
 def test_artifactory_access(
-    base_url: str, access_token: str, username: str | None = None
+    base_url: str,
+    access_token: str,
+    username: str | None = None,
+    repo: str | None = None,
+    model_name: str | None = None,
 ) -> tuple[bool, str]:
-    """List repo root to verify URL and credentials. Returns (ok, error_message)."""
+    """List repo root to verify URL and credentials. Returns (ok, error_message).
+
+    When ``repo`` is omitted, the repo is derived from ``model_name``; when both are
+    omitted, falls back to the camera firmware repo for backward compatibility.
+    """
     if not (access_token or "").strip():
         return False, "Access token cannot be empty."
     api_base = _artifactory_api_base(base_url)
     headers = _auth_headers(access_token, username)
-    ok, _dirs, _files, err = _list_artifactory_children(api_base, ARTIFACTORY_REPO, headers)
+    active_repo = _coerce_repo(repo, model_name)
+    ok, _dirs, _files, err = _list_artifactory_children(api_base, active_repo, headers)
     if not ok:
         return False, err or "Could not reach Artifactory."
     return True, ""

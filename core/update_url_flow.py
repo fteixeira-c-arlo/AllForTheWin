@@ -5,7 +5,10 @@ import os
 from typing import Any, Callable, NamedTuple
 from urllib.parse import quote
 
-from core.artifactory_client import ARTIFACTORY_REPO, list_available_firmware
+from core.artifactory_client import (
+    list_available_firmware,
+    resolve_repo_for_model,
+)
 from core.fw_setup_service import (
     DEFAULT_ARTIFACTORY_URL,
     compute_download_model,
@@ -58,7 +61,9 @@ class _ArtifactoryCreds(NamedTuple):
 
 def _cli_step_credentials(model: dict) -> _ArtifactoryCreds | str:
     """Load or prompt Artifactory credentials. Returns creds or error / cancel token string."""
-    _ = model
+    model_name = (model or {}).get("name") or ""
+    fw_models = (model or {}).get("fw_search_models") or ([model_name] if model_name else [])
+    repo_for_device = resolve_repo_for_model(fw_models[0] if fw_models else model_name)
     config = None
     try:
         config = load_config_file()
@@ -122,7 +127,7 @@ def _cli_step_credentials(model: dict) -> _ArtifactoryCreds | str:
     username = prompt_artifactory_username()
 
     if save_credentials:
-        save_config_file(username or "", token, base_url, ARTIFACTORY_REPO)
+        save_config_file(username or "", token, base_url, repo_for_device)
         console.print(f"\n[bold green]\u2713[/] [green]Configuration saved to {get_config_path()}[/]")
         console.print("[bold green]\u2713[/] [green]Credentials will be loaded automatically next time.[/]\n")
     else:
@@ -134,6 +139,7 @@ def _cli_step_credentials(model: dict) -> _ArtifactoryCreds | str:
 def _cli_step_pick_version_and_list(
     creds: _ArtifactoryCreds,
     fw_search_models: list[str],
+    repo: str | None = None,
 ) -> tuple[str, str | None] | str:
     """
     Prompt version filter, list Artifactory, prompt firmware selection.
@@ -145,7 +151,8 @@ def _cli_step_pick_version_and_list(
 
     console.print()
     ok, available, file_meta, err = list_available_firmware(
-        creds.base_url, creds.token, version_filter, fw_search_models, creds.username
+        creds.base_url, creds.token, version_filter, fw_search_models, creds.username,
+        repo=repo,
     )
     if not ok:
         show_error(err or "Failed to list firmware.")
@@ -189,14 +196,16 @@ def _cli_step_pick_env_and_confirm(
     download_model: str,
     version: str,
     server_folder: str,
+    repo: str | None = None,
 ) -> bool:
+    active_repo = (repo or "").strip() or resolve_repo_for_model(model_name)
     console.print("\n[bold]Configuration Summary:[/]")
     console.print(
         f"   Model: [cyan]{model_name}[/]"
         + (f" (Artifactory download key: {download_model})" if download_model != model_name else "")
     )
     console.print(f"   Firmware Version: [cyan]{version}[/]")
-    console.print(f"   Repo: [cyan]{ARTIFACTORY_REPO}[/]")
+    console.print(f"   Repo: [cyan]{active_repo}[/]")
     console.print(f"   Local server folder: [cyan]{server_folder}[/]")
     console.print(f"   Local Server URL: http://<this_pc>:{DEFAULT_PORT}/{quote(server_folder.strip(), safe='')}\n")
     return bool(prompt_confirm_proceed("Proceed with firmware download and server setup? (y/n):"))
@@ -211,6 +220,7 @@ def _cli_step_download_extract(
     download_model: str,
     version: str,
     selected_filename: str | None,
+    repo: str | None = None,
 ) -> str | None:
     ok_setup, msg_or_env_dir, binaries_base, _primary_bin, updaterules_dir, archive_dir = prepare_env_directories(
         root, env, model_name, fw_search_models=fw_search_models
@@ -241,6 +251,7 @@ def _cli_step_download_extract(
         selected_filename,
         progress_callback=_progress_callback,
         byte_progress_callback=None,
+        repo=repo or resolve_repo_for_model(model_name),
     )
     if not success:
         show_error(err or "Download failed.")
@@ -333,10 +344,11 @@ def run_update_url_flow(
 
     model_name = (model or {}).get("name") or "Camera"
     fw_search_models = (model or {}).get("fw_search_models") or [model_name]
+    active_repo = resolve_repo_for_model(fw_search_models[0] if fw_search_models else model_name)
 
     console.print("\n[bold cyan]\u21C4 FW Wizard (Artifactory + Local Server)[/]")
     console.print(
-        "This will download FW from [bold]camera-fw-generic-release-local[/], set up a local server, and configure the camera.\n"
+        f"This will download FW from [bold]{active_repo}[/], set up a local server, and configure the device.\n"
     )
 
     creds_out = _cli_step_credentials(model)
@@ -344,7 +356,7 @@ def run_update_url_flow(
         return creds_out
     creds = creds_out
 
-    pick_out = _cli_step_pick_version_and_list(creds, fw_search_models)
+    pick_out = _cli_step_pick_version_and_list(creds, fw_search_models, repo=active_repo)
     if isinstance(pick_out, str):
         return pick_out
     version, selected_filename = pick_out
@@ -377,11 +389,14 @@ def run_update_url_flow(
         return "cancelled"
     server_folder = env.strip()
 
-    if not _cli_step_pick_env_and_confirm(model_name, download_model, version, server_folder):
+    if not _cli_step_pick_env_and_confirm(
+        model_name, download_model, version, server_folder, repo=active_repo
+    ):
         return "cancelled"
 
     err_dl = _cli_step_download_extract(
-        creds, root, env, model_name, fw_search_models, download_model, version, selected_filename
+        creds, root, env, model_name, fw_search_models, download_model, version,
+        selected_filename, repo=active_repo,
     )
     if err_dl is not None:
         return err_dl
@@ -493,6 +508,168 @@ def run_use_local_fw_server(
     ):
         return "disconnected"
     return output or "Command failed."
+
+
+_OSPREY_VZDAEMON_ENV_PATH = "/tmp/media/nand/config/arlo/env/vzdaemon.env"
+_OSPREY_VZDAEMON_ENV_DIR = "/tmp/media/nand/config/arlo/env"
+
+
+def _shell_single_quote(value: str) -> str:
+    """Single-quote a string for POSIX shell (works on BusyBox ash on Osprey)."""
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _parse_current_vz_update_url(raw_output: str) -> str:
+    """Extract the value of vz_update_url from a grep output line (or empty)."""
+    if not raw_output:
+        return ""
+    for ln in raw_output.splitlines():
+        s = ln.strip()
+        if s.startswith("vz_update_url="):
+            return s[len("vz_update_url="):].strip()
+    return ""
+
+
+def run_osprey_set_update_url(
+    connection_execute: Callable[[str, list[str]], tuple[bool, str]],
+) -> str | None:
+    """
+    Prompt-driven change of vz_update_url on Osprey SmartHub (VMB4540).
+
+    Flow (mirrors the manual SSH procedure, minus the interactive vi):
+      1. ls /tmp/media/nand/config/arlo/env to confirm vzdaemon.env is present.
+      2. Read the current vz_update_url (for prefill).
+      3. Pop up a text input with the current value; user edits and confirms.
+      4. sed-replace vz_update_url in vzdaemon.env (the non-interactive equivalent
+         of `vi` + `:wq`).
+      5. check_configs --backup to persist the change to flash.
+      6. reboot.
+
+    Returns None on success, or an error/cancel token ("cancelled",
+    "disconnected", or an error string).
+    """
+    console.print("\n[bold cyan]BaseStation: set vz_update_url[/]")
+    console.print(
+        f"Edits [cyan]{_OSPREY_VZDAEMON_ENV_PATH}[/], saves with "
+        "[cyan]check_configs --backup[/], then reboots the hub.\n"
+    )
+
+    dir_q = _shell_single_quote(_OSPREY_VZDAEMON_ENV_DIR)
+    file_q = _shell_single_quote(_OSPREY_VZDAEMON_ENV_PATH)
+
+    console.print(f"[dim]$ ls -la {_OSPREY_VZDAEMON_ENV_DIR}[/]")
+    ok, ls_out = connection_execute(f"ls -la {dir_q}", [])
+    if not ok:
+        show_error(ls_out or "Failed to list env directory.")
+        if ls_out and (
+            "Device disconnected" in ls_out
+            or "Session expired" in ls_out
+            or "Login incorrect" in ls_out
+        ):
+            return "disconnected"
+        return ls_out or "Command failed."
+    if ls_out.strip():
+        console.print(ls_out.rstrip())
+    if "vzdaemon.env" not in (ls_out or ""):
+        show_error(
+            f"vzdaemon.env not found under {_OSPREY_VZDAEMON_ENV_DIR}.",
+            "This usually means the hub is not fully booted or the path changed.",
+        )
+        return f"vzdaemon.env not found under {_OSPREY_VZDAEMON_ENV_DIR}."
+
+    ok, cur_out = connection_execute(
+        f"grep '^vz_update_url=' {file_q} || true", []
+    )
+    if not ok and cur_out and (
+        "Device disconnected" in cur_out
+        or "Session expired" in cur_out
+    ):
+        return "disconnected"
+    current_url = _parse_current_vz_update_url(cur_out or "")
+    if current_url:
+        console.print(f"[dim]Current: vz_update_url={current_url}[/]")
+    else:
+        console.print("[dim]Current: vz_update_url is not set in vzdaemon.env.[/]")
+
+    from interface.prompts import prompt_line
+
+    new_url = prompt_line(
+        "New vz_update_url (leave empty to cancel):",
+        default=current_url,
+    )
+    new_url = (new_url or "").strip()
+    if not new_url:
+        console.print("Cancelled.\n")
+        return "cancelled"
+    if new_url == current_url:
+        console.print("[dim]New URL matches current value \u2014 nothing to change.[/]\n")
+        return "cancelled"
+
+    if any(ch in new_url for ch in ("\n", "\r", "\t")):
+        show_error("URL must not contain whitespace/newlines.")
+        return "cancelled"
+
+    console.print(f"[dim]New: vz_update_url={new_url}[/]")
+    console.print(
+        "[yellow]This will overwrite vz_update_url in vzdaemon.env and reboot the hub.[/]\n"
+    )
+    if not prompt_confirm_proceed("Proceed? (y/n):"):
+        console.print("Cancelled.\n")
+        return "cancelled"
+
+    url_q = _shell_single_quote(new_url)
+    set_shell = (
+        f"FILE={file_q}; "
+        f"[ -f \"$FILE\" ] || {{ echo \"ERR: $FILE not found\" >&2; exit 1; }}; "
+        f"if grep -q '^vz_update_url=' \"$FILE\"; then "
+        f"sed -i \"s|^vz_update_url=.*|vz_update_url={new_url}|\" \"$FILE\"; "
+        f"else printf '\\nvz_update_url=%s\\n' {url_q} >> \"$FILE\"; fi "
+        f"&& grep '^vz_update_url=' \"$FILE\""
+    )
+
+    console.print("[bold]Writing vzdaemon.env (vi + :wq equivalent)...[/]")
+    ok, out = connection_execute(set_shell, [])
+    if not ok:
+        show_error(out or "Failed to update vzdaemon.env.")
+        if out and (
+            "Device disconnected" in out
+            or "Session expired" in out
+            or "Login incorrect" in out
+        ):
+            return "disconnected"
+        return out or "Command failed."
+    if out.strip():
+        console.print(out.rstrip())
+
+    console.print("[bold]Persisting with check_configs --backup...[/]")
+    ok, out = connection_execute("check_configs --backup", [])
+    if not ok:
+        show_error(out or "check_configs --backup failed.")
+        if out and (
+            "Device disconnected" in out
+            or "Session expired" in out
+        ):
+            return "disconnected"
+        return out or "Command failed."
+    if out.strip():
+        console.print(out.rstrip())
+    show_success("vz_update_url updated and saved.\n")
+
+    console.print("[bold]Rebooting hub...[/]")
+    ok, out = connection_execute("reboot", [])
+    if not ok:
+        # reboot typically drops the SSH session; treat a disconnect as success.
+        if out and (
+            "Device disconnected" in out
+            or "Session expired" in out
+            or "Connection closed" in out
+        ):
+            show_success("Reboot requested. Hub will be back online shortly.\n")
+            return None
+        show_error(out or "reboot command failed.")
+        return out or "Command failed."
+    show_success("Reboot requested. Hub will be back online shortly.\n")
+    return None
 
 
 def run_stop_server() -> str:

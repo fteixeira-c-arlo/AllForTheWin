@@ -150,6 +150,11 @@ SYSTEM_COMMANDS = [
     {"name": "config_update", "description": "Update saved Artifactory credentials", "command_profiles": None},
     {"name": "config_delete", "description": "Delete saved Artifactory credentials", "command_profiles": None},
     {
+        "name": "config_bs_update_url",
+        "description": "Osprey SmartHub: point vz_update_url at the local FW server, save configs, reboot",
+        "command_profiles": ["osprey_smarthub"],
+    },
+    {
         "name": "log tail",
         "description": "Stream device system log live; use log tail stop to stop",
         "command_profiles": ["e3_wired", "linux_kealory"],
@@ -926,17 +931,42 @@ def parse_and_execute(
 
     if cmd == "config_show":
         from core.config_commands import run_config_show
-        run_config_show()
+        run_config_show(
+            model_name=model_name,
+            connection_type=connection_type,
+            connection_execute=connection_execute,
+        )
         return "continue", None
 
     if cmd == "config_update":
         from core.config_commands import run_config_update
-        run_config_update()
+        run_config_update(model_name=model_name)
         return "continue", None
 
     if cmd == "config_delete":
         from core.config_commands import run_config_delete
         run_config_delete()
+        return "continue", None
+
+    if cmd == "config_bs_update_url":
+        if not connection_execute:
+            show_error("Connect to the hub first to set the update URL.")
+            return "continue", None
+        try:
+            from core.update_url_flow import run_osprey_set_update_url
+
+            err = run_osprey_set_update_url(connection_execute)
+        except (KeyboardInterrupt, EOFError):
+            return "continue", None
+        except Exception as e:
+            show_error("config_bs_update_url failed.", str(e))
+            return "continue", None
+        if err is None:
+            return "continue", None
+        if err == "disconnected":
+            return "disconnected", None
+        if err == "cancelled":
+            return "continue", None
         return "continue", None
 
     _fw_wizard_result = try_handle_fw_wizard_command(cmd, connection_execute, model)

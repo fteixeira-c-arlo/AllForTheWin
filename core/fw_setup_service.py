@@ -738,14 +738,16 @@ def search_firmware_archives(
     version_filter: str,
     fw_search_models: list[str],
     username: str | None = None,
+    repo: str | None = None,
 ) -> tuple[bool, list[tuple[str, str, int | None, str | None]], str]:
     """
     Query Artifactory and return flat rows (repo_folder_path, filename, size, modified).
     size/modified are set when the AQL fast path was used; otherwise None.
     version_filter may be empty (matches broadly in client-side filter).
+    Repo is resolved per-model (camera vs gateway) unless explicitly provided.
     """
     ok, available, file_meta, err = list_available_firmware(
-        base_url, token, version_filter, fw_search_models, username
+        base_url, token, version_filter, fw_search_models, username, repo=repo
     )
     if not ok:
         return False, [], err or "Search failed."
@@ -765,8 +767,14 @@ def download_firmware_to_layout(
     selected_filename: str | None,
     progress_callback: Callable[[str, int, int], None] | None = None,
     byte_progress_callback: Callable[[int, int | None], None] | None = None,
+    repo: str | None = None,
 ) -> tuple[bool, str]:
-    """Download selected archive + sidecar files into archive/updaterules/binaries staging."""
+    """Download selected archive + sidecar files into archive/updaterules/binaries staging.
+
+    ``repo`` selects the Artifactory repository (camera vs gateway). When omitted,
+    the repo is inferred from ``download_model``; pass it explicitly when
+    ``download_model`` is a version/folder name rather than a model ID.
+    """
     return download_firmware(
         token,
         download_model,
@@ -780,6 +788,7 @@ def download_firmware_to_layout(
         files_allowlist=[selected_filename] if selected_filename else None,
         repo_folder_path=version if selected_filename else None,
         archive_dir=archive_dir,
+        repo=repo,
     )
 
 

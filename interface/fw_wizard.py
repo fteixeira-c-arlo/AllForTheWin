@@ -33,7 +33,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.artifactory_client import ARTIFACTORY_REPO, test_artifactory_access
+from core.artifactory_client import (
+    resolve_repo_for_model,
+    test_artifactory_access,
+)
 from core.local_server import (
     DEFAULT_PORT,
     check_server_status,
@@ -184,6 +187,7 @@ class _SearchThread(QThread):
         username: str | None,
         version_filter: str,
         fw_search_models: list[str],
+        repo: str | None = None,
     ) -> None:
         super().__init__()
         self._base_url = base_url
@@ -191,6 +195,7 @@ class _SearchThread(QThread):
         self._username = username
         self._version_filter = version_filter
         self._fw_search_models = fw_search_models
+        self._repo = repo
 
     def run(self) -> None:
         ok, flat, err = search_firmware_archives(
@@ -199,6 +204,7 @@ class _SearchThread(QThread):
             self._version_filter,
             self._fw_search_models,
             self._username,
+            repo=self._repo,
         )
         self.finished_search.emit(ok, flat, err)
 
@@ -223,6 +229,7 @@ class _DownloadThread(QThread):
         archive_path: str,
         chosen_binaries_dir: str,
         rules_dir: str,
+        repo: str | None = None,
     ) -> None:
         super().__init__()
         self._token = token
@@ -237,6 +244,7 @@ class _DownloadThread(QThread):
         self._archive_path = archive_path
         self._chosen_binaries_dir = chosen_binaries_dir
         self._rules_dir = rules_dir
+        self._repo = repo
 
     def run(self) -> None:
         def _per_file(name: str, idx: int, total: int) -> None:
@@ -258,6 +266,7 @@ class _DownloadThread(QThread):
             self._selected_filename,
             progress_callback=_per_file,
             byte_progress_callback=_bytes,
+            repo=self._repo,
         )
         if not ok:
             self.failed.emit(err or "Download failed.")
@@ -546,13 +555,13 @@ class FwWizard(QDialog):
         h = QLabel("Artifactory credentials")
         h.setStyleSheet(_fw_qlabel_ss("font-size: 15px; font-weight: 500;"))
         lay.addWidget(h)
-        sub = QLabel(
-            f"Use your Artifactory base URL and API token. Repo: {ARTIFACTORY_REPO}. "
+        self._lbl_cred_repo = QLabel(
+            f"Use your Artifactory base URL and API token. Repo: {self._current_artifactory_repo()}. "
             "VPN may be required."
         )
-        sub.setStyleSheet(_fw_qlabel_ss(f"color: {_MUTED}; font-size: 12px;"))
-        sub.setWordWrap(True)
-        lay.addWidget(sub)
+        self._lbl_cred_repo.setStyleSheet(_fw_qlabel_ss(f"color: {_MUTED}; font-size: 12px;"))
+        self._lbl_cred_repo.setWordWrap(True)
+        lay.addWidget(self._lbl_cred_repo)
 
         self._fld_url = QLineEdit()
         self._fld_url.setPlaceholderText("https://artifactory.arlocloud.com")
@@ -1153,12 +1162,37 @@ class FwWizard(QDialog):
         if self._current_step == 2:
             self._sync_nav()
         self._refresh_vmc_binaries_label()
+        self._refresh_credentials_repo_label()
+
+    def _refresh_credentials_repo_label(self) -> None:
+        """Sync the credentials page sub-label with the active repo for the current model."""
+        lbl = getattr(self, "_lbl_cred_repo", None)
+        if lbl is None:
+            return
+        lbl.setText(
+            f"Use your Artifactory base URL and API token. Repo: "
+            f"{self._current_artifactory_repo()}. VPN may be required."
+        )
 
     def _vmc_binaries_folder_name(self) -> str:
         n = (self._primary_model_name or "").strip().upper()
         if re.match(r"^VMC\d{4}$", n):
             return n
         return (self._primary_model_name or "Camera").strip() or "Camera"
+
+    def _current_artifactory_repo(self) -> str:
+        """Return the Artifactory repo for the currently selected device.
+
+        Cameras use ``camera-fw-generic-release-local`` and basestations use
+        ``gateway-fw-generic-release-local``; the decision is model-driven so
+        the wizard picks the right source as we add more device kinds.
+        """
+        candidate = ""
+        if self._fw_search_models:
+            candidate = (self._fw_search_models[0] or "").strip()
+        if not candidate:
+            candidate = (self._primary_model_name or "").strip()
+        return resolve_repo_for_model(candidate)
 
     def _refresh_vmc_binaries_label(self) -> None:
         v = self._vmc_binaries_folder_name()
@@ -1512,7 +1546,7 @@ class FwWizard(QDialog):
         self._username = u or None
         if self._chk_save_creds.isChecked():
             try:
-                save_config_file(u, self._token, self._base_url, ARTIFACTORY_REPO)
+                save_config_file(u, self._token, self._base_url, self._current_artifactory_repo())
                 update_last_used()
             except OSError as e:
                 QMessageBox.warning(self, "FW Wizard", f"Could not save credentials: {e}")
@@ -1919,14 +1953,15 @@ class FwWizard(QDialog):
         self._cred_status.setText("Testing…")
         self._cred_status.setStyleSheet(_fw_qlabel_ss(f"color: {_MUTED};"))
 
-        ok, err = test_artifactory_access(url, token, user)
+        active_repo = self._current_artifactory_repo()
+        ok, err = test_artifactory_access(url, token, user, repo=active_repo)
         self._btn_test.setEnabled(True)
         if ok:
             self._cred_status.setText("Connection OK (optional — Next does not require this).")
             self._cred_status.setStyleSheet(_fw_qlabel_ss(f"color: {_OK};"))
             if self._chk_save_creds.isChecked():
                 try:
-                    save_config_file(user or "", token, url, ARTIFACTORY_REPO)
+                    save_config_file(user or "", token, url, active_repo)
                     update_last_used()
                     self._cred_status.setText("Connection OK. Credentials saved.")
                 except OSError as e:
@@ -1991,7 +2026,8 @@ class FwWizard(QDialog):
                 )
                 self._search_status.setStyleSheet(_fw_qlabel_ss(f"color: {_MUTED};"))
                 self._search_thread = _SearchThread(
-                    self._base_url, self._token, self._username, vf_b, self._fw_search_models
+                    self._base_url, self._token, self._username, vf_b,
+                    self._fw_search_models, repo=self._current_artifactory_repo(),
                 )
                 self._search_thread.finished_search.connect(self._on_search_done)
                 self._search_thread.start()
@@ -2008,7 +2044,8 @@ class FwWizard(QDialog):
             )
             self._search_status.setStyleSheet(_fw_qlabel_ss(f"color: {_MUTED};"))
             self._search_thread = _SearchThread(
-                self._base_url, self._token, self._username, vf, self._fw_search_models
+                self._base_url, self._token, self._username, vf,
+                self._fw_search_models, repo=self._current_artifactory_repo(),
             )
             self._search_thread.finished_search.connect(self._on_search_done)
             self._search_thread.start()
@@ -2039,7 +2076,8 @@ class FwWizard(QDialog):
         )
         self._search_status.setStyleSheet(_fw_qlabel_ss(f"color: {_MUTED};"))
         self._search_thread = _SearchThread(
-            self._base_url, self._token, self._username, vf, self._fw_search_models
+            self._base_url, self._token, self._username, vf,
+            self._fw_search_models, repo=self._current_artifactory_repo(),
         )
         self._search_thread.finished_search.connect(self._on_search_done)
         self._search_thread.start()
@@ -2106,7 +2144,8 @@ class FwWizard(QDialog):
                     )
                     self._search_status.setStyleSheet(_fw_qlabel_ss(f"color: {_MUTED};"))
                 self._search_thread = _SearchThread(
-                    self._base_url, self._token, self._username, vf_b, self._fw_search_models
+                    self._base_url, self._token, self._username, vf_b,
+                    self._fw_search_models, repo=self._current_artifactory_repo(),
                 )
                 self._search_thread.finished_search.connect(self._on_search_done)
                 self._search_thread.start()
@@ -2464,6 +2503,7 @@ class FwWizard(QDialog):
             archive_path,
             chosen_binaries_dir,
             rules_dir,
+            repo=self._current_artifactory_repo(),
         )
         self._download_thread.byte_progress.connect(self._on_dl_bytes)
         self._download_thread.status_text.connect(self._on_dl_status)
@@ -2539,6 +2579,7 @@ class FwWizard(QDialog):
             archive_path,
             chosen_binaries_dir,
             rules_dir,
+            repo=self._current_artifactory_repo(),
         )
         self._download_thread.byte_progress.connect(on_bytes)
         st_lbl = self._dl_status_a if which == "a" else self._dl_status_b

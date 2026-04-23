@@ -1,0 +1,6 @@
+---
+description: 
+alwaysApply: true
+---
+
+After every code change or iteration, you must run 'powershell -ExecutionPolicy Bypass -File .\build_installer.ps1' in the terminal and verify the output before proceeding.

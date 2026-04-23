@@ -175,6 +175,28 @@
       "manual_ota"
     ]
   },
+  "osprey_smarthub": {
+    "label": "Osprey SmartHub (VMB3500/VMB4500/VMB4540)",
+    "commands_file": "osprey_smarthub_commands.json",
+    "notes": "OpenWrt + QCA4531 base station (Pro3 SmartHub / Osprey). Uses vzdaemon/vzcmd, fwupgrade, nvram, iw/iwinfo.",
+    "abstract_commands": [
+      "reboot",
+      "get_firmware_version",
+      "get_model_id",
+      "get_serial_number",
+      "get_device_info",
+      "factory_reset",
+      "manual_ota",
+      "update url",
+      "get_update_url",
+      "tail_logs",
+      "get_wifi_status",
+      "ping",
+      "get_kv_item",
+      "set_kv_item",
+      "stop_arlo_service"
+    ]
+  },
   "none": {
     "label": "No device command catalog",
     "commands_file": null,

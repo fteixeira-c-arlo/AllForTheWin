@@ -13,7 +13,8 @@ class DeviceRegistryEntry(TypedDict, total=False):
     model_ids: list[str]
     codename: str
     display_name: str
-    platform: str  # amebapro2 | gen5 | linux
+    platform: str  # amebapro2 | gen5 | linux | openwrt_qca
+    device_kind: str  # "camera" (default) | "basestation"
     connection_types: list[str]  # uart, ssh, adb — priority order
     adb_supported: bool
     uart_baudrate: int
@@ -21,6 +22,12 @@ class DeviceRegistryEntry(TypedDict, total=False):
     adb_auth_password: str
     notes: str
     command_profile: str
+
+
+# Platforms that ship as base stations / gateways rather than cameras.
+_BASESTATION_PLATFORMS: set[str] = {"openwrt_qca"}
+# Model-id prefixes used by Arlo basestations / gateways (VMB = Video Management Base).
+_BASESTATION_MODEL_PREFIXES: tuple[str, ...] = ("VMB",)
 
 
 DEVICE_REGISTRY: list[DeviceRegistryEntry] = [
@@ -114,6 +121,19 @@ DEVICE_REGISTRY: list[DeviceRegistryEntry] = [
         "enable_debug_method": "sync_button_6x",
         "command_profile": "parrot",
     },
+    {
+        "model_ids": ["VMB4540"],
+        "codename": "osprey",
+        "display_name": "Arlo Pro3 SmartHub (VMB4540 Osprey)",
+        "platform": "openwrt_qca",
+        "device_kind": "basestation",
+        "connection_types": ["ssh", "uart"],
+        "adb_supported": False,
+        "uart_baudrate": 115200,
+        "enable_debug_method": "sync_button_11s",
+        "notes": "OpenWrt + QCA4531 base station. SSH root password: 'ngbase' (dev/qa) or 'NX9PvLX2L3YvhjBjVLi68yBA8' (staging/ftrial/prod). Long-press sync button 11s to enable SSH on production firmware.",
+        "command_profile": "osprey_smarthub",
+    },
 ]
 
 
@@ -143,6 +163,38 @@ def get_registry_model_ids_flat() -> list[str]:
     return out
 
 
+def get_device_kind(model_id: str | None) -> str:
+    """
+    Classify a model ID as ``"camera"`` or ``"basestation"``.
+
+    Resolution order:
+      1. ``device_kind`` field on the matching registry entry (if set).
+      2. Platform-based inference (``openwrt_qca`` etc. → basestation).
+      3. Model-ID prefix heuristic (``VMB*`` → basestation).
+      4. Fallback to ``"camera"``.
+
+    Used by the firmware pipeline to pick the correct Artifactory repo
+    (``camera-fw-generic-release-local`` vs ``gateway-fw-generic-release-local``).
+    """
+    key = _norm_model(model_id)
+    entry = lookup_registry_by_model_id(key)
+    if entry:
+        kind = (entry.get("device_kind") or "").strip().lower()
+        if kind in ("camera", "basestation"):
+            return kind
+        platform = (entry.get("platform") or "").strip().lower()
+        if platform in _BASESTATION_PLATFORMS:
+            return "basestation"
+    if key and any(key.startswith(prefix) for prefix in _BASESTATION_MODEL_PREFIXES):
+        return "basestation"
+    return "camera"
+
+
+def is_basestation_model(model_id: str | None) -> bool:
+    """Return True when ``model_id`` is classified as a basestation / gateway."""
+    return get_device_kind(model_id) == "basestation"
+
+
 def registry_entry_to_camera_group(entry: DeviceRegistryEntry) -> dict[str, Any]:
     """Build a CAMERA_MODEL_GROUPS-style dict for the connect UI."""
     mids = entry.get("model_ids") or []
@@ -168,5 +220,6 @@ def registry_entry_to_camera_group(entry: DeviceRegistryEntry) -> dict[str, Any]
         "adb_supported": bool(entry.get("adb_supported")),
         "default_uart_baud": baud,
         "enable_debug_method": entry.get("enable_debug_method"),
+        "device_kind": get_device_kind(primary),
         "registry_entry": dict(entry),
     }

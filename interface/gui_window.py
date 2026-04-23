@@ -1227,7 +1227,7 @@ def _extract_camera_update_url_line(raw: str) -> str:
 
 def _normalize_fw_shell_command(command: str, args: list[str]) -> tuple[str, list[str]]:
     """
-    Build a shell-safe command line for the camera. Unquoted URLs break sh when they contain
+    Build a shell-safe command line for the device. Unquoted URLs break sh when they contain
     &, ;, (), etc. ADB/SSH/UART all send one line interpreted by the device shell.
     """
     c = (command or "").strip()
@@ -1338,7 +1338,7 @@ class SessionWorker(QObject):
             else:
                 t = (text or "").strip().replace("\r\n", "\n")
                 self.append_log.emit(
-                    f"Could not read update_url from camera: {t[:300]}{'…' if len(t) > 300 else ''}\n"
+                    f"Could not read update_url from device: {t[:300]}{'…' if len(t) > 300 else ''}\n"
                 )
         finally:
             self._io_busy = False
@@ -1629,7 +1629,7 @@ class SessionWorker(QObject):
                 if is_parrot:
                     self.append_log.emit(
                         "[Parrot] Probing device (build_info, update_url, KV) — each step can take "
-                        "several seconds while the UART is busy. Buffered camera text is appended on the "
+                        "several seconds while the UART is busy. Buffered device text is appended on the "
                         "heartbeat when the link is idle (no command running).\n"
                     )
 
@@ -1829,7 +1829,7 @@ class SessionWorker(QObject):
             if action == "exit":
                 self._do_disconnect(None)
             elif action == "disconnected":
-                self._do_disconnect("The camera disconnected from the PC.")
+                self._do_disconnect("The device disconnected from the PC.")
             elif message and (
                 "Session expired" in _strip_rich_markup(str(message))
                 or "Login incorrect" in _strip_rich_markup(str(message))
@@ -2292,7 +2292,7 @@ class MainWindow(QMainWindow):
         act = QAction("FW &folder switcher", self)
         act.setCheckable(True)
         act.setStatusTip(
-            "Show folders on the local firmware server and switch the camera update_url in one click."
+            "Show folders on the local firmware server and switch the device update_url in one click."
         )
         act.toggled.connect(self._fw_switch_dock.setVisible)
         self._fw_switch_dock.visibilityChanged.connect(act.setChecked)
@@ -2316,7 +2316,7 @@ class MainWindow(QMainWindow):
         self._action_local_server = QAction("Local &Server", self)
         self._action_local_server.setCheckable(True)
         self._action_local_server.setStatusTip(
-            "Firmware HTTP server status, folders, and switching update_url on the camera."
+            "Firmware HTTP server status, folders, and switching update_url on the device."
         )
         self._action_local_server.toggled.connect(self._local_server_dock.setVisible)
         mt = getattr(self, "_menu_tools", None)
@@ -2413,7 +2413,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "FW Wizard",
-                "Connect to a camera first (use Connect on the toolbar), then choose Tools → FW Wizard.",
+                "Connect to a device first (use Connect on the toolbar), then choose Tools → FW Wizard.",
             )
             return
         QMessageBox.information(
@@ -2460,7 +2460,7 @@ class MainWindow(QMainWindow):
             self._worker.refresh_update_url_readback.emit()
 
     def _on_fw_wizard_server_started(self, url: str) -> None:
-        self._on_append_log(f"FW Wizard: camera update URL (local server): {url}\n")
+        self._on_append_log(f"FW Wizard: device update URL (local server): {url}\n")
 
     def _on_fw_wizard_update_sent(self, ok: bool) -> None:
         if ok:
@@ -2476,10 +2476,10 @@ class MainWindow(QMainWindow):
             self,
             f"About {APP_NAME}",
             f"<h3>{APP_NAME}</h3>"
-            "<p>Connect to cameras over UART, ADB (USB), or SSH. "
+            "<p>Connect to devices over UART, ADB (USB), or SSH. "
             "Commands are loaded after the device is detected.</p>"
             "<p><b>Tools → FW Wizard</b> opens the firmware wizard "
-            "(Artifactory, local server, camera <code>update_url</code>). "
+            "(Artifactory, local server, device <code>update_url</code>). "
             "Typing <code>fw_wizard</code> in the command line runs the same flow with text prompts.</p>",
         )
 
@@ -2658,7 +2658,7 @@ class MainWindow(QMainWindow):
             "▣",
             ARLO_ACCENT_COLOR,
             "Local Server",
-            "Manage firmware folders and serve to cameras.",
+            "Manage firmware folders and serve to devices.",
             parent=root,
         )
         ls_card.clicked.connect(self._on_open_local_server_tool)
@@ -3515,7 +3515,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Disconnected",
-                "The camera disconnected from the PC. Use Connect to try again.",
+                "The device disconnected from the PC. Use Connect to try again.",
             )
             self._disconnect()
 
@@ -3632,7 +3632,7 @@ class MainWindow(QMainWindow):
         preferred_method: str | None = None,
     ) -> None:
         dlg = QDialog(self)
-        dlg.setWindowTitle("Connect to camera")
+        dlg.setWindowTitle("Connect to device")
         outer = QVBoxLayout(dlg)
         connect_result: dict[str, Any] = {}
 
@@ -3645,7 +3645,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
 
         device_combo = QComboBox()
-        device_combo.setPlaceholderText("Select a camera…")
+        device_combo.setPlaceholderText("Select a device…")
         for m in models:
             device_combo.addItem(format_connect_dialog_device_label(m), m)
 
@@ -3805,7 +3805,7 @@ class MainWindow(QMainWindow):
             method.clear()
             m = device_combo.currentData()
             if not isinstance(m, dict):
-                method.addItem("Select a camera above", "")
+                method.addItem("Select a device above", "")
                 method.setEnabled(False)
                 return
             method.setEnabled(True)
@@ -3872,11 +3872,11 @@ class MainWindow(QMainWindow):
         method.currentIndexChanged.connect(update_visible)
         update_visible(method.currentIndex())
 
-        device_lbl = QLabel("Camera model")
+        device_lbl = QLabel("Device model")
         device_lbl.setStyleSheet("color: #e8eef4; font-size: 12px; font-weight: 600;")
         layout.addWidget(device_lbl)
         device_pick_hint = QLabel(
-            "Choose your camera from the list below. Connection options (UART, ADB, SSH) appear "
+            "Choose your device from the list below. Connection options (UART, ADB, SSH) appear "
             "after you select a model."
         )
         device_pick_hint.setWordWrap(True)
@@ -4032,7 +4032,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(
                     self,
                     "Connect",
-                    "Select a camera model from the dropdown first.",
+                    "Select a device model from the dropdown first.",
                 )
                 return
             if key == "UART":
