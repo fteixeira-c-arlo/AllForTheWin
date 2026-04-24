@@ -613,7 +613,7 @@ def _display_command_label(name: str) -> str:
 def _tool_subgroup_for_system_name(name: str) -> str | None:
     disp = _display_command_label(name).lower()
     raw = name.strip().lower()
-    if disp in ("fw local", "fw wizard", "server stop", "server status"):
+    if disp in ("fw local", "fw wizard", "server stop", "server status", "change update url"):
         return "FIRMWARE"
     if disp in ("log tail", "log tail stop", "log parse", "log parse stop", "log export"):
         return "LOGS"

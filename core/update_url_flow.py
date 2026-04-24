@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Callable, NamedTuple
 from urllib.parse import quote
 
@@ -513,6 +514,13 @@ def run_use_local_fw_server(
 _OSPREY_VZDAEMON_ENV_PATH = "/tmp/media/nand/config/arlo/env/vzdaemon.env"
 _OSPREY_VZDAEMON_ENV_DIR = "/tmp/media/nand/config/arlo/env"
 
+# Sentinels we echo from the remote shell so Python can tell real success / failure
+# apart regardless of exit code. Using unique strings avoids any risk of output
+# containing them naturally.
+_ARLO_WRITE_OK = "__ARLO_WRITE_OK__"
+_ARLO_WRITE_FAILED = "__ARLO_WRITE_FAILED__"
+_ARLO_NO_FILE = "__ARLO_NO_FILE__"
+
 
 def _shell_single_quote(value: str) -> str:
     """Single-quote a string for POSIX shell (works on BusyBox ash on Osprey)."""
@@ -520,156 +528,318 @@ def _shell_single_quote(value: str) -> str:
 
 
 def _parse_current_vz_update_url(raw_output: str) -> str:
-    """Extract the value of vz_update_url from a grep output line (or empty)."""
+    """Extract the value of ``vz_update_url`` from a grep output (or empty).
+
+    The real file on the Osprey SmartHub stores the key as a shell export line:
+
+        export vz_update_url='https://arloupdates.arlo.com/arlo/fw/fw_deployed/qa'
+
+    We also tolerate the legacy/unquoted form ``vz_update_url=VALUE`` and an
+    optional double-quoted form just in case. The returned value is always
+    unquoted (the surrounding quotes, if any, are stripped).
+    """
     if not raw_output:
         return ""
     for ln in raw_output.splitlines():
         s = ln.strip()
-        if s.startswith("vz_update_url="):
-            return s[len("vz_update_url="):].strip()
+        # Strip an optional leading "export "
+        if s.startswith("export "):
+            s = s[len("export "):].lstrip()
+        if not s.startswith("vz_update_url="):
+            continue
+        value = s[len("vz_update_url="):].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        return value.strip()
     return ""
+
+
+# Characters allowed inside a vz_update_url we embed into a shell command.
+# Intentionally strict: this set contains ONLY RFC-3986 reserved/unreserved
+# chars that are also shell-harmless when single-quoted. No ; & $ ` " ' \ | < >
+# ( ) { } [ ] * ! space / tab / newline. Covers every realistic update URL we
+# care about: http[s]://host[:port]/env[?key=val[&...]][#frag].
+_URL_SAFE_RE = re.compile(r"^[A-Za-z0-9:/?=&.,_~%+#@\-]+$")
+
+
+def _validate_update_url(url: str) -> str | None:
+    """Return an error message if the URL is unsafe to embed in our shell; else None.
+
+    ``&`` is allowed because we only ever expand the URL inside double quotes
+    (for ``sed``) or single quotes (for ``grep``/``printf``) — in both of
+    those contexts ``&`` is a literal character, not a shell metacharacter.
+    """
+    if not url:
+        return "URL must not be empty."
+    if len(url) > 512:
+        return "URL is too long (>512 chars)."
+    if not _URL_SAFE_RE.match(url):
+        return (
+            "URL contains unsupported characters. Allowed: letters, digits, "
+            "and : / ? = & . , _ ~ % + # @ -"
+        )
+    return None
+
+
+def _transport_lost_message(output: str) -> bool:
+    o = output or ""
+    return (
+        "Device disconnected" in o
+        or "Session expired" in o
+        or "Login incorrect" in o
+        or "Connection closed" in o
+    )
 
 
 def run_osprey_set_update_url(
     connection_execute: Callable[[str, list[str]], tuple[bool, str]],
 ) -> str | None:
     """
-    Prompt-driven change of vz_update_url on Osprey SmartHub (VMB4540).
+    Implements the "Change Update URL" tool for Osprey SmartHub (VMB4540).
 
-    Flow (mirrors the manual SSH procedure, minus the interactive vi):
-      1. ls /tmp/media/nand/config/arlo/env to confirm vzdaemon.env is present.
-      2. Read the current vz_update_url (for prefill).
-      3. Pop up a text input with the current value; user edits and confirms.
-      4. sed-replace vz_update_url in vzdaemon.env (the non-interactive equivalent
-         of `vi` + `:wq`).
-      5. check_configs --backup to persist the change to flash.
-      6. reboot.
+    Mirrors the manual SSH procedure the user does by hand, but replaces the
+    interactive ``vi`` + ``:%s|...|`` + ``:wq`` dance with a headless
+    ``sed -i`` that makes the SAME on-disk change.  ``vi`` needs a PTY (which
+    paramiko's ``exec_command`` does not give us); ``sed -i`` on BusyBox
+    produces a byte-identical result and is much more reliable.
 
-    Returns None on success, or an error/cancel token ("cancelled",
-    "disconnected", or an error string).
+    Steps (matches the spec 1:1; steps 5–7 collapse into a sed that has the
+    same effect as vi + :%s|...| + :wq):
+
+      1. cd / stat ``/tmp/media/nand/config/arlo/env/vzdaemon.env``.
+      2. ``ls``; if vzdaemon.env missing, show the File-Not-Found alert and
+         abort.
+      3. ``grep "vz_update_url" vzdaemon.env`` and parse the value between the
+         single quotes for the popup prefill (falling back to empty).
+      4. Popup for the new URL (prefilled from step 3).
+      5–7. ``sed -i`` replaces (or inserts) the canonical
+         ``export vz_update_url='<NEW_URL>'`` line, then we verify via
+         ``grep -Fxq`` that the file actually contains that exact line.
+      8. ``check_configs --backup`` to persist the change to flash.
+      9. Confirm popup; on yes, ``reboot``.
+
+    Returns None on real success, or one of "cancelled" / "disconnected" /
+    error message on failure.  ``check_configs`` and ``reboot`` are ONLY
+    reached when the readback verification succeeded.
     """
-    console.print("\n[bold cyan]BaseStation: set vz_update_url[/]")
-    console.print(
-        f"Edits [cyan]{_OSPREY_VZDAEMON_ENV_PATH}[/], saves with "
-        "[cyan]check_configs --backup[/], then reboots the hub.\n"
-    )
-
-    dir_q = _shell_single_quote(_OSPREY_VZDAEMON_ENV_DIR)
-    file_q = _shell_single_quote(_OSPREY_VZDAEMON_ENV_PATH)
-
-    console.print(f"[dim]$ ls -la {_OSPREY_VZDAEMON_ENV_DIR}[/]")
-    ok, ls_out = connection_execute(f"ls -la {dir_q}", [])
-    if not ok:
-        show_error(ls_out or "Failed to list env directory.")
-        if ls_out and (
-            "Device disconnected" in ls_out
-            or "Session expired" in ls_out
-            or "Login incorrect" in ls_out
-        ):
-            return "disconnected"
-        return ls_out or "Command failed."
-    if ls_out.strip():
-        console.print(ls_out.rstrip())
-    if "vzdaemon.env" not in (ls_out or ""):
-        show_error(
-            f"vzdaemon.env not found under {_OSPREY_VZDAEMON_ENV_DIR}.",
-            "This usually means the hub is not fully booted or the path changed.",
-        )
-        return f"vzdaemon.env not found under {_OSPREY_VZDAEMON_ENV_DIR}."
-
-    ok, cur_out = connection_execute(
-        f"grep '^vz_update_url=' {file_q} || true", []
-    )
-    if not ok and cur_out and (
-        "Device disconnected" in cur_out
-        or "Session expired" in cur_out
-    ):
-        return "disconnected"
-    current_url = _parse_current_vz_update_url(cur_out or "")
-    if current_url:
-        console.print(f"[dim]Current: vz_update_url={current_url}[/]")
-    else:
-        console.print("[dim]Current: vz_update_url is not set in vzdaemon.env.[/]")
-
     from interface.prompts import prompt_line
 
-    new_url = prompt_line(
-        "New vz_update_url (leave empty to cancel):",
-        default=current_url,
-    )
-    new_url = (new_url or "").strip()
-    if not new_url:
-        console.print("Cancelled.\n")
-        return "cancelled"
-    if new_url == current_url:
-        console.print("[dim]New URL matches current value \u2014 nothing to change.[/]\n")
-        return "cancelled"
-
-    if any(ch in new_url for ch in ("\n", "\r", "\t")):
-        show_error("URL must not contain whitespace/newlines.")
-        return "cancelled"
-
-    console.print(f"[dim]New: vz_update_url={new_url}[/]")
+    console.print("\n[bold cyan]Change Update URL (VMB4540)[/]")
     console.print(
-        "[yellow]This will overwrite vz_update_url in vzdaemon.env and reboot the hub.[/]\n"
+        f"Edits [cyan]{_OSPREY_VZDAEMON_ENV_PATH}[/], saves with "
+        "[cyan]check_configs --backup[/], then offers to reboot the hub.\n"
     )
-    if not prompt_confirm_proceed("Proceed? (y/n):"):
-        console.print("Cancelled.\n")
+
+    def _run(label: str, shell: str) -> tuple[bool, str, bool]:
+        """Run ``shell`` over the existing SSH session, log both the command
+        and the raw output verbatim, and return (ok, output, transport_lost).
+
+        Verbose per-step printing is deliberate: when the button 'looks like
+        it does nothing', the user can see the exact command we sent and the
+        exact reply the hub gave (including stderr from sed/grep/printf).
+        """
+        console.print(f"[dim]VMB4540> {shell}[/]")
+        try:
+            ok_, out_ = connection_execute(shell, [])
+        except Exception as exc:  # pragma: no cover - defensive
+            console.print(f"[red]{label} raised: {exc}[/]")
+            return False, str(exc), False
+        raw = out_ or ""
+        if raw.strip():
+            console.print(raw.rstrip())
+        else:
+            console.print("[dim](no output)[/]")
+        if _transport_lost_message(raw):
+            return ok_, raw, True
+        return ok_, raw, False
+
+    # ----- Step 1 + 2 : cd + ls, confirm vzdaemon.env is there -------------
+    # We fuse the "cd + ls" into one ``ls`` on the absolute directory path.
+    # The output is parsed for the literal filename; a missing file becomes
+    # the File-Not-Found alert from the spec.
+    ok, ls_out, lost = _run(
+        "ls env dir",
+        f"ls {_OSPREY_VZDAEMON_ENV_DIR}",
+    )
+    if lost:
+        return "disconnected"
+    if not ok and not (ls_out or "").strip():
+        show_error(
+            "File Not Found",
+            f"ls {_OSPREY_VZDAEMON_ENV_DIR} returned no output. "
+            "Operation aborted.",
+        )
+        return "ls failed on device."
+    present = any(
+        (line.strip() == "vzdaemon.env") or line.strip().endswith(" vzdaemon.env")
+        for line in (ls_out or "").splitlines()
+    )
+    if not present:
+        show_error(
+            "File Not Found",
+            "vzdaemon.env was not found in "
+            f"{_OSPREY_VZDAEMON_ENV_DIR}. Operation aborted.",
+        )
+        return "vzdaemon.env not found."
+
+    # ----- Step 3 : read the current value for the popup prefill ----------
+    # Use the exact command from the spec: no anchor, so ``export vz_update_url='...'``
+    # as well as legacy ``vz_update_url=...`` both match. Parsing handles
+    # the single-quoted form.
+    _ok, cur_out, lost = _run(
+        "grep vz_update_url",
+        f'grep "vz_update_url" {_OSPREY_VZDAEMON_ENV_PATH} || echo __ARLO_NO_MATCH__',
+    )
+    if lost:
+        return "disconnected"
+    current_url = ""
+    if "__ARLO_NO_MATCH__" not in (cur_out or ""):
+        current_url = _parse_current_vz_update_url(cur_out or "")
+    if current_url:
+        console.print(f"[dim]Current vz_update_url: {current_url}[/]")
+    else:
+        console.print(
+            "[yellow]vz_update_url line not found or not parseable; "
+            "input will start empty but you can still proceed.[/]"
+        )
+
+    # ----- Step 4 : popup for the new URL (trim + validate) ---------------
+    while True:
+        new_url = prompt_line(
+            "New value for vz_update_url (leave empty to cancel):",
+            default=current_url,
+        )
+        new_url = (new_url or "").strip()
+        if not new_url:
+            console.print("Cancelled.\n")
+            return "cancelled"
+        err = _validate_update_url(new_url)
+        if err is None:
+            break
+        show_error("Value cannot be empty or must be a valid URL.", err)
+        # Re-prompt so the user can fix the value without restarting the flow.
+        current_url = new_url
+
+    if new_url == _parse_current_vz_update_url(cur_out or ""):
+        console.print(
+            "[dim]New URL matches current value \u2014 nothing to change.[/]\n"
+        )
         return "cancelled"
 
-    url_q = _shell_single_quote(new_url)
-    set_shell = (
-        f"FILE={file_q}; "
-        f"[ -f \"$FILE\" ] || {{ echo \"ERR: $FILE not found\" >&2; exit 1; }}; "
-        f"if grep -q '^vz_update_url=' \"$FILE\"; then "
-        f"sed -i \"s|^vz_update_url=.*|vz_update_url={new_url}|\" \"$FILE\"; "
-        f"else printf '\\nvz_update_url=%s\\n' {url_q} >> \"$FILE\"; fi "
-        f"&& grep '^vz_update_url=' \"$FILE\""
+    console.print(f"[dim]New vz_update_url: {new_url}[/]")
+
+    # ----- Steps 5–7 : headless equivalent of vi + :%s|...|...| + :wq -----
+    #
+    # The canonical line we want on disk is ALWAYS:
+    #
+    #     export vz_update_url='<NEW_URL>'
+    #
+    # We run TWO sed substitutions back-to-back so we rewrite the line
+    # regardless of whether it previously had the ``export`` prefix or not.
+    # If neither form existed, the file is untouched by sed and we append
+    # the canonical line instead. Finally we verify with ``grep -Fxq`` that
+    # the EXACT expected line is present before we dare to check_configs
+    # or reboot.
+    target_line = f"export vz_update_url='{new_url}'"
+    target_line_q = _shell_single_quote(target_line)
+
+    # 5a. sed -i (two -e so we catch both "export X=..." and bare "X=..." rows)
+    ok, sed_out, lost = _run(
+        "sed -i",
+        (
+            f'sed -i '
+            f'-e "s|^export vz_update_url=.*$|{target_line}|" '
+            f'-e "s|^vz_update_url=.*$|{target_line}|" '
+            f"{_OSPREY_VZDAEMON_ENV_PATH}"
+        ),
     )
-
-    console.print("[bold]Writing vzdaemon.env (vi + :wq equivalent)...[/]")
-    ok, out = connection_execute(set_shell, [])
+    if lost:
+        return "disconnected"
     if not ok:
-        show_error(out or "Failed to update vzdaemon.env.")
-        if out and (
-            "Device disconnected" in out
-            or "Session expired" in out
-            or "Login incorrect" in out
-        ):
-            return "disconnected"
-        return out or "Command failed."
-    if out.strip():
-        console.print(out.rstrip())
+        show_error(
+            "sed -i failed on the device.",
+            (sed_out or "").strip()
+            or "No stderr captured. The file may be on a read-only filesystem.",
+        )
+        return sed_out or "sed -i failed."
 
-    console.print("[bold]Persisting with check_configs --backup...[/]")
-    ok, out = connection_execute("check_configs --backup", [])
+    # 5b. Append the canonical line only if sed matched nothing.
+    ok, app_out, lost = _run(
+        "append if missing",
+        (
+            f"grep -Fxq {target_line_q} {_OSPREY_VZDAEMON_ENV_PATH} "
+            f"|| printf '%s\\n' {target_line_q} >> {_OSPREY_VZDAEMON_ENV_PATH}"
+        ),
+    )
+    if lost:
+        return "disconnected"
     if not ok:
-        show_error(out or "check_configs --backup failed.")
-        if out and (
-            "Device disconnected" in out
-            or "Session expired" in out
-        ):
-            return "disconnected"
-        return out or "Command failed."
-    if out.strip():
-        console.print(out.rstrip())
-    show_success("vz_update_url updated and saved.\n")
+        show_error(
+            "Could not append vz_update_url to vzdaemon.env.",
+            (app_out or "").strip() or "No stderr captured.",
+        )
+        return app_out or "append failed."
+
+    # 5c. Explicit readback verification. This is what guarantees that the
+    # file REALLY contains the expected line before we touch check_configs
+    # or reboot the hub.
+    ok, ver_out, lost = _run(
+        "verify write",
+        (
+            f"if grep -Fxq {target_line_q} {_OSPREY_VZDAEMON_ENV_PATH}; "
+            f"then echo {_ARLO_WRITE_OK}; "
+            f"else echo {_ARLO_WRITE_FAILED}; fi"
+        ),
+    )
+    if lost:
+        return "disconnected"
+    if _ARLO_WRITE_OK not in (ver_out or "") or _ARLO_WRITE_FAILED in (ver_out or ""):
+        show_error(
+            "vzdaemon.env readback does NOT contain the new line.",
+            "The write appeared to run but the file does not show "
+            f"'{target_line}'. check_configs and reboot were skipped. "
+            "See the command log above for the device's actual stdout/stderr.",
+        )
+        return "vzdaemon.env update could not be verified."
+
+    # 5d. Show the AFTER content so the user can see the change on screen.
+    _run("cat vzdaemon.env (after)", f"cat {_OSPREY_VZDAEMON_ENV_PATH}")
+    show_success("vzdaemon.env updated and verified on device.")
+
+    # ----- Step 8 : check_configs --backup --------------------------------
+    ok, out, lost = _run("check_configs --backup", "check_configs --backup")
+    if lost:
+        return "disconnected"
+    if not ok:
+        show_error(
+            "check_configs --backup failed \u2014 the change is NOT yet "
+            "persisted to flash.",
+            (out or "").strip() or "no stderr captured",
+        )
+        return out or "check_configs --backup failed."
+    show_success("check_configs --backup completed.\n")
+
+    # ----- Step 9 : confirm reboot, then reboot ---------------------------
+    if not prompt_confirm_proceed(
+        "Reboot Basestation? The update URL has been changed and config "
+        "backed up. The basestation will now reboot to apply changes. "
+        "Continue? (y/n):"
+    ):
+        console.print(
+            "[dim]File change + backup are already persisted. "
+            "Skipping reboot per user choice.[/]\n"
+        )
+        return None
 
     console.print("[bold]Rebooting hub...[/]")
-    ok, out = connection_execute("reboot", [])
-    if not ok:
-        # reboot typically drops the SSH session; treat a disconnect as success.
-        if out and (
-            "Device disconnected" in out
-            or "Session expired" in out
-            or "Connection closed" in out
-        ):
-            show_success("Reboot requested. Hub will be back online shortly.\n")
-            return None
-        show_error(out or "reboot command failed.")
-        return out or "Command failed."
-    show_success("Reboot requested. Hub will be back online shortly.\n")
-    return None
+    ok, out, lost = _run("reboot", "reboot")
+    if lost or ok:
+        show_success(
+            "Basestation is rebooting. SSH session will disconnect.\n"
+        )
+        return None
+    show_error("reboot command failed.", (out or "").strip() or "no output")
+    return out or "Command failed."
 
 
 def run_stop_server() -> str:

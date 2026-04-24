@@ -150,8 +150,8 @@ SYSTEM_COMMANDS = [
     {"name": "config_update", "description": "Update saved Artifactory credentials", "command_profiles": None},
     {"name": "config_delete", "description": "Delete saved Artifactory credentials", "command_profiles": None},
     {
-        "name": "config_bs_update_url",
-        "description": "Osprey SmartHub: point vz_update_url at the local FW server, save configs, reboot",
+        "name": "change_update_url",
+        "description": "Edit export vz_update_url=... in vzdaemon.env, check_configs --backup, then optionally reboot",
         "command_profiles": ["osprey_smarthub"],
     },
     {
@@ -948,9 +948,9 @@ def parse_and_execute(
         run_config_delete()
         return "continue", None
 
-    if cmd == "config_bs_update_url":
+    if cmd == "change_update_url":
         if not connection_execute:
-            show_error("Connect to the hub first to set the update URL.")
+            show_error("Connect to the hub first to change the update URL.")
             return "continue", None
         try:
             from core.update_url_flow import run_osprey_set_update_url
@@ -959,7 +959,7 @@ def parse_and_execute(
         except (KeyboardInterrupt, EOFError):
             return "continue", None
         except Exception as e:
-            show_error("config_bs_update_url failed.", str(e))
+            show_error("change_update_url failed.", str(e))
             return "continue", None
         if err is None:
             return "continue", None

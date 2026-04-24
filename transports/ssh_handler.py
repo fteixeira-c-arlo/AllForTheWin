@@ -104,6 +104,11 @@ class SSHHandler:
         """
         Run command over SSH. Returns (success, output_or_error).
         Returns (False, "Device disconnected.") when the connection was lost.
+
+        ``success`` reflects the remote shell's exit status. Stdout and stderr
+        are both collected; when the command fails, stderr is included in the
+        returned text so callers can see *why* (permission denied, read-only
+        FS, missing binary, etc.) instead of silently getting an empty string.
         """
         if not self._connected or not self._client:
             return False, "Not connected."
@@ -113,8 +118,24 @@ class SSHHandler:
                 full_cmd = f"{command} {' '.join(args)}"
             tmo = 30.0 if timeout_sec is None else max(1.0, float(timeout_sec))
             _, stdout, stderr = self._client.exec_command(full_cmd, timeout=int(tmo))
-            out = (stdout.read().decode() or stderr.read().decode() or "").strip()
-            return True, out or "OK"
+            stdout_text = stdout.read().decode(errors="replace")
+            stderr_text = stderr.read().decode(errors="replace")
+            try:
+                exit_status = stdout.channel.recv_exit_status()
+            except Exception:
+                exit_status = 0 if stdout_text else 1
+            if exit_status == 0:
+                out = stdout_text.strip()
+                if not out:
+                    out = stderr_text.strip()
+                return True, out or "OK"
+            parts = []
+            if stdout_text.strip():
+                parts.append(stdout_text.strip())
+            if stderr_text.strip():
+                parts.append(stderr_text.strip())
+            err_msg = "\n".join(parts) if parts else f"Command exited with status {exit_status}"
+            return False, err_msg
         except Exception as e:
             err = str(e).lower()
             if _is_ssh_disconnect_error(err):

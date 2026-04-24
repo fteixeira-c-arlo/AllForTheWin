@@ -34,22 +34,26 @@ def _ssh_device_online_status(
     Returns (label, detail) where label is one of "online", "offline", "unknown".
     A single short ping to 8.8.8.8 is enough to tell us whether the device has
     working WAN/internet access (and therefore can reach Arlo cloud services).
+
+    Uses ``if/then/else`` rather than ``A && B || C`` so a non-zero exit from
+    the ping (expected when offline) never misroutes into the ``unknown`` arm.
     """
     shell = (
-        "ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 "
-        "&& echo __ARLO_ONLINE__ || echo __ARLO_OFFLINE__"
+        "if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; "
+        "then echo __ARLO_ONLINE__; "
+        "else echo __ARLO_OFFLINE__; fi"
     )
     try:
         ok, out = connection_execute(shell, [])
     except Exception as e:
         return "unknown", f"probe failed: {e}"
     text = (out or "").strip()
-    if not ok and not text:
-        return "unknown", "no response from device"
     if "__ARLO_ONLINE__" in text:
         return "online", "ping 8.8.8.8 succeeded"
     if "__ARLO_OFFLINE__" in text:
         return "offline", "ping 8.8.8.8 failed"
+    if not ok and not text:
+        return "unknown", "no response from device"
     return "unknown", text or "unexpected output"
 
 
@@ -61,11 +65,23 @@ def _ssh_read_vz_update_url(
     Returns (value, error). ``value`` is the raw URL (possibly empty string
     when the key is present but unset); ``error`` is a short human-readable
     reason when the file/key cannot be read.
+
+    The probe uses a proper ``if/then/else`` structure. The old
+    ``[ -f FILE ] && grep KEY FILE || echo __ARLO_NO_FILE__`` pattern is
+    buggy: when the file exists but the key is absent, ``grep`` exits 1 and
+    the ``|| echo`` fires, wrongly telling the caller the file is missing.
     """
+    # We grep for the bare word ``vz_update_url`` so BOTH of these line shapes
+    # match (depending on firmware build):
+    #   export vz_update_url='https://.../qa'      (canonical on Osprey)
+    #   vz_update_url=https://.../qa               (legacy, no quotes)
     shell = (
-        f"[ -f {_VZDAEMON_ENV_PATH} ] "
-        f"&& grep '^vz_update_url=' {_VZDAEMON_ENV_PATH} "
-        f"|| echo __ARLO_NO_FILE__"
+        f"if [ -f {_VZDAEMON_ENV_PATH} ]; "
+        f"then "
+        f'if grep "vz_update_url" {_VZDAEMON_ENV_PATH}; '
+        f"then :; "
+        f"else echo __ARLO_NO_KEY__; fi; "
+        f"else echo __ARLO_NO_FILE__; fi"
     )
     try:
         ok, out = connection_execute(shell, [])
@@ -74,12 +90,20 @@ def _ssh_read_vz_update_url(
     text = (out or "").strip()
     if "__ARLO_NO_FILE__" in text:
         return None, f"{_VZDAEMON_ENV_PATH} not found on device"
+    if "__ARLO_NO_KEY__" in text:
+        return None, "vz_update_url not set in vzdaemon.env"
     if not ok and not text:
         return None, "no response from device"
     for ln in text.splitlines():
         s = ln.strip()
-        if s.startswith("vz_update_url="):
-            return s[len("vz_update_url="):].strip(), None
+        if s.startswith("export "):
+            s = s[len("export "):].lstrip()
+        if not s.startswith("vz_update_url="):
+            continue
+        value = s[len("vz_update_url="):].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        return value.strip(), None
     return None, "vz_update_url not set in vzdaemon.env"
 
 
