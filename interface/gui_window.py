@@ -63,7 +63,11 @@ from core.device_connection import (
     ensure_adb_allowed_for_selection,
     selection_is_lory,
 )
-from core.device_credentials import get_adb_password_for_model, resolve_production_adb_password
+from core.device_credentials import (
+    get_adb_password_for_model,
+    resolve_production_adb_password,
+    resolve_production_ssh_password,
+)
 from core.device_errors import UnknownDeviceError, UnsupportedConnectionError
 from core.device_registry import lookup_registry_by_model_id
 from core.user_paths import get_arlo_logs_dir
@@ -3899,13 +3903,23 @@ class MainWindow(QMainWindow):
         prod_outer.setContentsMargins(0, 0, 0, 0)
         prod_stack = QStackedWidget()
 
+        def _prod_transport_for_model(m: dict | None) -> str:
+            """Return 'ADB' for ADB-capable prod-credentialed devices, 'SSH' for SSH-based prod basestations, else ''."""
+            if not isinstance(m, dict):
+                return ""
+            if model_supports_adb(m) and resolve_production_adb_password(m):
+                return "ADB"
+            if "SSH" in connection_methods_upper(m) and resolve_production_ssh_password(m):
+                return "SSH"
+            return ""
+
         prod_pick = QWidget()
         pl = QVBoxLayout(prod_pick)
         prod_device_combo = QComboBox()
         for m in models:
-            if model_supports_adb(m):
+            if _prod_transport_for_model(m):
                 prod_device_combo.addItem(format_connect_dialog_device_label(m), m)
-        pl.addWidget(QLabel("Select device (USB / ADB only):"))
+        pl.addWidget(QLabel("Select device:"))
         pl.addWidget(prod_device_combo)
         btn_pc = QPushButton("Continue")
         pl.addWidget(btn_pc)
@@ -3917,6 +3931,19 @@ class MainWindow(QMainWindow):
         prod_instr_text.setWordWrap(True)
         prod_instr_text.setStyleSheet("color: #e8eef4; font-size: 13px;")
         pil.addWidget(prod_instr_text)
+
+        prod_ssh_box = QGroupBox("SSH connection")
+        prod_ssh_form = QFormLayout(prod_ssh_box)
+        prod_ssh_ip = QLineEdit()
+        prod_ssh_ip.setPlaceholderText("e.g. 192.168.1.50")
+        prod_ssh_port = QSpinBox()
+        prod_ssh_port.setRange(1, 65535)
+        prod_ssh_port.setValue(DEFAULT_SSH_PORT)
+        prod_ssh_form.addRow("IP:", prod_ssh_ip)
+        prod_ssh_form.addRow("Port:", prod_ssh_port)
+        prod_ssh_box.setVisible(False)
+        pil.addWidget(prod_ssh_box)
+
         btn_go = QPushButton("I've done this — Connect")
         pil.addWidget(btn_go)
         btn_pb = QPushButton("Back")
@@ -3938,8 +3965,42 @@ class MainWindow(QMainWindow):
             m = prod_device_combo.currentData()
             if not isinstance(m, dict):
                 prod_instr_text.setText("")
+                prod_ssh_box.setVisible(False)
                 return
             title = _production_device_title(m)
+            transport = _prod_transport_for_model(m)
+            debug_method = (m.get("enable_debug_method") or "").strip().lower()
+
+            if transport == "SSH":
+                prod_ssh_box.setVisible(True)
+                ds = m.get("default_settings") or {}
+                ssh_default_port = int((ds.get("ssh") or {}).get("port") or DEFAULT_SSH_PORT)
+                prod_ssh_port.setValue(ssh_default_port)
+                if debug_method == "sync_button_11s":
+                    prod_instr_text.setText(
+                        f"Put your {title} into debug mode\n\n"
+                        "Your basestation is running Production firmware. To connect over SSH, you need to "
+                        "enable SSH first.\n\n"
+                        "1. Connect the basestation to your network (Ethernet) and wait for the LED to come up blue.\n"
+                        "2. Long-press the sync button for ~11 seconds. The Internet LED will start blinking — "
+                        "SSH is now enabled.\n"
+                        "3. Find the basestation's IP address from your router's connected-devices page.\n"
+                        "4. Enter the IP below and click \"I've done this — Connect\".\n"
+                        "   (Username and Production SSH password will be applied automatically.)"
+                    )
+                else:
+                    prod_instr_text.setText(
+                        f"Put your {title} into debug mode\n\n"
+                        "Your device is running Production firmware. To connect over SSH, you need to "
+                        "enable SSH first.\n\n"
+                        "1. Connect the device to your network and find its IP address from your router.\n"
+                        "2. Follow your device's procedure to enable SSH on Production firmware.\n"
+                        "3. Enter the IP below and click \"I've done this — Connect\".\n"
+                        "   (Username and Production SSH password will be applied automatically.)"
+                    )
+                return
+
+            prod_ssh_box.setVisible(False)
             prod_instr_text.setText(
                 f"Put your {title} into debug mode\n\n"
                 "Your device is running Production firmware. To connect, you need to enable debug mode first.\n\n"
@@ -3971,6 +4032,36 @@ class MainWindow(QMainWindow):
             m_sel = prod_device_combo.currentData()
             if not isinstance(m_sel, dict):
                 return
+            transport = _prod_transport_for_model(m_sel)
+            if transport == "SSH":
+                ssh_pwd_resolved = resolve_production_ssh_password(m_sel)
+                if not ssh_pwd_resolved:
+                    QMessageBox.warning(
+                        self,
+                        "Production",
+                        "No production SSH credentials are configured for this device.",
+                    )
+                    return
+                ip_val = prod_ssh_ip.text().strip()
+                if not ip_val:
+                    QMessageBox.warning(
+                        self,
+                        "Production",
+                        "Enter the basestation's IP address (visible on your router's connected devices page).",
+                    )
+                    return
+                ds = m_sel.get("default_settings") or {}
+                default_user = str((ds.get("ssh") or {}).get("username") or "root")
+                connect_result.clear()
+                connect_result["mode"] = "prod_ssh"
+                connect_result["model"] = m_sel
+                connect_result["ip"] = ip_val
+                connect_result["port"] = int(prod_ssh_port.value())
+                connect_result["user"] = default_user
+                connect_result["password"] = ssh_pwd_resolved
+                dlg.accept()
+                return
+
             if not resolve_production_adb_password(m_sel):
                 QMessageBox.warning(
                     self,
@@ -3994,10 +4085,16 @@ class MainWindow(QMainWindow):
 
         def _prod_continue() -> None:
             if prod_device_combo.count() == 0:
-                QMessageBox.warning(self, "Production", "No ADB-capable devices are available.")
+                QMessageBox.warning(
+                    self,
+                    "Production",
+                    "No production-capable devices are available.",
+                )
                 return
             _refresh_prod_instructions()
             prod_stack.setCurrentIndex(1)
+
+        prod_device_combo.currentIndexChanged.connect(lambda _i: _refresh_prod_instructions())
 
         btn_pc.clicked.connect(_prod_continue)
         btn_go.clicked.connect(_run_prod_connect)
@@ -4178,6 +4275,17 @@ class MainWindow(QMainWindow):
             self._worker.connect_adb_production.emit(
                 connect_result["model"],
                 connect_result["adb_serial"],
+            )
+            return
+        if mode == "prod_ssh":
+            self._production_connect_resume = {"model": connect_result["model"]}
+            self._begin_connection_log_tab()
+            self._worker.connect_ssh.emit(
+                connect_result["ip"],
+                connect_result["port"],
+                connect_result["user"],
+                connect_result["password"],
+                connect_result["model"],
             )
             return
 

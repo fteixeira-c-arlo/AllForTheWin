@@ -132,6 +132,30 @@ DEVICE_CREDENTIALS: list[CredentialRecord] = [
         "password": "",
         "note": "Prod: use secured SSH/UART credentials page",
     },
+    {
+        "model_ids": ["VMB4540"],
+        "stage": "dev_qa",
+        "transport": "uart_ssh",
+        "username": "root",
+        "password": "ngbase",
+        "note": "Osprey SmartHub Dev/QA UART/SSH",
+    },
+    {
+        "model_ids": ["VMB4540"],
+        "stage": "prod",
+        "transport": "uart_ssh",
+        "username": "root",
+        "password": "F8krm9LYxwKAsUnVQFm98",
+        "note": "Osprey SmartHub Prod/Staging UART/SSH (LCBS Gen3 latest)",
+    },
+    {
+        "model_ids": ["VMB4540"],
+        "stage": "prod",
+        "transport": "uart_ssh",
+        "username": "root",
+        "password": "NX9PvLX2L3YvhjBjVLi68yBA8",
+        "note": "Osprey SmartHub Prod/Staging UART/SSH (LCBS Gen3 previous)",
+    },
 ]
 
 
@@ -214,6 +238,50 @@ def resolve_production_adb_password(selected_model: dict[str, Any] | None) -> st
         if not mid:
             continue
         p = get_adb_password_for_model(mid, stage="prod")
+        if p:
+            return p
+    return None
+
+
+def get_ssh_password_for_model(model_id: str | None, *, stage: str | None = None) -> str | None:
+    """SSH/UART password for a model_id and stage (dev_qa | prod)."""
+    if not model_id:
+        return None
+    mid = (model_id or "").strip()
+    want = (stage or "").strip().lower() or None
+    if want == "prod":
+        p = _pick_adb_password_from_rows(
+            get_credentials_for_model(mid, stage="prod", transport="uart_ssh")
+        )
+        if p:
+            return p
+        return _pick_adb_password_from_rows(
+            get_credentials_for_model(mid, stage="all", transport="uart_ssh")
+        )
+    for st in ("dev_qa", "all", "prod"):
+        rows = get_credentials_for_model(mid, stage=st, transport="uart_ssh")
+        p = _pick_adb_password_from_rows(rows)
+        if p:
+            return p
+    return None
+
+
+def resolve_production_ssh_password(selected_model: dict[str, Any] | None) -> str | None:
+    """Try primary name and fw_search_models for a Production SSH/UART password."""
+    if not selected_model:
+        return None
+    ids: list[str] = []
+    n = selected_model.get("name")
+    if n:
+        ids.append(str(n).strip())
+    for x in selected_model.get("fw_search_models") or []:
+        s = str(x).strip()
+        if s and s.upper() not in {i.upper() for i in ids}:
+            ids.append(s)
+    for mid in ids:
+        if not mid:
+            continue
+        p = get_ssh_password_for_model(mid, stage="prod")
         if p:
             return p
     return None
