@@ -3,7 +3,12 @@
 ; Build: from repo root run  powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
 
 #define MyAppName "ArloHub"
-#define MyAppVersion "1.0.0"
+; MyAppVersion can be overridden from the command line by build_installer.ps1
+;   iscc /DMyAppVersion=1.2.3 ArloCameraControl.iss
+; The fallback below only applies to bare iscc invocations.
+#ifndef MyAppVersion
+  #define MyAppVersion "1.0.0"
+#endif
 #define MyAppPublisher "Arlo"
 #define MyAppExeName "ArloHub.exe"
 ; Relative to this .iss file (installer\)
@@ -45,4 +50,7 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
+; Interactive install: show "Launch ArloHub" checkbox on the finish page.
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; Silent install (auto-update flow): always relaunch the app on completion.
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifnotsilent runasoriginaluser

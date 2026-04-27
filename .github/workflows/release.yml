@@ -1,0 +1,114 @@
+name: Release
+
+# Tag conventions:
+#   v1.0.5             -> stable channel, full release
+#   v1.0.5-beta.1      -> beta channel, marked as GitHub prerelease
+#   v1.0.5-dev.1       -> dev channel, marked as GitHub prerelease
+#
+# The workflow rewrites utils/version.py from the tag, runs build_installer.ps1,
+# computes a SHA256 of the resulting installer, and publishes a GitHub Release
+# with two assets:
+#   - Install-ArloHub.exe   (the Inno Setup installer)
+#   - latest.json           (manifest the running app reads to decide if an update is available)
+#
+# Usage from your machine:
+#   git tag v1.0.5
+#   git push origin v1.0.5
+#
+# Code signing (Authenticode) is not configured. To enable, store the .pfx as a
+# base64-encoded GitHub secret named SIGNING_CERT_PFX_BASE64 plus the password
+# in SIGNING_CERT_PASSWORD, then add a sign step before "Generate latest.json".
+# See README.md > Releases & Auto-Update > Code signing.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Parse tag (version + channel)
+        id: tag
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $v = $tag -replace '^v',''
+          # Accept: 1.2.3 | 1.2.3-beta.N | 1.2.3-dev.N
+          if (-not ($v -match '^[0-9]+\.[0-9]+\.[0-9]+(-(beta|dev)\.[0-9]+)?$')) {
+            throw "Tag must be vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-(beta|dev).N (got: $tag)"
+          }
+          if ($v -match '-beta\.[0-9]+$') {
+            $channel = "beta"; $prerelease = "true"
+          } elseif ($v -match '-dev\.[0-9]+$') {
+            $channel = "dev"; $prerelease = "true"
+          } else {
+            $channel = "stable"; $prerelease = "false"
+          }
+          "version=$v"        | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "channel=$channel"  | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "prerelease=$prerelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "version=$v channel=$channel prerelease=$prerelease"
+
+      - name: Sync utils/version.py from tag
+        shell: pwsh
+        run: |
+          $v = "${{ steps.tag.outputs.version }}"
+          $body = @"
+          """Single source of truth for the ArloHub version.
+
+          This file is rewritten by .github/workflows/release.yml at tag-push time.
+          """
+          __version__ = "$v"
+          "@
+          Set-Content -Path utils/version.py -Value $body -Encoding utf8
+
+      - name: Install Inno Setup 6
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
+
+      - name: Generate latest.json manifest
+        shell: pwsh
+        run: |
+          $installer = "release\ArloHub-Windows\Install-ArloHub.exe"
+          if (-not (Test-Path $installer)) {
+            throw "Installer not found at $installer"
+          }
+          $sha = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLower()
+          $size = (Get-Item $installer).Length
+          $manifest = [ordered]@{
+            version   = "${{ steps.tag.outputs.version }}"
+            channel   = "${{ steps.tag.outputs.channel }}"
+            url       = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/Install-ArloHub.exe"
+            sha256    = $sha
+            size      = $size
+            published = ([DateTime]::UtcNow.ToString("o"))
+          }
+          $manifest | ConvertTo-Json | Set-Content -Path "release\ArloHub-Windows\latest.json" -Encoding utf8
+          Get-Content "release\ArloHub-Windows\latest.json"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ArloHub ${{ steps.tag.outputs.version }}
+          prerelease: ${{ steps.tag.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          files: |
+            release/ArloHub-Windows/Install-ArloHub.exe
+            release/ArloHub-Windows/latest.json

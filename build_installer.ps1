@@ -17,6 +17,17 @@ Write-Host "=== ArloHub - build ===" -ForegroundColor Cyan
 $req = Join-Path $Root "requirements.txt"
 $spec = Join-Path $Root "ArloHub.spec"
 
+# Read version from utils/version.py (single source of truth) and pass to Inno Setup.
+$versionFile = Join-Path $Root "utils\version.py"
+$AppVersion = "0.0.0"
+if (Test-Path $versionFile) {
+    $line = Get-Content $versionFile | Where-Object { $_ -match '^\s*__version__\s*=' } | Select-Object -First 1
+    if ($line -and $line -match '"([^"]+)"') {
+        $AppVersion = $matches[1]
+    }
+}
+Write-Host "App version: $AppVersion" -ForegroundColor Gray
+
 if (Get-Command py -ErrorAction SilentlyContinue) {
     py -3 -c "import sys" 2>$null
     if ($LASTEXITCODE -eq 0) {
@@ -69,8 +80,8 @@ $releaseDir = Join-Path $Root "release\ArloHub-Windows"
 New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
 
 $iss = Join-Path $Root "installer\ArloCameraControl.iss"
-Write-Host "Compiling installer with Inno Setup..." -ForegroundColor Cyan
-& $iscc $iss
+Write-Host "Compiling installer with Inno Setup (version $AppVersion)..." -ForegroundColor Cyan
+& $iscc "/DMyAppVersion=$AppVersion" $iss
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ISCC failed." -ForegroundColor Red
     exit $LASTEXITCODE

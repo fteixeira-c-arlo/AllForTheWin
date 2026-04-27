@@ -2278,9 +2278,111 @@ class MainWindow(QMainWindow):
         act_e3.triggered.connect(self._focus_e3_reference_tab)
         menu_help.addAction(act_e3)
         menu_help.addSeparator()
+        self._build_update_menu(menu_help)
+        menu_help.addSeparator()
         act_about = QAction("&About", self)
         act_about.triggered.connect(self._menu_about)
         menu_help.addAction(act_about)
+
+    def _build_update_menu(self, menu_help) -> None:
+        """Add 'Check for updates' + 'Update channel' submenu to the Help menu.
+
+        Only meaningful when the app is frozen (PyInstaller build); from source
+        the items still appear so QA can verify wiring, but the action will
+        explain that auto-update is for the packaged build only.
+        """
+        from core.updater_config import VALID_CHANNELS, get_channel
+
+        act_check = QAction("Check for &updates…", self)
+        act_check.setStatusTip("Check GitHub Releases for a newer ArloHub version")
+        act_check.triggered.connect(self._menu_check_for_updates)
+        menu_help.addAction(act_check)
+
+        channel_menu = menu_help.addMenu("Update &channel")
+        current = get_channel()
+        self._update_channel_actions: dict[str, QAction] = {}
+        labels = {"stable": "&Stable", "beta": "&Beta", "dev": "&Dev"}
+        for ch in VALID_CHANNELS:
+            act = QAction(labels.get(ch, ch.title()), self)
+            act.setCheckable(True)
+            act.setChecked(ch == current)
+            act.setStatusTip(f"Switch the auto-updater to the '{ch}' release channel")
+            act.triggered.connect(lambda _checked=False, c=ch: self._menu_set_channel(c))
+            channel_menu.addAction(act)
+            self._update_channel_actions[ch] = act
+
+    def _menu_set_channel(self, channel: str) -> None:
+        from core.updater_config import set_channel
+
+        try:
+            set_channel(channel)
+        except Exception as e:
+            QMessageBox.warning(self, "Update channel", f"Não foi possível salvar:\n{e}")
+            return
+        for ch, act in getattr(self, "_update_channel_actions", {}).items():
+            act.setChecked(ch == channel)
+        QMessageBox.information(
+            self,
+            "Update channel",
+            f"Canal de atualização definido como <b>{channel}</b>.<br><br>"
+            "A próxima checagem (manual ou no próximo startup) usará esse canal.",
+        )
+
+    def _menu_check_for_updates(self) -> None:
+        """Manual 'Help -> Check for updates'. Distinguishes update / up-to-date / network error."""
+        from core.updater import check_async_verbose, is_disabled
+        from core.updater_config import get_channel
+        from interface.update_dialog import (
+            UpdateDialog,
+            show_check_failed_message,
+            show_no_update_message,
+        )
+
+        if not getattr(sys, "frozen", False):
+            QMessageBox.information(
+                self,
+                "ArloHub Update",
+                "Auto-update só roda no app empacotado (PyInstaller build). "
+                "Em desenvolvimento, use <code>git pull</code>.",
+            )
+            return
+        if is_disabled():
+            QMessageBox.information(
+                self,
+                "ArloHub Update",
+                "A checagem está desativada (variável de ambiente "
+                "<code>ARLOHUB_NO_UPDATE_CHECK</code>).",
+            )
+            return
+
+        class _Bridge(QObject):
+            done = Signal(object, object)  # (UpdateInfo|None, error_msg|None)
+
+        bridge = _Bridge(self)
+        channel = get_channel()
+
+        progress = QMessageBox(self)
+        progress.setIcon(QMessageBox.Icon.Information)
+        progress.setWindowTitle("ArloHub Update")
+        progress.setText(f"Consultando GitHub Releases (canal: {channel})…")
+        progress.setStandardButtons(QMessageBox.StandardButton.NoButton)
+        progress.show()
+
+        def _on_done(info_obj, error_msg) -> None:
+            progress.close()
+            if error_msg:
+                show_check_failed_message(self)
+                return
+            if info_obj is None:
+                show_no_update_message(self, channel=channel)
+                return
+            try:
+                UpdateDialog(info_obj, self).exec()
+            except Exception as e:
+                QMessageBox.critical(self, "ArloHub Update", str(e))
+
+        bridge.done.connect(_on_done)
+        check_async_verbose(lambda info, err: bridge.done.emit(info, err))
 
     def _init_fw_folder_switcher_dock(self) -> None:
         from interface.fw_quick_switch_panel import FwQuickSwitchPanel

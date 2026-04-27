@@ -99,7 +99,56 @@ def main() -> int:
         win = MainWindow()
     win.setMinimumSize(900, 600)
     win.showMaximized()
+
+    _schedule_update_check(win)
+
     return app.exec()
+
+
+def _schedule_update_check(window) -> None:
+    """Background-check GitHub Releases shortly after startup.
+
+    Skipped when:
+      - running from source (auto-update is for the packaged .exe only),
+      - ARLOHUB_NO_UPDATE_CHECK is set,
+      - the user clicked "Mais tarde" on this same version within the last 24h.
+
+    A QObject bridge marshals the worker-thread result back to the GUI thread,
+    which is required before showing the UpdateDialog.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+
+    from PySide6.QtCore import QObject, QTimer, Signal
+
+    from core.updater import check_async, is_disabled
+    from core.updater_config import is_postponed
+    from interface.update_dialog import UpdateDialog
+
+    if is_disabled():
+        return
+
+    class _UpdateBridge(QObject):
+        result = Signal(object)
+
+    bridge = _UpdateBridge(window)
+
+    def _on_result(info_obj) -> None:
+        if info_obj is None:
+            return
+        try:
+            if is_postponed(info_obj.version):
+                return
+            UpdateDialog(info_obj, window).exec()
+        except Exception:
+            pass
+
+    bridge.result.connect(_on_result)
+
+    QTimer.singleShot(
+        2000,
+        lambda: check_async(lambda info: bridge.result.emit(info)),
+    )
 
 
 def _fatal_startup(exc: BaseException) -> None:
