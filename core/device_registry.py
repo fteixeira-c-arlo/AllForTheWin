@@ -134,6 +134,19 @@ DEVICE_REGISTRY: list[DeviceRegistryEntry] = [
         "notes": "OpenWrt + QCA4531 base station. SSH root password: 'ngbase' (dev/qa) or 'NX9PvLX2L3YvhjBjVLi68yBA8' (staging/ftrial/prod). Long-press sync button 11s to enable SSH on production firmware.",
         "command_profile": "osprey_smarthub",
     },
+    {
+        "model_ids": ["VMB5000"],
+        "codename": "ultra_smarthub",
+        "display_name": "Arlo Ultra SmartHub (VMB5000 Gen5)",
+        "platform": "openwrt_qca",
+        "device_kind": "basestation",
+        "connection_types": ["ssh", "uart"],
+        "adb_supported": False,
+        "uart_baudrate": 115200,
+        "enable_debug_method": "sync_button_11s",
+        "notes": "OpenWrt + QCA Gen5 Ultra SmartHub. SSH root password: 'ngbase' (dev/qa) or 'nw2LuJ7syHKN9YUUHTfW7' / '9YGSCvF9VNLuwtjrYwW9KWPzc' (prod, latest/previous). Long-press sync button 11s to enable SSH on production firmware.",
+        "command_profile": "none",
+    },
 ]
 
 

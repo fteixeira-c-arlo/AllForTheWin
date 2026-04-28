@@ -156,6 +156,30 @@ DEVICE_CREDENTIALS: list[CredentialRecord] = [
         "password": "NX9PvLX2L3YvhjBjVLi68yBA8",
         "note": "Osprey SmartHub Prod/Staging UART/SSH (LCBS Gen3 previous)",
     },
+    {
+        "model_ids": ["VMB5000"],
+        "stage": "dev_qa",
+        "transport": "uart_ssh",
+        "username": "root",
+        "password": "ngbase",
+        "note": "Ultra SmartHub Dev/QA UART/SSH",
+    },
+    {
+        "model_ids": ["VMB5000"],
+        "stage": "prod",
+        "transport": "uart_ssh",
+        "username": "root",
+        "password": "nw2LuJ7syHKN9YUUHTfW7",
+        "note": "Ultra SmartHub Prod/Staging UART/SSH (Gen5 latest)",
+    },
+    {
+        "model_ids": ["VMB5000"],
+        "stage": "prod",
+        "transport": "uart_ssh",
+        "username": "root",
+        "password": "9YGSCvF9VNLuwtjrYwW9KWPzc",
+        "note": "Ultra SmartHub Prod/Staging UART/SSH (Gen5 previous)",
+    },
 ]
 
 
