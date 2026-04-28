@@ -35,3 +35,6 @@ debug-*.log
 
 # Local FW server (user content)
 local_fw_server/
+
+# Claude Code worktrees / state (per-developer, never committed)
+.claude/
