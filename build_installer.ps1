@@ -75,7 +75,7 @@ $smokeProc = $null
 try {
     $smokeProc = Start-Process -FilePath $distExe -PassThru -ErrorAction Stop
 } catch {
-    Write-Host "Smoke test FAILED: could not launch $distExe — $_" -ForegroundColor Red
+    Write-Host "Smoke test FAILED: could not launch $distExe -- $_" -ForegroundColor Red
     exit 1
 }
 
@@ -103,7 +103,7 @@ if ($smokeCrashed) {
     exit 1
 }
 if ($smokeExitedEarly -and $smokeExitCode -ne 0) {
-    Write-Host "Smoke test FAILED: ArloHub.exe exited early with code $smokeExitCode (no traceback file — likely a bootloader / DLL load failure)." -ForegroundColor Red
+    Write-Host "Smoke test FAILED: ArloHub.exe exited early with code $smokeExitCode (no traceback file -- likely a bootloader / DLL load failure)." -ForegroundColor Red
     exit 1
 }
 Write-Host "Smoke test passed." -ForegroundColor Green
