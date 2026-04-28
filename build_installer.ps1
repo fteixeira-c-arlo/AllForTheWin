@@ -59,6 +59,55 @@ if (-not (Test-Path $distExe)) {
 }
 Write-Host "Built: $distExe" -ForegroundColor Green
 
+# --- Smoke test: launch the freshly built EXE and verify it survives startup. ---
+# Catches PyInstaller bundling regressions (e.g. missing yaml/.py files behind
+# yaml/_yaml.pyd) BEFORE the installer is wrapped and shipped.
+# The app's _fatal_startup() writes _internal\arlohub_last_error.txt next to
+# the bundled scripts; presence of that file after launch == failed startup.
+$bundleDir = Split-Path -Parent $distExe
+$smokeErrFile = Join-Path $bundleDir "_internal\arlohub_last_error.txt"
+$smokeWaitSec = 8
+
+Write-Host "Smoke test: launching ArloHub.exe (waiting ${smokeWaitSec}s)..." -ForegroundColor Cyan
+if (Test-Path $smokeErrFile) { Remove-Item $smokeErrFile -Force }
+
+$smokeProc = $null
+try {
+    $smokeProc = Start-Process -FilePath $distExe -PassThru -ErrorAction Stop
+} catch {
+    Write-Host "Smoke test FAILED: could not launch $distExe — $_" -ForegroundColor Red
+    exit 1
+}
+
+$smokeDeadline = (Get-Date).AddSeconds($smokeWaitSec)
+while ((Get-Date) -lt $smokeDeadline -and -not $smokeProc.HasExited) {
+    Start-Sleep -Milliseconds 250
+}
+
+$smokeCrashed = Test-Path $smokeErrFile
+$smokeExitedEarly = $smokeProc.HasExited
+$smokeExitCode = if ($smokeProc.HasExited) { $smokeProc.ExitCode } else { $null }
+
+# Kill the GUI even if it survived; rebuild script must not block.
+if (-not $smokeProc.HasExited) {
+    Stop-Process -Id $smokeProc.Id -Force -ErrorAction SilentlyContinue
+}
+Get-Process -Name "ArloHub" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+if ($smokeCrashed) {
+    Write-Host "Smoke test FAILED: app wrote $smokeErrFile during startup." -ForegroundColor Red
+    Write-Host "--- arlohub_last_error.txt ---" -ForegroundColor Red
+    Get-Content $smokeErrFile | ForEach-Object { Write-Host $_ -ForegroundColor Red }
+    Write-Host "------------------------------" -ForegroundColor Red
+    Write-Host "Refusing to wrap the installer around a broken build." -ForegroundColor Red
+    exit 1
+}
+if ($smokeExitedEarly -and $smokeExitCode -ne 0) {
+    Write-Host "Smoke test FAILED: ArloHub.exe exited early with code $smokeExitCode (no traceback file — likely a bootloader / DLL load failure)." -ForegroundColor Red
+    exit 1
+}
+Write-Host "Smoke test passed." -ForegroundColor Green
+
 $isccCandidates = @(
     "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
     "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
