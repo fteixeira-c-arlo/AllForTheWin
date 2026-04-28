@@ -4,6 +4,10 @@ paramiko>=3.0.0
 requests>=2.28.0
 pyserial>=3.5
 PySide6>=6.5.0
+# paramiko -> invoke -> yaml chain: pin pyyaml so PyInstaller bundles the full
+# package (not just the _yaml C extension), preventing the
+# "module 'yaml' has no attribute 'error'" startup crash on Windows builds.
+pyyaml>=6.0
 
 # --- Build / packaging (PyInstaller) ---
 pyinstaller>=6.0.0

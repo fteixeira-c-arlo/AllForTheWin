@@ -28,7 +28,10 @@ binaries = []
 hiddenimports = []
 
 # Terminal stack only — small compared to Qt.
-for pkg in ("rich", "questionary", "prompt_toolkit"):
+# yaml: paramiko -> invoke -> yaml. Without collect_all the build only pulls in
+# yaml/_yaml.pyd (the C extension), not the .py modules it imports during init,
+# crashing at startup with "module 'yaml' has no attribute 'error'".
+for pkg in ("rich", "questionary", "prompt_toolkit", "yaml"):
     try:
         d, b, h = collect_all(pkg)
         datas += d
