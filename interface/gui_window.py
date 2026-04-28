@@ -2317,15 +2317,15 @@ class MainWindow(QMainWindow):
         try:
             set_channel(channel)
         except Exception as e:
-            QMessageBox.warning(self, "Update channel", f"Não foi possível salvar:\n{e}")
+            QMessageBox.warning(self, "Update channel", f"Could not save:\n{e}")
             return
         for ch, act in getattr(self, "_update_channel_actions", {}).items():
             act.setChecked(ch == channel)
         QMessageBox.information(
             self,
             "Update channel",
-            f"Canal de atualização definido como <b>{channel}</b>.<br><br>"
-            "A próxima checagem (manual ou no próximo startup) usará esse canal.",
+            f"Update channel set to <b>{channel}</b>.<br><br>"
+            "The next check (manual or at next startup) will use this channel.",
         )
 
     def _menu_check_for_updates(self) -> None:
@@ -2342,15 +2342,15 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "ArloHub Update",
-                "Auto-update só roda no app empacotado (PyInstaller build). "
-                "Em desenvolvimento, use <code>git pull</code>.",
+                "Auto-update only runs in the packaged app (PyInstaller build). "
+                "In development, use <code>git pull</code>.",
             )
             return
         if is_disabled():
             QMessageBox.information(
                 self,
                 "ArloHub Update",
-                "A checagem está desativada (variável de ambiente "
+                "Update checks are disabled (environment variable "
                 "<code>ARLOHUB_NO_UPDATE_CHECK</code>).",
             )
             return
@@ -2364,7 +2364,7 @@ class MainWindow(QMainWindow):
         progress = QMessageBox(self)
         progress.setIcon(QMessageBox.Icon.Information)
         progress.setWindowTitle("ArloHub Update")
-        progress.setText(f"Consultando GitHub Releases (canal: {channel})…")
+        progress.setText(f"Querying GitHub Releases (channel: {channel})…")
         progress.setStandardButtons(QMessageBox.StandardButton.NoButton)
         progress.show()
 

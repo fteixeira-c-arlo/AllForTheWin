@@ -111,7 +111,7 @@ def _schedule_update_check(window) -> None:
     Skipped when:
       - running from source (auto-update is for the packaged .exe only),
       - ARLOHUB_NO_UPDATE_CHECK is set,
-      - the user clicked "Mais tarde" on this same version within the last 24h.
+      - the user clicked "Later" on this same version within the last 24h.
 
     A QObject bridge marshals the worker-thread result back to the GUI thread,
     which is required before showing the UpdateDialog.

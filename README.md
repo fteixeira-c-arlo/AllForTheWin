@@ -139,7 +139,7 @@ Output: `dist/ArloHub/ArloHub.exe`
 
 ## Releases & Auto-Update
 
-ArloHub ships an in-app updater that polls GitHub Releases on startup and from `Help → Check for updates…`. When a newer version is published on the user's channel, a dialog shows release notes plus "Install now" — the app downloads `Install-ArloHub.exe`, verifies its SHA256, runs it silently, and relaunches itself on the new version. Clicking "Mais tarde" suppresses the prompt for that same version for 24 hours.
+ArloHub ships an in-app updater that polls GitHub Releases on startup and from `Help → Check for updates…`. When a newer version is published on the user's channel, a dialog shows release notes plus "Install now" — the app downloads `Install-ArloHub.exe`, verifies its SHA256, runs it silently, and relaunches itself on the new version. Clicking "Later" suppresses the prompt for that same version for 24 hours.
 
 ### Channels
 

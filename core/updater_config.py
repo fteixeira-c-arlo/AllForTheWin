@@ -4,7 +4,7 @@ Two pieces of state, stored as JSON in the user's app-state dir:
 
   channel:           which release stream this install follows
                      ("stable" | "beta" | "dev"). Default "stable".
-  postponed_version: the version the user last clicked "Mais tarde" on.
+  postponed_version: the version the user last clicked "Later" on.
   postponed_at:      ISO-8601 UTC timestamp of that click.
 
 The file is best-effort: any parse error or I/O failure is swallowed and the
@@ -69,7 +69,7 @@ def set_channel(channel: str) -> None:
 
 
 def postpone(version: str) -> None:
-    """Record that the user clicked 'Mais tarde' on this version."""
+    """Record that the user clicked 'Later' on this version."""
     data = _load()
     data["postponed_version"] = version
     data["postponed_at"] = datetime.now(timezone.utc).isoformat()

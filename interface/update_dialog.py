@@ -44,7 +44,7 @@ class _DownloadWorker(QObject):
 class UpdateDialog(QDialog):
     """Modal dialog: 'Install now' downloads, verifies, launches installer, and quits the app.
 
-    Clicking 'Mais tarde' records the version via core.updater_config.postpone(),
+    Clicking 'Later' records the version via core.updater_config.postpone(),
     which suppresses the auto-prompt for the next 24h while the same version is
     still the latest. A different (newer) version surfaces the dialog again.
     """
@@ -62,12 +62,12 @@ class UpdateDialog(QDialog):
         layout = QVBoxLayout(self)
 
         channel_suffix = "" if info.channel == "stable" else f"  ({info.channel})"
-        layout.addWidget(QLabel(f"<b>Nova versão disponível: {info.version}{channel_suffix}</b>"))
-        layout.addWidget(QLabel(f"Versão atual: {__version__}"))
+        layout.addWidget(QLabel(f"<b>New version available: {info.version}{channel_suffix}</b>"))
+        layout.addWidget(QLabel(f"Current version: {__version__}"))
 
         notes = QTextEdit()
         notes.setReadOnly(True)
-        notes.setMarkdown(info.notes or "_Sem notas de release._")
+        notes.setMarkdown(info.notes or "_No release notes._")
         layout.addWidget(notes, 1)
 
         self._progress = QProgressBar()
@@ -81,10 +81,10 @@ class UpdateDialog(QDialog):
 
         buttons = QDialogButtonBox()
         self._install_btn = buttons.addButton(
-            "Instalar agora", QDialogButtonBox.ButtonRole.AcceptRole
+            "Install now", QDialogButtonBox.ButtonRole.AcceptRole
         )
         self._later_btn = buttons.addButton(
-            "Mais tarde", QDialogButtonBox.ButtonRole.RejectRole
+            "Later", QDialogButtonBox.ButtonRole.RejectRole
         )
         self._install_btn.clicked.connect(self._start_download)
         self._later_btn.clicked.connect(self._on_later)
@@ -102,7 +102,7 @@ class UpdateDialog(QDialog):
         self._later_btn.setEnabled(False)
         self._progress.setVisible(True)
         self._status.setVisible(True)
-        self._status.setText("Baixando…")
+        self._status.setText("Downloading…")
 
         self._thread = QThread(self)
         self._worker = _DownloadWorker(self._info)
@@ -121,17 +121,17 @@ class UpdateDialog(QDialog):
             self._progress.setRange(0, 100)
             self._progress.setValue(int(downloaded * 100 / total))
             mb_total = total // (1024 * 1024)
-            self._status.setText(f"Baixando… {mb_done} / {mb_total} MB")
+            self._status.setText(f"Downloading… {mb_done} / {mb_total} MB")
         else:
             self._progress.setRange(0, 0)
-            self._status.setText(f"Baixando… {mb_done} MB")
+            self._status.setText(f"Downloading… {mb_done} MB")
 
     def _on_finished(self, installer_path: str) -> None:
-        self._status.setText("Iniciando instalador… o app vai reiniciar em alguns segundos.")
+        self._status.setText("Starting installer… the app will restart in a few seconds.")
         try:
             launch_installer(Path(installer_path))
         except Exception as e:
-            QMessageBox.critical(self, "Erro", f"Falha ao iniciar instalador:\n{e}")
+            QMessageBox.critical(self, "Error", f"Failed to start installer:\n{e}")
             self._reset_buttons()
             return
         try:
@@ -143,7 +143,7 @@ class UpdateDialog(QDialog):
             app.quit()
 
     def _on_failed(self, msg: str) -> None:
-        QMessageBox.critical(self, "Falha no download", msg)
+        QMessageBox.critical(self, "Download failed", msg)
         self._reset_buttons()
 
     def _reset_buttons(self) -> None:
@@ -159,7 +159,7 @@ def show_no_update_message(parent: Optional[QWidget] = None, *, channel: str) ->
     QMessageBox.information(
         parent,
         "ArloHub Update",
-        f"Você está na versão mais recente: <b>{__version__}</b>{suffix}.",
+        f"You're on the latest version: <b>{__version__}</b>{suffix}.",
     )
 
 
@@ -168,5 +168,5 @@ def show_check_failed_message(parent: Optional[QWidget] = None) -> None:
     QMessageBox.warning(
         parent,
         "ArloHub Update",
-        "Não foi possível consultar o GitHub. Verifique sua conexão e tente novamente.",
+        "Could not reach GitHub. Check your connection and try again.",
     )
