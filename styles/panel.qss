@@ -9,7 +9,7 @@
 }
 
 #filterSearchIcon {
-    color: #444760;
+    color: #8b90a8;
     font-size: 13px;
     background: transparent;
     border: none;
@@ -160,7 +160,7 @@ QFrame#cmdRow[tier="3"] QLabel#cmdRowLabel {
 }
 
 QFrame#cmdRow QLabel#cmdRowArgHint {
-    color: #444760;
+    color: #8b90a8;
     background: transparent;
     border: none;
     padding: 0 6px 0 0;
@@ -168,7 +168,7 @@ QFrame#cmdRow QLabel#cmdRowArgHint {
 }
 
 QFrame#cmdRow[tier="3"] QLabel#cmdRowArgHint {
-    color: #444760;
+    color: #8b90a8;
 }
 
 QFrame#cmdRow[section="firmware"] QLabel#cmdRowSectionIcon {

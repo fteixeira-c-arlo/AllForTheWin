@@ -8,7 +8,8 @@ BORDER_SUBTLE = "#2a2d3a"
 BORDER_DIVIDER = "#1e2030"
 
 TEXT_PRIMARY = "#c8ccde"
-TEXT_SECONDARY = "#8b90a8"
+TEXT_SECONDARY = "#8b90a8"  # also used for hints/icons — meets WCAG AA (>=4.5:1) on panel backgrounds
+# Decorative / disabled only: fails WCAG AA as body text, so never use it for readable copy.
 TEXT_MUTED = "#444760"
 
 ACCENT_FW = "#5DCAA5"

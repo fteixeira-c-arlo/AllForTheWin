@@ -62,15 +62,15 @@ _RE_USER_ERR = re.compile(r"user\.err", re.I)
 _TAB_KEYS = ("all", "info", "notice", "warn", "error")
 _TAB_ACCENT: dict[str, str] = {
     "all": "#3db88a",
-    "info": "#5b8fc9",
+    "info": "#74a5db",
     "notice": "#3db88a",
     "warn": "#c9954a",
-    "error": "#c95a5a",
+    "error": "#d46b6b",
 }
 _PILL_QSS = {
-    "info": "QLabel { background-color: #1a2e44; color: #5b8fc9; border-radius: 10px; padding: 2px 8px; font-size: 11px; font-weight: 600; }",
+    "info": "QLabel { background-color: #1a2e44; color: #74a5db; border-radius: 10px; padding: 2px 8px; font-size: 11px; font-weight: 600; }",
     "warn": "QLabel { background-color: #2e2214; color: #c9954a; border-radius: 10px; padding: 2px 8px; font-size: 11px; font-weight: 600; }",
-    "error": "QLabel { background-color: #2e1414; color: #c95a5a; border-radius: 10px; padding: 2px 8px; font-size: 11px; font-weight: 600; }",
+    "error": "QLabel { background-color: #2e1414; color: #d46b6b; border-radius: 10px; padding: 2px 8px; font-size: 11px; font-weight: 600; }",
 }
 
 _ROW2_ACTION_BTN_QSS = """
