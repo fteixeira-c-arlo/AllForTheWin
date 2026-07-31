@@ -14,3 +14,159 @@ For maintainers (not for end users)
 PyInstaller still uses dist\ and build\ (ignored by git). Only the
 release\ArloHub-Windows folder is meant to be zipped or committed
 for distribution.
+
+
+CI/CD WORKFLOW (GitHub Actions)
+===============================
+
+There are TWO distinct "environment" concepts in this project. They are often
+confused, so keep them separate:
+
+  1. Release channels (stable / beta / dev) -- the environments the SHIPPED app
+     follows for auto-updates.
+  2. Git branches (main + feature branches) -- the code-flow environments.
+
+
+1. THE TRIGGER: WHAT STARTS CI/CD
+---------------------------------
+
+The only workflow is .github/workflows/release.yml. It does NOT run on every
+push to main. It runs ONLY when you push a tag matching 'v*':
+
+    on:
+      push:
+        tags:
+          - 'v*'
+
+Mental model:
+  * Pushing code to main builds nothing.
+  * A release happens ONLY when you push a version tag.
+  * main is the source of truth; tags are the release triggers.
+
+
+2. THE THREE ENVIRONMENTS (RELEASE CHANNELS)
+--------------------------------------------
+
+The channel is derived entirely from the SHAPE of the tag:
+
+  Environment          Tag example        GitHub Release   Audience
+  -------------------  -----------------  ---------------  ---------------------
+  Production (stable)  v1.0.5             normal release   production testers
+  Beta                 v1.0.5-beta.1      prerelease       early-access testers
+  Dev                  v1.0.5-dev.1       prerelease       internal / dogfood
+
+The workflow parses this with a regex and REFUSES malformed tags:
+
+    # Accept: 1.2.3 | 1.2.3-beta.N | 1.2.3-dev.N
+    if (-not ($v -match '^[0-9]+\.[0-9]+\.[0-9]+(-(beta|dev)\.[0-9]+)?$')) {
+      throw "Tag must be vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-(beta|dev).N"
+    }
+
+  * -beta.N  -> channel = beta,  prerelease = true
+  * -dev.N   -> channel = dev,   prerelease = true
+  * (none)   -> channel = stable, prerelease = false
+
+
+3. WHAT THE PIPELINE DOES (THE "PUSH" SIDE)
+-------------------------------------------
+
+When you push a 'v*' tag, the build-and-release job runs on windows-latest:
+
+  1. Checkout the tagged commit.
+  2. Set up Python 3.11.
+  3. Parse the tag -> derives version, channel, prerelease.
+  4. Rewrite utils/version.py from the tag so the built binary knows its own
+     version (__version__ = "<version-from-tag>").
+  5. Install Inno Setup 6 (choco install innosetup).
+  6. Build the installer via the same script you run locally:
+         powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
+  7. Generate latest.json -- a manifest with version, channel, download url,
+     a SHA256 of the installer, size, and a published timestamp.
+  8. Create the GitHub Release, uploading two assets:
+         - Install-ArloHub.exe   (the Inno Setup installer)
+         - latest.json           (manifest the app reads to detect updates)
+     Marked prerelease=true for beta/dev.
+
+
+4. HOW THE INSTALLED APP "PULLS" FROM AN ENVIRONMENT
+----------------------------------------------------
+
+The runtime auto-updater lives in core/updater.py + core/updater_config.py.
+The installed app polls GitHub Releases -- it does NOT pull from git.
+
+  * Each install stores its channel in %LOCALAPPDATA%/ArloHub/updater.json
+    (default "stable"). Users switch it from Help -> Update channel.
+  * On startup (2s after launch, packaged builds only) and via
+    Help -> Check for updates..., it calls fetch_latest():
+      - stable  hits /releases/latest (GitHub excludes prereleases by default).
+      - beta/dev list /releases and pick the highest tag matching their pattern.
+  * It reads latest.json, compares versions (is_newer), and if newer shows the
+    update dialog. On "Install now" it downloads to %TEMP%, VERIFIES SHA256
+    (deletes + errors on mismatch), then launches the installer silently
+    (/VERYSILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /NORESTART). The .iss
+    relaunches the app on the new version.
+  * A user on stable will NEVER be offered -beta/-dev builds.
+  * Set ARLOHUB_NO_UPDATE_CHECK=1 to disable the whole update mechanism.
+
+So "pull to an environment" (end-user view) = set the channel, then let the app
+pull the matching release.
+
+
+5. VERSIONING -- THE SINGLE SOURCE OF TRUTH
+-------------------------------------------
+
+  * utils/version.py (__version__) is the ONE source of truth.
+  * The committed value only matters for LOCAL builds. In CI, step 4 overwrites
+    it from the git tag, so the TAG is authoritative for releases. Do NOT
+    manually bump version.py before tagging -- just tag.
+  * build_installer.ps1 reads it for the Inno Setup MyAppVersion, and
+    core/updater.py imports it to compare against latest.json.
+  * Version comparison is channel-aware:
+      v1.0.5        -> (1, 0, 5)
+      v1.0.5-beta.7 -> (1, 0, 5, 7)
+    Comparisons are only valid WITHIN a channel.
+
+
+6. CONCRETE COMMANDS
+--------------------
+
+Cutting a release (the "push to environment" action):
+
+    # Production / stable
+    git tag v1.0.5 && git push origin v1.0.5
+
+    # Beta (early access)
+    git tag v1.0.5-beta.1 && git push origin v1.0.5-beta.1
+
+    # Dev (dogfood)
+    git tag v1.0.5-dev.1 && git push origin v1.0.5-dev.1
+
+The tag should point at the commit on main you want to ship. Typical flow:
+merge to main -> verify -> tag that commit -> push tag -> Action builds and
+publishes.
+
+Code flow (git branches) -- standard loop:
+
+    git checkout main && git pull origin main    # sync production
+    git checkout -b my-feature                    # work on a branch
+    # ...commit...
+    git push -u origin my-feature                 # open a PR into main
+    # after merge:
+    git checkout main && git pull origin main
+    git tag vX.Y.Z && git push origin vX.Y.Z      # release
+
+
+7. GAPS / THINGS WORTH KNOWING
+------------------------------
+
+  * No CI on PRs or main pushes -- there is no test/lint/build validation
+    before merge. The installer is only built at tag time, so a broken build is
+    discovered DURING release, not before. Consider adding a build smoke-run
+    workflow on pull_request for safety.
+  * Builds are unsigned -- SmartScreen/Defender may warn on first download. See
+    README.md > Releases & Auto-Update > Code signing to wire up Authenticode
+    signing via SIGNING_CERT_PFX_BASE64 secrets.
+  * Tags are effectively immutable -- re-pushing the same tag won't cleanly
+    re-release; bump to a new patch/prerelease number instead.
+  * The updater's GitHub API calls are unauthenticated, so they are subject to
+    GitHub's rate limits (fine for normal use; may matter under heavy testing).
