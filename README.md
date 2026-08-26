@@ -116,6 +116,10 @@ No Python changes required. Add a JSON file and register it:
 
 See `core/HOW_TO_ADD_DEVICE_COMMANDS.txt` for full details.
 
+To make a new camera show up in **both** the Dev/QA and Production device
+listings of the Connect dialog, see
+[`docs/ADDING_A_NEW_CAMERA.md`](docs/ADDING_A_NEW_CAMERA.md).
+
 ---
 
 ## Currently Supported Devices
