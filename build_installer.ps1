@@ -2,7 +2,7 @@
 # Writes release\ArloHub-Windows\Install-ArloHub.exe - zip that folder for testers.
 #
 # Prerequisites (machine that BUILDS the installer):
-#   - Python 3.10+ on PATH
+#   - Python 3.11+ on PATH (CI builds on 3.13)
 #   - pip install -r requirements.txt
 #   - Inno Setup 6: https://jrsoftware.org/isinfo.php (optional; PyInstaller output still runs without it)
 #
@@ -41,7 +41,7 @@ if (Get-Command py -ErrorAction SilentlyContinue) {
 }
 if (-not (Test-Path (Join-Path $Root "dist\ArloHub\ArloHub.exe"))) {
     if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
-        Write-Host "Python not found. Install Python 3.10+ and add 'py' or 'python' to PATH." -ForegroundColor Red
+        Write-Host "Python not found. Install Python 3.11+ and add 'py' or 'python' to PATH." -ForegroundColor Red
         exit 1
     }
     Write-Host "Using: python" -ForegroundColor Gray

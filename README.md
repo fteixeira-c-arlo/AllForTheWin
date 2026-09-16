@@ -37,7 +37,7 @@ arlo-shell/
 
 ## Getting Started
 
-**Requirements:** Python 3.10+
+**Requirements:** Python 3.11+
 
 ```bash
 git clone https://github.com/<your-username>/arlo-shell.git

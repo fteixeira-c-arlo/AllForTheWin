@@ -16,7 +16,7 @@ if not defined PY_CMD (
 if not defined PY_CMD (
   echo ERROR: Python was not found on this PC.
   echo.
-  echo Install Python 3.10+ from https://www.python.org/downloads/
+  echo Install Python 3.11+ from https://www.python.org/downloads/
   echo During setup, enable "Add python.exe to PATH".
   echo Then run this script again.
   echo.

@@ -1,7 +1,7 @@
 For maintainers (not for end users)
 ===================================
 
-1. On a Windows PC with Python 3.10+ and Inno Setup 6 installed, from the repo root:
+1. On a Windows PC with Python 3.11+ and Inno Setup 6 installed, from the repo root:
 
      powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
 
@@ -73,7 +73,7 @@ The workflow parses this with a regex and REFUSES malformed tags:
 When you push a 'v*' tag, the build-and-release job runs on windows-latest:
 
   1. Checkout the tagged commit.
-  2. Set up Python 3.11.
+  2. Set up Python 3.13.
   3. Parse the tag -> derives version, channel, prerelease.
   4. Rewrite utils/version.py from the tag so the built binary knows its own
      version (__version__ = "<version-from-tag>").

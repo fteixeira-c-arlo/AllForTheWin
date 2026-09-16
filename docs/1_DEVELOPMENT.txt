@@ -6,7 +6,7 @@ behind the scenes for shared command menus and prompts in the GUI.
 
 Requirements
 ------------
-- Python 3.10+ for local runs
+- Python 3.11+ for local runs (CI builds on 3.13)
 - ADB: Android SDK platform-tools on PATH (optional)
 - SSH: Paramiko only
 
