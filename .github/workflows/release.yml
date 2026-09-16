@@ -11,9 +11,12 @@ name: Release
 #   - Install-ArloHub.exe   (the Inno Setup installer)
 #   - latest.json           (manifest the running app reads to decide if an update is available)
 #
-# Usage from your machine:
+# Usage from your machine (solo, tag-driven flow — no pull request / review step):
+#   git add . && git commit -m "..."
 #   git tag v1.0.5
-#   git push origin v1.0.5
+#   git push origin v1.0.5   # <- this alone builds, publishes the stable release,
+#                            #    and fast-forwards main to the released commit.
+# Pushing a stable tag IS the entire release gate. There is no PR approval workflow.
 #
 # Code signing (Authenticode) is not configured. To enable, store the .pfx as a
 # base64-encoded GitHub secret named SIGNING_CERT_PFX_BASE64 plus the password
@@ -34,6 +37,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so the released commit can fast-forward main
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -112,3 +117,14 @@ jobs:
           files: |
             release/ArloHub-Windows/Install-ArloHub.exe
             release/ArloHub-Windows/latest.json
+
+      - name: Fast-forward main to the released commit (stable only)
+        if: steps.tag.outputs.channel == 'stable'
+        shell: bash
+        run: |
+          # Solo, tag-driven flow: a stable vX.Y.Z tag push is the release gate — there
+          # is no pull-request review step. Once the release publishes, advance the
+          # default branch to the exact commit that shipped so main always mirrors the
+          # latest stable release. Fast-forward only (no --force): if main has diverged
+          # this fails loudly rather than rewriting history.
+          git push origin "HEAD:refs/heads/main"

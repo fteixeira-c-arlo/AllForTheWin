@@ -543,8 +543,8 @@ def _load_icon(path: str) -> QIcon:
 
 def _e3_cli_reference_path() -> Path:
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        return Path(sys._MEIPASS) / "docs" / "e3_wired_cli_reference.md"
-    return Path(__file__).resolve().parent.parent / "docs" / "e3_wired_cli_reference.md"
+        return Path(sys._MEIPASS) / "docs" / "3_e3_wired_cli_reference.md"
+    return Path(__file__).resolve().parent.parent / "docs" / "3_e3_wired_cli_reference.md"
 
 
 def _strip_rich_markup(s: str) -> str:
@@ -2602,7 +2602,7 @@ class MainWindow(QMainWindow):
             body = (
                 "# E3 reference file not found\n\n"
                 f"Expected:\n`{path}`\n\n"
-                "From source, it lives at `docs/e3_wired_cli_reference.md`. "
+                "From source, it lives at `docs/3_e3_wired_cli_reference.md`. "
                 "Rebuild the frozen app with the current PyInstaller spec to bundle it."
             )
         browser.setMarkdown(body)

@@ -20,7 +20,7 @@ datas = [
     (str(_project_root / "core" / "gen5_commands.json"), "core"),
     (str(_project_root / "core" / "linux_kealory_commands.json"), "core"),
     (str(_project_root / "core" / "command_profiles.json"), "core"),
-    (str(_project_root / "docs" / "e3_wired_cli_reference.md"), "docs"),
+    (str(_project_root / "docs" / "3_e3_wired_cli_reference.md"), "docs"),
     (str(_project_root / "assets" / "ArloShell_icon.png"), "assets"),
     (str(_project_root / "styles" / "panel.qss"), "styles"),
 ]
