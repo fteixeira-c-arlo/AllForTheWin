@@ -117,6 +117,14 @@ DEVICE_CREDENTIALS: list[CredentialRecord] = [
         "note": "ADB shell auth — Jellyfish Production",
     },
     {
+        "model_ids": ["VMC3050"],
+        "stage": "prod",
+        "transport": "adb",
+        "username": "",
+        "password": "dIuV~%7~c#I]$.f<3M>9KF22+7hMxFKF",
+        "note": "ADB (USB) shell auth — Robin 2K VMC3050 Production",
+    },
+    {
         "model_ids": ["AVD5001", "AVD6001"],
         "stage": "dev_qa",
         "transport": "uart_ssh",
